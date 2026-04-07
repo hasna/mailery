@@ -262,7 +262,16 @@ export async function syncGmailInbox(opts: ConnectorSyncOptions): Promise<GmailS
                 try {
                   const { S3Client, PutObjectCommand } = await import("@aws-sdk/client-s3");
                   const { readFileSync } = await import("node:fs");
-                  const client = new S3Client({ region: syncConfig.s3_region ?? "us-east-1" });
+                  const client = new S3Client({
+                    region: syncConfig.s3_region ?? "us-east-1",
+                    credentials: process.env["AWS_ACCESS_KEY_ID"] && process.env["AWS_SECRET_ACCESS_KEY"]
+                      ? {
+                          accessKeyId: process.env["AWS_ACCESS_KEY_ID"],
+                          secretAccessKey: process.env["AWS_SECRET_ACCESS_KEY"],
+                          ...(process.env["AWS_SESSION_TOKEN"] ? { sessionToken: process.env["AWS_SESSION_TOKEN"] } : {}),
+                        }
+                      : undefined,
+                  });
                   const key = `${syncConfig.s3_prefix ?? "emails"}/${stored.id}/${file}`;
                   await client.send(new PutObjectCommand({
                     Bucket: syncConfig.s3_bucket,
@@ -270,9 +279,10 @@ export async function syncGmailInbox(opts: ConnectorSyncOptions): Promise<GmailS
                     Body: readFileSync(filePath),
                     ContentType: meta?.content_type ?? "application/octet-stream",
                   }));
-                  paths.push({ filename: file, content_type: meta?.content_type ?? "", size: stat.size, s3_url: `s3://${syncConfig.s3_bucket}/${key}`, local_path: filePath });
+                  paths.push({ filename: file, content_type: meta?.content_type ?? "", size: stat.size, s3_url: `s3://${syncConfig.s3_bucket}/${key}` });
                 } catch (e) {
-                  result.errors.push(`S3 upload ${file}: ${String(e)}`);
+                  const detail = e instanceof Error ? (e.stack ?? e.message) : String(e);
+                  result.errors.push(`S3 upload ${file}: ${detail}`);
                   paths.push({ filename: file, content_type: meta?.content_type ?? "", size: stat.size, local_path: filePath });
                 }
               } else {

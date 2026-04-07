@@ -78,7 +78,7 @@ async function ensureS3Bucket(s3: S3Client, bucket: string, region: string): Pro
   await s3.send(new CreateBucketCommand({
     Bucket: bucket,
     ...(region !== "us-east-1" ? {
-      CreateBucketConfiguration: { LocationConstraint: region as "us-east-1" },
+      CreateBucketConfiguration: { LocationConstraint: region as never },
     } : {}),
   }));
 

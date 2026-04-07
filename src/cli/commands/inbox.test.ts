@@ -3,7 +3,9 @@
  * exercised by `emails inbox` subcommands.
  */
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-import { getDatabase, resetDatabase, closeDatabase, uuid } from "../../db/database.js";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { getDatabase, resetDatabase, closeDatabase, uuid, getDataDir } from "../../db/database.js";
 import { storeInboundEmail, listInboundEmails, getInboundEmail, getInboundCount, clearInboundEmails } from "../../db/inbound.js";
 import { getGmailSyncState, updateLastSynced, setGmailSyncState } from "../../db/gmail-sync-state.js";
 
@@ -70,12 +72,26 @@ beforeEach(() => {
   mockRun.mockReset();
   mockRun.mockImplementation(async (_n: string, args: string[]) => {
     const a = args as string[];
-    if (a.includes("list")) return { success: true, stdout: JSON.stringify(mockListMsgs.map((m) => ({ id: m.id, from: m.from ?? "a@b.com", subject: m.subject ?? "S", date: DATE }))), stderr: "", exitCode: 0 };
+    if (a.includes("messages") && a.includes("list")) {
+      return { success: true, stdout: JSON.stringify(mockListMsgs.map((m) => ({ id: m.id, from: m.from ?? "a@b.com", subject: m.subject ?? "S", date: DATE }))), stderr: "", exitCode: 0 };
+    }
     if (a.includes("read") || a.includes("get")) {
       const idx = Math.max(a.indexOf("read"), a.indexOf("get"));
       const id = a[idx + 1] ?? "x";
       const m = mockListMsgs.find((x) => x.id === id);
       return { success: true, stdout: JSON.stringify({ id, from: m?.from ?? "a@b.com", to: "me@b.com", subject: m?.subject ?? "S", date: DATE, body: "body", htmlBody: "<p>body</p>", size: 100 }), stderr: "", exitCode: 0 };
+    }
+    if (a.includes("attachments") && a.includes("list")) {
+      return { success: true, stdout: JSON.stringify([{ attachmentId: "att-1", filename: "invoice.pdf", mimeType: "application/pdf", size: 12 }]), stderr: "", exitCode: 0 };
+    }
+    if (a.includes("attachments") && a.includes("download")) {
+      const dirIndex = a.indexOf("--dir");
+      const outputDir = dirIndex >= 0 ? a[dirIndex + 1] : undefined;
+      if (outputDir) {
+        mkdirSync(outputDir, { recursive: true });
+        writeFileSync(join(outputDir, "invoice.pdf"), "pdf-data");
+      }
+      return { success: true, stdout: "", stderr: "", exitCode: 0 };
     }
     return { success: true, stdout: "[]", stderr: "", exitCode: 0 };
   });
@@ -84,6 +100,8 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  delete process.env["AWS_ACCESS_KEY_ID"];
+  delete process.env["AWS_SECRET_ACCESS_KEY"];
 });
 
 // ─── inbox list (listInboundEmails) ──────────────────────────────────────────
@@ -204,6 +222,31 @@ describe("inbox search — local filter", () => {
 // ─── inbox sync (via syncGmailInbox) ─────────────────────────────────────────
 
 describe("inbox sync — syncGmailInbox", () => {
+  it("falls back to local_path when S3 upload credentials are unavailable", async () => {
+    const { db, providerId } = setupDb();
+    process.env["HOME"] = "/home/hasna";
+    process.env["AWS_ACCESS_KEY_ID"] = "test-key";
+    process.env["AWS_SECRET_ACCESS_KEY"] = "test-secret";
+    mockListMsgs = [{ id: "gmail-att-1", subject: "Attachment Test", from: "a@test.com" }];
+
+    const result = await syncGmailInbox({ providerId, db });
+
+    expect(result.synced).toBe(1);
+    expect(result.attachments_saved).toBe(1);
+    expect(result.errors).toHaveLength(1);
+
+    const stored = listInboundEmails({ provider_id: providerId }, db);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.attachment_paths).toEqual([
+      {
+        filename: "invoice.pdf",
+        content_type: "application/pdf",
+        size: 8,
+        local_path: join(getDataDir(), "attachments", stored[0]!.id, "invoice.pdf"),
+      },
+    ]);
+  });
+
   it("syncs messages and they appear in listInboundEmails", async () => {
     const { db, providerId } = setupDb();
     mockListMsgs = [{ id: "cli-msg1", subject: "CLI Test 1", from: "a@test.com" }, { id: "cli-msg2", subject: "CLI Test 2", from: "b@test.com" }];

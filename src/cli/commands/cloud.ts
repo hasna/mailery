@@ -7,17 +7,34 @@
 
 import type { Command } from "commander";
 import chalk from "chalk";
-import { execSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { handleError } from "../utils.js";
+
+function stripCloudWarnings(text: string): string {
+  return text.split("\n")
+    .filter((l) =>
+      l.trim() &&
+      !l.includes("Warning") &&
+      !l.includes("deprecat") &&
+      !l.includes("sslmode") &&
+      !l.includes("To prepare for this change:") &&
+      !l.includes("See https://www.postgresql.org/docs/current/libpq-ssl.html") &&
+      !l.includes("pg-connection-string") &&
+      !l.includes("libpq semantics") &&
+      !l.includes("weaker security guarantees") &&
+      !l.trimStart().startsWith("at ")
+    )
+    .join("\n");
+}
 
 function runCloud(args: string[]): { stdout: string; stderr: string; status: number } {
   const result = spawnSync("cloud", args, {
     encoding: "utf-8",
-    env: { ...process.env },
+    env: { ...process.env, NODE_OPTIONS: "--no-warnings" },
   });
   return {
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
+    stdout: stripCloudWarnings(result.stdout ?? ""),
+    stderr: stripCloudWarnings(result.stderr ?? ""),
     status: result.status ?? 1,
   };
 }
@@ -63,9 +80,7 @@ export function registerCloudCommands(program: Command, output: (data: unknown, 
         const args = ["sync", "push", "--service", "emails"];
         if (opts.dryRun) args.push("--dry-run");
         const r = runCloud(args);
-        const clean = (r.stdout + r.stderr).split("\n")
-          .filter((l) => !l.includes("Warning") && !l.includes("deprecat") && !l.includes("sslmode") && l.trim())
-          .join("\n");
+        const clean = [r.stdout, r.stderr].filter(Boolean).join("\n");
         if (r.status !== 0) {
           console.error(chalk.red("Push failed:"));
           console.error(chalk.dim(clean));
@@ -85,9 +100,7 @@ export function registerCloudCommands(program: Command, output: (data: unknown, 
       try {
         console.log(chalk.dim("Pulling emails from cloud..."));
         const r = runCloud(["sync", "pull", "--service", "emails"]);
-        const clean = (r.stdout + r.stderr).split("\n")
-          .filter((l) => !l.includes("Warning") && !l.includes("deprecat") && !l.includes("sslmode") && l.trim())
-          .join("\n");
+        const clean = [r.stdout, r.stderr].filter(Boolean).join("\n");
         if (r.status !== 0) {
           console.error(chalk.red("Pull failed:"));
           console.error(chalk.dim(clean));
@@ -107,9 +120,7 @@ export function registerCloudCommands(program: Command, output: (data: unknown, 
       try {
         console.log(chalk.dim("Running emails PG migrations..."));
         const r = runCloud(["migrate-pg", "--service", "emails"]);
-        const clean = (r.stdout + r.stderr).split("\n")
-          .filter((l) => !l.includes("Warning") && !l.includes("deprecat") && !l.includes("sslmode") && l.trim())
-          .join("\n");
+        const clean = [r.stdout, r.stderr].filter(Boolean).join("\n");
         if (r.status !== 0) {
           console.error(chalk.red("Migration failed:"));
           console.error(chalk.dim(clean));
@@ -136,9 +147,7 @@ export function registerCloudCommands(program: Command, output: (data: unknown, 
         if (opts.ssl) args.push("--ssl");
         args.push("--mode", "hybrid", "--migrate");
         const r = runCloud(args);
-        const clean = (r.stdout + r.stderr).split("\n")
-          .filter((l) => !l.includes("Warning") && !l.includes("deprecat") && l.trim())
-          .join("\n");
+        const clean = [r.stdout, r.stderr].filter(Boolean).join("\n");
         console.log(clean);
         if (r.status !== 0) process.exit(1);
       } catch (e) { handleError(e); }

@@ -189,7 +189,7 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
         cc_addresses: ccAddrs,
         subject: parsed.subject ?? "(no subject)",
         text_body: parsed.text ?? null,
-        html_body: parsed.html ?? null,
+        html_body: typeof parsed.html === "string" ? parsed.html : null,
         attachments: attachmentMeta,
         attachment_paths: [],
         headers: Object.fromEntries(

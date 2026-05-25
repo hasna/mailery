@@ -1,9 +1,11 @@
 import {
   CopyObjectCommand,
+  GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
+  type PutObjectCommandInput,
 } from "@aws-sdk/client-s3";
 
 export interface GmailArchiveKeyInput {
@@ -95,6 +97,8 @@ export interface S3PrefixMigrationInput {
   limit?: number;
   dryRun?: boolean;
   client?: S3Like;
+  sourceClient?: S3Like;
+  targetClient?: S3Like;
 }
 
 export interface S3PrefixMigrationResult {
@@ -215,6 +219,9 @@ export async function verifyGmailArchive(input: GmailArchiveVerifyInput): Promis
 
 export async function migrateS3Prefix(input: S3PrefixMigrationInput): Promise<S3PrefixMigrationResult> {
   const client = input.client ?? new S3Client({ region: input.region ?? "us-east-1" });
+  const sourceClient = input.sourceClient ?? client;
+  const targetClient = input.targetClient ?? client;
+  const canUseServerSideCopy = sourceClient === targetClient;
   const sourcePrefix = input.sourcePrefix ?? "";
   const targetPrefix = (input.targetPrefix ?? "").replace(/^\/+|\/+$/g, "");
   const migrated: Array<{ source: string; target: string }> = [];
@@ -224,7 +231,7 @@ export async function migrateS3Prefix(input: S3PrefixMigrationInput): Promise<S3
   do {
     const remaining = input.limit ? input.limit - migrated.length : undefined;
     if (remaining !== undefined && remaining <= 0) break;
-    const listed = await client.send(new ListObjectsV2Command({
+    const listed = await sourceClient.send(new ListObjectsV2Command({
       Bucket: input.sourceBucket,
       Prefix: sourcePrefix,
       MaxKeys: remaining !== undefined ? Math.min(remaining, 1000) : undefined,
@@ -238,11 +245,24 @@ export async function migrateS3Prefix(input: S3PrefixMigrationInput): Promise<S3
       const target = targetPrefix ? `${targetPrefix}/${relative}` : relative;
       migrated.push({ source: object.Key, target });
       if (!input.dryRun) {
-        await client.send(new CopyObjectCommand({
-          Bucket: input.targetBucket,
-          Key: target,
-          CopySource: `${input.sourceBucket}/${encodeS3CopySourceKey(object.Key)}`,
-        }));
+        if (canUseServerSideCopy) {
+          await targetClient.send(new CopyObjectCommand({
+            Bucket: input.targetBucket,
+            Key: target,
+            CopySource: `${input.sourceBucket}/${encodeS3CopySourceKey(object.Key)}`,
+          }));
+        } else {
+          const source = await sourceClient.send(new GetObjectCommand({
+            Bucket: input.sourceBucket,
+            Key: object.Key,
+          })) as { Body?: unknown; ContentType?: string };
+          await targetClient.send(new PutObjectCommand({
+            Bucket: input.targetBucket,
+            Key: target,
+            Body: source.Body as PutObjectCommandInput["Body"],
+            ContentType: source.ContentType,
+          }));
+        }
       }
     }
     continuationToken = listed.NextContinuationToken;

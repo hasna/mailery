@@ -119,4 +119,39 @@ describe("Gmail archive S3 helpers", () => {
     ]);
     expect(listTokens).toEqual([undefined, "next-page"]);
   });
+
+  it("streams objects through separate source and target clients", async () => {
+    const sourceCalls: string[] = [];
+    const targetCalls: Array<{ key?: string; body?: unknown; copySource?: string }> = [];
+    const result = await migrateS3Prefix({
+      sourceBucket: "hasna-mail-maximstaris",
+      targetBucket: "prod-emails",
+      sourcePrefix: "emails/",
+      targetPrefix: "legacy/maximstaris",
+      sourceClient: {
+        send: async (command) => {
+          const input = (command as { input?: { Key?: string; Prefix?: string } }).input;
+          if (input?.Key) {
+            sourceCalls.push(`get:${input.Key}`);
+            return { Body: Buffer.from("raw-eml"), ContentType: "message/rfc822" };
+          }
+          sourceCalls.push(`list:${input?.Prefix}`);
+          return { Contents: [{ Key: "emails/a.eml" }], IsTruncated: false };
+        },
+      },
+      targetClient: {
+        send: async (command) => {
+          const input = (command as { input?: { Key?: string; Body?: unknown; CopySource?: string } }).input;
+          targetCalls.push({ key: input?.Key, body: input?.Body, copySource: input?.CopySource });
+          return {};
+        },
+      },
+    });
+
+    expect(result).toMatchObject({ scanned: 1, copied: 1 });
+    expect(sourceCalls).toEqual(["list:emails/", "get:emails/a.eml"]);
+    expect(targetCalls).toEqual([
+      { key: "legacy/maximstaris/a.eml", body: Buffer.from("raw-eml"), copySource: undefined },
+    ]);
+  });
 });

@@ -92,6 +92,26 @@ emails inbox archive-migrate \
   --target-prefix legacy/maximstaris
 ```
 
+If the legacy bucket and `prod-emails` require different AWS identities, pass
+both profiles. The command will read from the source profile and stream objects
+into the target profile instead of using S3 server-side copy:
+
+```bash
+emails inbox archive-migrate \
+  --source-aws-profile hasna \
+  --target-aws-profile <profile-with-prod-emails-write-access> \
+  --source-bucket hasna-mail-maximstaris \
+  --target-bucket prod-emails \
+  --source-prefix "" \
+  --target-prefix legacy/maximstaris \
+  --region us-east-1 \
+  --target-region us-west-2
+```
+
+The target profile must be able to `s3:PutObject` and multipart upload into
+`arn:aws:s3:::prod-emails/legacy/maximstaris/*`. The source profile must be
+able to `s3:ListBucket` and `s3:GetObject` on the legacy bucket.
+
 After migration, compare object counts in AWS:
 
 ```bash

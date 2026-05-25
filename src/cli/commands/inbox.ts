@@ -1,5 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
+import { fromIni } from "@aws-sdk/credential-provider-ini";
+import { S3Client } from "@aws-sdk/client-s3";
 import { runConnectorOperation } from "@hasna/connectors";
 import { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory, listGmailConnectorProfiles, listGmailLabels } from "../../lib/gmail-sync.js";
 import { listInboundEmails, getInboundEmail, deleteInboundEmail, clearInboundEmails, getInboundCount } from "../../db/inbound.js";
@@ -525,7 +527,10 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--source-prefix <prefix>", "Source key prefix", "")
     .option("--target-prefix <prefix>", "Target key prefix", "legacy/maximstaris")
     .option("--region <region>", "AWS region", "us-east-1")
+    .option("--target-region <region>", "Target AWS region")
     .option("--aws-profile <profile>", "AWS profile")
+    .option("--source-aws-profile <profile>", "AWS profile for reading the source bucket")
+    .option("--target-aws-profile <profile>", "AWS profile for writing the target bucket")
     .option("--limit <n>", "Maximum objects to scan in this run")
     .option("--dry-run", "Plan copies without writing to target")
     .action(async (opts: {
@@ -534,19 +539,32 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       sourcePrefix?: string;
       targetPrefix?: string;
       region: string;
+      targetRegion?: string;
       awsProfile?: string;
+      sourceAwsProfile?: string;
+      targetAwsProfile?: string;
       limit?: string;
       dryRun?: boolean;
     }) => {
       try {
         if (opts.awsProfile) process.env["AWS_PROFILE"] = opts.awsProfile;
         const { migrateS3Prefix } = await import("../../lib/gmail-archive.js");
+        const sourceProfile = opts.sourceAwsProfile ?? opts.awsProfile;
+        const targetProfile = opts.targetAwsProfile ?? opts.awsProfile;
+        const sourceClient = sourceProfile
+          ? new S3Client({ region: opts.region, credentials: fromIni({ profile: sourceProfile }) })
+          : undefined;
+        const targetClient = targetProfile
+          ? new S3Client({ region: opts.targetRegion ?? opts.region, credentials: fromIni({ profile: targetProfile }) })
+          : undefined;
         const result = await migrateS3Prefix({
           sourceBucket: opts.sourceBucket,
           targetBucket: opts.targetBucket,
           sourcePrefix: opts.sourcePrefix,
           targetPrefix: opts.targetPrefix,
           region: opts.region,
+          sourceClient,
+          targetClient,
           limit: opts.limit ? parseInt(opts.limit, 10) : undefined,
           dryRun: opts.dryRun,
         });

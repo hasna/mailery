@@ -49,6 +49,7 @@
     "@aws-sdk/client-s3": "^3.1020.0",
     "@aws-sdk/client-ses": "^3.1020.0",
     "@aws-sdk/client-sesv2": "^3.0.0",
+    "@aws-sdk/credential-provider-ini": "^3.972.27",
     "@hasna/cloud": "^0.1.24",
     "@hasna/connect-cloudflare": "../open-connectors/connectors/connect-cloudflare",
     "@hasna/connectors": "^1.3.3",

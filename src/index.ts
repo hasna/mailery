@@ -117,6 +117,14 @@ export { loadConfig, saveConfig, getConfigValue, setConfigValue, getDefaultProvi
 export { checkProviderHealth, checkAllProviders, formatProviderHealth } from "./lib/health.js";
 export { log, setLogLevel } from "./lib/logger.js";
 export { colorStatus, colorDnsStatus, truncate, formatDate } from "./lib/format.js";
+export {
+  buildGmailArchiveKeys,
+  uploadGmailArchive,
+  uploadGmailArchiveAttachment,
+  uploadGmailArchiveManifest,
+  verifyGmailArchive,
+  migrateS3Prefix,
+} from "./lib/gmail-archive.js";
 
 // New modules (v0.4.x)
 export { sendWithFailover } from "./lib/send.js";

@@ -471,6 +471,85 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       } catch (e) { handleError(e); }
     });
 
+  inboxCmd
+    .command("archive-verify")
+    .description("Verify a Gmail message archive in S3")
+    .requiredOption("--bucket <name>", "Archive bucket name", "prod-emails")
+    .requiredOption("--profile <profile>", "Gmail connector profile")
+    .requiredOption("--message-id <id>", "Gmail message ID")
+    .option("--prefix <prefix>", "Archive prefix", "gmail")
+    .option("--region <region>", "AWS region", "us-east-1")
+    .option("--aws-profile <profile>", "AWS profile")
+    .option("--attachment <filename...>", "Expected attachment filename(s)")
+    .option("--no-raw", "Do not require the raw MIME object")
+    .action(async (opts: {
+      bucket: string;
+      profile: string;
+      messageId: string;
+      prefix: string;
+      region: string;
+      awsProfile?: string;
+      attachment?: string[];
+      raw: boolean;
+    }) => {
+      try {
+        if (opts.awsProfile) process.env["AWS_PROFILE"] = opts.awsProfile;
+        const { verifyGmailArchive } = await import("../../lib/gmail-archive.js");
+        const result = await verifyGmailArchive({
+          bucket: opts.bucket,
+          profile: opts.profile,
+          messageId: opts.messageId,
+          prefix: opts.prefix,
+          region: opts.region,
+          expectedAttachments: opts.attachment ?? [],
+          requireRaw: opts.raw !== false,
+        });
+        output(result, formatArchiveVerifyResult(result));
+        if (!result.ok) process.exitCode = 1;
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  inboxCmd
+    .command("archive-migrate")
+    .description("Copy a legacy Gmail-to-S3 bucket/prefix into prod-emails")
+    .requiredOption("--source-bucket <name>", "Legacy source bucket, e.g. hasna-mail-maximstaris")
+    .option("--target-bucket <name>", "Target archive bucket", "prod-emails")
+    .option("--source-prefix <prefix>", "Source key prefix", "")
+    .option("--target-prefix <prefix>", "Target key prefix", "legacy/maximstaris")
+    .option("--region <region>", "AWS region", "us-east-1")
+    .option("--aws-profile <profile>", "AWS profile")
+    .option("--limit <n>", "Maximum objects to scan in this run")
+    .option("--dry-run", "Plan copies without writing to target")
+    .action(async (opts: {
+      sourceBucket: string;
+      targetBucket: string;
+      sourcePrefix?: string;
+      targetPrefix?: string;
+      region: string;
+      awsProfile?: string;
+      limit?: string;
+      dryRun?: boolean;
+    }) => {
+      try {
+        if (opts.awsProfile) process.env["AWS_PROFILE"] = opts.awsProfile;
+        const { migrateS3Prefix } = await import("../../lib/gmail-archive.js");
+        const result = await migrateS3Prefix({
+          sourceBucket: opts.sourceBucket,
+          targetBucket: opts.targetBucket,
+          sourcePrefix: opts.sourcePrefix,
+          targetPrefix: opts.targetPrefix,
+          region: opts.region,
+          limit: opts.limit ? parseInt(opts.limit, 10) : undefined,
+          dryRun: opts.dryRun,
+        });
+        output(result, formatArchiveMigrationResult(result));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
   // ─── LISTEN (SMTP) ────────────────────────────────────────────────────────
   inboxCmd
     .command("listen")
@@ -578,6 +657,33 @@ function formatRemoteResults(
       `  ${chalk.dim(r.id.slice(0, 16))}  ${chalk.cyan(r.from.slice(0, 28).padEnd(28))}  ${r.subject.slice(0, 50)}`,
     );
   }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function formatArchiveVerifyResult(result: { ok: boolean; checked: string[]; missing: string[]; bucket: string; profile: string; messageId: string }): string {
+  const lines = [chalk.bold("\nArchive verification:")];
+  lines.push(`  Bucket:  ${chalk.cyan(result.bucket)}`);
+  lines.push(`  Profile: ${chalk.cyan(result.profile)}`);
+  lines.push(`  Message: ${chalk.cyan(result.messageId)}`);
+  lines.push(`  Status:  ${result.ok ? chalk.green("ok") : chalk.red("missing objects")}`);
+  lines.push(`  Checked: ${String(result.checked.length)}`);
+  if (result.missing.length > 0) {
+    lines.push("  Missing:");
+    for (const key of result.missing) lines.push(`    ${chalk.red(key)}`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function formatArchiveMigrationResult(result: { scanned: number; copied: number; dryRun: boolean; objects: Array<{ source: string; target: string }>; nextContinuationToken?: string }): string {
+  const lines = [chalk.bold("\nArchive migration:")];
+  lines.push(`  Mode:    ${result.dryRun ? chalk.yellow("dry run") : chalk.green("copy")}`);
+  lines.push(`  Scanned: ${String(result.scanned)}`);
+  lines.push(`  Copied:  ${String(result.copied)}`);
+  for (const obj of result.objects.slice(0, 10)) lines.push(`  ${chalk.dim(obj.source)} -> ${chalk.cyan(obj.target)}`);
+  if (result.objects.length > 10) lines.push(chalk.dim(`  ... ${result.objects.length - 10} more`));
+  if (result.nextContinuationToken) lines.push(chalk.dim("  More objects are available; rerun with a larger limit or continuation support."));
   lines.push("");
   return lines.join("\n");
 }

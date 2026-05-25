@@ -15,12 +15,12 @@
 
 import { runConnectorOperation } from "@hasna/connectors";
 import { join } from "node:path";
-import { mkdirSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { storeInboundEmail, updateAttachmentPaths, listInboundEmails } from "../db/inbound.js";
 import type { AttachmentPath } from "../db/inbound.js";
 import { getDatabase, getDataDir } from "../db/database.js";
 import { getGmailSyncConfig } from "./config.js";
-import { uploadGmailArchive } from "./gmail-archive.js";
+import { uploadGmailArchive, uploadGmailArchiveAttachment, uploadGmailArchiveManifest } from "./gmail-archive.js";
 import type { Database } from "../db/database.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -322,6 +322,7 @@ export async function syncGmailInbox(opts: ConnectorSyncOptions): Promise<GmailS
       result.synced++;
 
       // Download attachments
+      let manifestUploaded = false;
       if (downloadAttachments && attachmentList.length > 0 && syncConfig.attachment_storage !== "none") {
         const outputDir = getAttachmentDir(stored.id);
         const dlResult = await runGmailOperation(
@@ -340,10 +341,27 @@ export async function syncGmailInbox(opts: ConnectorSyncOptions): Promise<GmailS
               const stat = statSync(filePath);
               const meta = attachmentMeta.find((a) => a.filename === file);
 
-              if (syncConfig.attachment_storage === "s3" && syncConfig.s3_bucket) {
+              if (archiveBucket) {
+                try {
+                  const uploaded = await uploadGmailArchiveAttachment({
+                    bucket: archiveBucket,
+                    region: syncConfig.s3_region,
+                    prefix: syncConfig.archive_s3_prefix,
+                    profile: opts.profile ?? opts.providerId,
+                    messageId: msgRef.id,
+                    filename: file,
+                    body: readFileSync(filePath),
+                    contentType: meta?.content_type ?? "application/octet-stream",
+                  });
+                  paths.push({ filename: file, content_type: meta?.content_type ?? "", size: stat.size, s3_url: uploaded.s3_url });
+                } catch (e) {
+                  const detail = e instanceof Error ? (e.stack ?? e.message) : String(e);
+                  result.errors.push(`Archive attachment upload ${file}: ${detail}`);
+                  paths.push({ filename: file, content_type: meta?.content_type ?? "", size: stat.size, local_path: filePath });
+                }
+              } else if (syncConfig.attachment_storage === "s3" && syncConfig.s3_bucket) {
                 try {
                   const { S3Client, PutObjectCommand } = await import("@aws-sdk/client-s3");
-                  const { readFileSync } = await import("node:fs");
                   const client = new S3Client({
                     region: syncConfig.s3_region ?? "us-east-1",
                     credentials: process.env["AWS_ACCESS_KEY_ID"] && process.env["AWS_SECRET_ACCESS_KEY"]
@@ -375,6 +393,60 @@ export async function syncGmailInbox(opts: ConnectorSyncOptions): Promise<GmailS
           } catch { /* scan failed — non-fatal */ }
 
           if (paths.length > 0) updateAttachmentPaths(stored.id, paths, db);
+
+          if (archiveBucket && metadataS3Url) {
+            try {
+              await uploadGmailArchiveManifest({
+                bucket: archiveBucket,
+                region: syncConfig.s3_region,
+                prefix: syncConfig.archive_s3_prefix,
+                profile: opts.profile ?? opts.providerId,
+                messageId: msgRef.id,
+                manifest: {
+                  profile: opts.profile ?? opts.providerId,
+                  message_id: msgRef.id,
+                  ...(rawS3Url ? { raw_s3_url: rawS3Url } : {}),
+                  metadata_s3_url: metadataS3Url,
+                  attachments: paths
+                    .filter((path) => path.s3_url)
+                    .map((path) => ({
+                      filename: path.filename,
+                      s3_url: path.s3_url!,
+                      content_type: path.content_type,
+                      size: path.size,
+                    })),
+                  archived_at: new Date().toISOString(),
+                },
+              });
+              manifestUploaded = true;
+            } catch (e) {
+              const detail = e instanceof Error ? (e.stack ?? e.message) : String(e);
+              result.errors.push(`Archive manifest upload ${msgRef.id}: ${detail}`);
+            }
+          }
+        }
+      }
+
+      if (archiveBucket && metadataS3Url && !manifestUploaded) {
+        try {
+          await uploadGmailArchiveManifest({
+            bucket: archiveBucket,
+            region: syncConfig.s3_region,
+            prefix: syncConfig.archive_s3_prefix,
+            profile: opts.profile ?? opts.providerId,
+            messageId: msgRef.id,
+            manifest: {
+              profile: opts.profile ?? opts.providerId,
+              message_id: msgRef.id,
+              ...(rawS3Url ? { raw_s3_url: rawS3Url } : {}),
+              metadata_s3_url: metadataS3Url,
+              attachments: [],
+              archived_at: new Date().toISOString(),
+            },
+          });
+        } catch (e) {
+          const detail = e instanceof Error ? (e.stack ?? e.message) : String(e);
+          result.errors.push(`Archive manifest upload ${msgRef.id}: ${detail}`);
         }
       }
     } catch (e) {

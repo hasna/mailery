@@ -11,7 +11,7 @@
  *   - MX          (optional, for receiving email)
  */
 
-import { Cloudflare } from "@hasna/connect-cloudflare";
+import { Cloudflare, type CloudflareDnsRecord } from "@hasna/connect-cloudflare";
 import type { DnsRecord } from "../types/index.js";
 import type { Provider } from "../types/index.js";
 import { getAdapter } from "../providers/index.js";
@@ -110,7 +110,7 @@ export async function upsertEmailDnsRecords(
 
     // Check for existing record with same type + name
     const alreadyExists = existing.some(
-      (e) =>
+      (e: CloudflareDnsRecord) =>
         e.type === record.type &&
         e.name === record.name &&
         e.content.replace(/^"|"$/g, "") === normalizedContent,
@@ -157,7 +157,7 @@ export async function addMxRecord(
   // Check if MX already exists
   const existingRes = await cf.dns.list(zoneId, { type: "MX", name: domain });
   const existing = existingRes.result ?? [];
-  const alreadyExists = existing.some((e) => e.content === mailserver);
+  const alreadyExists = existing.some((e: { content: string }) => e.content === mailserver);
   if (alreadyExists) {
     return { type: "MX", name: domain, content: mailserver, status: "skipped" };
   }

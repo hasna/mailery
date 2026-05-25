@@ -50,7 +50,7 @@
     "@aws-sdk/client-ses": "^3.1020.0",
     "@aws-sdk/client-sesv2": "^3.0.0",
     "@hasna/cloud": "^0.1.24",
-    "@hasna/connect-cloudflare": "/home/hasna/workspace/hasna/opensource/opensourcedev/open-connectors/connectors/connect-cloudflare",
+    "@hasna/connect-cloudflare": "../open-connectors/connectors/connect-cloudflare",
     "@hasna/connectors": "^1.3.3",
     "@hasna/domains": "^0.0.3",
     "@modelcontextprotocol/sdk": "^1.12.1",

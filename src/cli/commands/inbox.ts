@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { runConnectorOperation } from "@hasna/connectors";
-import { syncGmailInbox, listGmailConnectorProfiles, listGmailLabels } from "../../lib/gmail-sync.js";
+import { syncGmailInbox, syncGmailInboxAll, listGmailConnectorProfiles, listGmailLabels } from "../../lib/gmail-sync.js";
 import { listInboundEmails, getInboundEmail, deleteInboundEmail, clearInboundEmails, getInboundCount } from "../../db/inbound.js";
 import { getGmailSyncState, updateLastSynced } from "../../db/gmail-sync-state.js";
 import { createProvider, listProviders } from "../../db/providers.js";
@@ -53,7 +53,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           const aggregate = { synced: 0, skipped: 0, attachments_saved: 0, errors: [] as string[], done: true };
           for (const profile of profiles) {
             const providerId = ensureGmailProviderForProfile(profile);
-            const page = await syncGmailInbox({
+            const syncOptions = {
               providerId,
               profile,
               labelFilter: opts.label,
@@ -63,7 +63,10 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
               archiveS3Bucket: archiveBucket,
               downloadAttachments: opts.attachments !== false,
               db,
-            });
+            };
+            const page = opts.all
+              ? await syncGmailInboxAll(syncOptions)
+              : await syncGmailInbox(syncOptions);
             updateLastSynced(providerId, undefined, db);
             aggregate.synced += page.synced;
             aggregate.skipped += page.skipped;

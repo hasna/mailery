@@ -52,7 +52,7 @@
     "@aws-sdk/credential-provider-ini": "^3.972.27",
     "@hasna/cloud": "^0.1.24",
     "@hasna/connect-cloudflare": "../open-connectors/connectors/connect-cloudflare",
-    "@hasna/connectors": "^1.3.3",
+    "@hasna/connectors": "^1.3.26",
     "@hasna/domains": "^0.0.3",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",

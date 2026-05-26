@@ -259,7 +259,7 @@ export async function migrateS3Prefix(input: S3PrefixMigrationInput): Promise<S3
           await targetClient.send(new PutObjectCommand({
             Bucket: input.targetBucket,
             Key: target,
-            Body: source.Body as PutObjectCommandInput["Body"],
+            Body: await materializeS3Body(source.Body),
             ContentType: source.ContentType,
           }));
         }
@@ -280,4 +280,22 @@ export async function migrateS3Prefix(input: S3PrefixMigrationInput): Promise<S3
 
 function encodeS3CopySourceKey(key: string): string {
   return key.split("/").map(encodeURIComponent).join("/");
+}
+
+async function materializeS3Body(body: unknown): Promise<PutObjectCommandInput["Body"]> {
+  if (body == null) return undefined;
+  if (typeof body === "string" || body instanceof Uint8Array || body instanceof ArrayBuffer) {
+    return body as PutObjectCommandInput["Body"];
+  }
+  if (typeof (body as { transformToByteArray?: unknown }).transformToByteArray === "function") {
+    return Buffer.from(await (body as { transformToByteArray(): Promise<Uint8Array> }).transformToByteArray());
+  }
+  if (Symbol.asyncIterator in Object(body)) {
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of body as AsyncIterable<Uint8Array | Buffer | string>) {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    }
+    return Buffer.concat(chunks);
+  }
+  return body as PutObjectCommandInput["Body"];
 }

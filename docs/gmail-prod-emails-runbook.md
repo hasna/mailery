@@ -29,7 +29,7 @@ the raw MIME object, metadata object, and any archived attachments.
 Use an explicit AWS profile for production runs:
 
 ```bash
-AWS_PROFILE=hasna emails inbox sync \
+AWS_PROFILE=hasna-xyz-infra AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2 emails inbox sync \
   --all-profiles \
   --all \
   --archive-s3 hasna-xyz-prod-emails \
@@ -45,7 +45,7 @@ This discovers Gmail connector profiles via `connectors` and creates one active
 Run the same command without `--all` for normal scheduled batches:
 
 ```bash
-AWS_PROFILE=hasna emails inbox sync \
+AWS_PROFILE=hasna-xyz-infra AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2 emails inbox sync \
   --all-profiles \
   --history \
   --archive-s3 hasna-xyz-prod-emails \
@@ -63,9 +63,9 @@ provider/message ID.
 
 ```bash
 emails inbox archive-verify \
-  --aws-profile hasna \
+  --aws-profile hasna-xyz-infra \
   --bucket hasna-xyz-prod-emails \
-  --profile maximstaris \
+  --profile andreihasnacom \
   --message-id <gmail-message-id> \
   --attachment invoice.pdf
 ```
@@ -75,32 +75,26 @@ objects. It exits non-zero when required objects are missing.
 
 ## Migrate the Legacy Maxim Bucket
 
+The legacy `hasna-mail-maximstaris` bucket is in the main `hasna` account, while
+`hasna-xyz-prod-emails` is in `hasna-xyz-infra`. Run the migration with explicit
+source and target profiles so objects are streamed into the target account.
+
 First run a dry run:
 
 ```bash
 emails inbox archive-migrate \
-  --aws-profile hasna \
+  --source-aws-profile hasna \
+  --target-aws-profile hasna-xyz-infra \
   --source-bucket hasna-mail-maximstaris \
   --target-bucket hasna-xyz-prod-emails \
   --source-prefix "" \
   --target-prefix legacy/maximstaris \
+  --region us-east-1 \
+  --target-region us-west-2 \
   --dry-run
 ```
 
 Then run the copy:
-
-```bash
-emails inbox archive-migrate \
-  --aws-profile hasna \
-  --source-bucket hasna-mail-maximstaris \
-  --target-bucket hasna-xyz-prod-emails \
-  --source-prefix "" \
-  --target-prefix legacy/maximstaris
-```
-
-If the legacy bucket and production archive bucket require different AWS
-identities, pass both profiles. The command will read from the source profile
-and stream objects into the target profile instead of using S3 server-side copy:
 
 ```bash
 emails inbox archive-migrate \
@@ -122,7 +116,7 @@ After migration, compare object counts in AWS:
 
 ```bash
 aws s3 ls s3://hasna-mail-maximstaris --recursive --profile hasna | wc -l
-aws s3 ls s3://hasna-xyz-prod-emails/legacy/maximstaris --recursive --profile hasna | wc -l
+aws s3 ls s3://hasna-xyz-prod-emails/legacy/maximstaris --recursive --profile hasna-xyz-infra --region us-west-2 | wc -l
 ```
 
 ## Operational Checks

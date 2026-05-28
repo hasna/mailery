@@ -5,7 +5,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import pkg from "../../package.json" with { type: "json" };
 import { buildServer } from "./server.js";
-import { isHttpMode, resolveHttpPort, startHttpServer } from "./http.js";
+import { isStdioMode, resolveHttpPort, startHttpServer } from "./http.js";
 
 function printHelp(): void {
   console.log(`Usage: emails-mcp [options]
@@ -35,15 +35,15 @@ if (args.includes("--version") || args.includes("-V")) {
 }
 
 async function main(): Promise<void> {
-  if (isHttpMode(args)) {
-    startHttpServer({ port: resolveHttpPort(args) });
-    await new Promise<never>(() => {});
+  if (isStdioMode(args)) {
+    const server = buildServer();
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
     return;
   }
-
-  const server = buildServer();
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  // Default: shared Streamable HTTP server (one process per MCP, many agents).
+  startHttpServer({ port: resolveHttpPort(args) });
+  await new Promise<never>(() => {});
 }
 
 main().catch((err) => {

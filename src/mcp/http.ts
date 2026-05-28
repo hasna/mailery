@@ -7,6 +7,10 @@ export function isHttpMode(argv: string[] = process.argv.slice(2)): boolean {
   return argv.includes("--http") || process.env["MCP_HTTP"] === "1";
 }
 
+export function isStdioMode(argv: string[] = process.argv.slice(2)): boolean {
+  return argv.includes("--stdio") || process.env["MCP_STDIO"] === "1";
+}
+
 export function resolveHttpPort(argv: string[] = process.argv.slice(2)): number {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];

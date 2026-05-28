@@ -12,7 +12,7 @@ import { registerInfrastructureTools } from "./tools/infrastructure.js";
 import pkg from "../../package.json" with { type: "json" };
 
 export const MCP_NAME = "emails";
-export const DEFAULT_MCP_HTTP_PORT = 8816;
+export const DEFAULT_MCP_HTTP_PORT = 8861;
 
 export interface EmailAgent {
   id: string;

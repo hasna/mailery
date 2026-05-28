@@ -56,7 +56,7 @@ describe("emails-mcp HTTP transport", () => {
   });
 
   it("uses the assigned default port constant", () => {
-    expect(DEFAULT_MCP_HTTP_PORT).toBe(8816);
+    expect(DEFAULT_MCP_HTTP_PORT).toBe(8861);
   });
 });
 

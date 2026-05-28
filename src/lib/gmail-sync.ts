@@ -238,14 +238,6 @@ function collectAttachmentsFromPayload(part: GmailMessagePart | undefined, attac
   return attachments;
 }
 
-function rawSize(raw: string): number {
-  try {
-    return Buffer.from(raw, "base64url").length;
-  } catch {
-    return 0;
-  }
-}
-
 function rawReceivedAt(detail: GmailMessageDetail, parsedDate: Date | undefined): string {
   if (parsedDate && !isNaN(parsedDate.getTime())) return parsedDate.toISOString();
   if (detail.internalDate && /^\d+$/.test(detail.internalDate)) {
@@ -253,6 +245,12 @@ function rawReceivedAt(detail: GmailMessageDetail, parsedDate: Date | undefined)
     if (!isNaN(date.getTime())) return date.toISOString();
   }
   return parseDate(detail.date ?? "");
+}
+
+function parsedAddressText(value: { text?: string } | Array<{ text?: string }> | undefined): string {
+  if (!value) return "";
+  if (Array.isArray(value)) return value.map((entry) => entry.text).filter(Boolean).join(", ");
+  return value.text ?? "";
 }
 
 async function parseRawGmailMessage(detail: GmailMessageDetail): Promise<ParsedRawMessage | null> {
@@ -272,9 +270,9 @@ async function parseRawGmailMessage(detail: GmailMessageDetail): Promise<ParsedR
   return {
     detail: {
       ...detail,
-      from: detail.from ?? parsed.from?.text ?? "",
-      to: detail.to ?? parsed.to?.text ?? "",
-      cc: detail.cc ?? parsed.cc?.text ?? "",
+      from: detail.from ?? parsedAddressText(parsed.from),
+      to: detail.to ?? parsedAddressText(parsed.to),
+      cc: detail.cc ?? parsedAddressText(parsed.cc),
       subject: detail.subject ?? parsed.subject ?? "(no subject)",
       date: detail.date ?? parsed.date?.toUTCString(),
       size: detail.size ?? rawBuffer.length,

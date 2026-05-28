@@ -80,7 +80,7 @@ function setMock(
         return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
       }
       // Return text body
-      const data = JSON.parse(makeReadOutput({ id, from: msg?.from, subject: msg?.subject, body: msg?.body }));
+      const data = JSON.parse(makeReadOutput({ id, from: msg?.from, subject: msg?.subject, body: msg?.body, htmlBody: msg?.htmlBody }));
       return { connector: "gmail", operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
     }
     if (operation === "messages.list") {
@@ -126,6 +126,54 @@ describe("syncGmailInbox", () => {
     const row = db.query("SELECT text_body, html_body FROM inbound_emails WHERE message_id = 'msg1'").get() as { text_body: string; html_body: string } | null;
     expect(row!.text_body).toBe("plain text");
     expect(row!.html_body).toBe("<b>html</b>");
+  });
+
+  it("uses the first full message payload for body and attachment metadata", async () => {
+    const { db, providerId } = setupDb();
+    mockRun.mockImplementation(async (operationArgs: {
+      operation: string;
+      input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
+    }) => {
+      if (operationArgs.operation === "messages.list") {
+        const data = JSON.parse(makeListOutput([{ id: "msg1" }]));
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      if (operationArgs.operation === "messages.read") {
+        const data = {
+          id: "msg1",
+          threadId: "thread-msg1",
+          labelIds: ["INBOX"],
+          historyId: "101",
+          from: "a@b.com",
+          to: "me@b.com",
+          subject: "Payload",
+          date: DATE,
+          payload: {
+            mimeType: "multipart/mixed",
+            parts: [
+              { mimeType: "text/plain", body: { data: Buffer.from("payload text").toString("base64url") } },
+              { mimeType: "text/html", body: { data: Buffer.from("<strong>payload html</strong>").toString("base64url") } },
+              { filename: "invoice.pdf", mimeType: "application/pdf", body: { attachmentId: "att1", size: 42 } },
+            ],
+          },
+        };
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
+    });
+
+    await syncGmailInbox({ providerId, db, downloadAttachments: false });
+
+    expect(mockRun.mock.calls.filter((call) => call[0]?.operation === "messages.read")).toHaveLength(1);
+    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "attachments.list")).toBe(false);
+    const row = db.query("SELECT text_body, html_body, attachments_json FROM inbound_emails WHERE message_id = 'msg1'").get() as {
+      text_body: string;
+      html_body: string;
+      attachments_json: string;
+    } | null;
+    expect(row!.text_body).toBe("payload text");
+    expect(row!.html_body).toBe("<strong>payload html</strong>");
+    expect(JSON.parse(row!.attachments_json)).toEqual([{ filename: "invoice.pdf", content_type: "application/pdf", size: 42 }]);
   });
 
   it("stores Gmail archive metadata from connector detail", async () => {

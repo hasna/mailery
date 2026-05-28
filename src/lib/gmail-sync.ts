@@ -88,15 +88,29 @@ interface GmailMessageDetail {
   labelIds?: string[];
   historyId?: string;
   internalDate?: string;
+  payload?: GmailMessagePart;
   from?: string;
   to?: string;
   cc?: string;
   subject?: string;
   date?: string;
   body?: string;
+  htmlBody?: string;
   snippet?: string;
   size?: number;
   raw?: string;
+}
+
+interface GmailMessagePart {
+  partId?: string;
+  mimeType?: string;
+  filename?: string;
+  body?: {
+    attachmentId?: string;
+    size?: number;
+    data?: string;
+  };
+  parts?: GmailMessagePart[];
 }
 
 interface GmailAttachmentMeta {
@@ -176,6 +190,38 @@ function getAttachmentDir(emailId: string): string {
   const dir = join(getDataDir(), "attachments", emailId);
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+function extractBodyFromPayload(payload: GmailMessagePart | undefined, preferHtml = false): string {
+  if (!payload) return "";
+  const targetType = preferHtml ? "text/html" : "text/plain";
+  const parts: Array<{ mimeType: string; data: string }> = [];
+  collectTextParts(payload, parts);
+  return parts.find((part) => part.mimeType === targetType)?.data
+    ?? parts.find((part) => part.mimeType.startsWith("text/"))?.data
+    ?? "";
+}
+
+function collectTextParts(part: GmailMessagePart, results: Array<{ mimeType: string; data: string }>): void {
+  const mimeType = (part.mimeType ?? "").split(";")[0]!.trim().toLowerCase();
+  if (part.body?.data && mimeType.startsWith("text/")) {
+    results.push({ mimeType, data: Buffer.from(part.body.data, "base64url").toString("utf8") });
+  }
+  for (const child of part.parts ?? []) collectTextParts(child, results);
+}
+
+function collectAttachmentsFromPayload(part: GmailMessagePart | undefined, attachments: GmailAttachmentMeta[] = []): GmailAttachmentMeta[] {
+  if (!part) return attachments;
+  if (part.body?.attachmentId && part.filename) {
+    attachments.push({
+      attachmentId: part.body.attachmentId,
+      filename: part.filename,
+      mimeType: part.mimeType ?? "application/octet-stream",
+      size: part.body.size ?? 0,
+    });
+  }
+  for (const child of part.parts ?? []) collectAttachmentsFromPayload(child, attachments);
+  return attachments;
 }
 
 // ─── Core sync ────────────────────────────────────────────────────────────────
@@ -263,33 +309,23 @@ async function syncGmailMessages(
       const detail = readTextResult.data ?? { id: msgRef.id };
       latestHistoryId = newerHistoryId(latestHistoryId, detail.historyId);
 
-      const textBody = detail.body || detail.snippet || null;
+      const textBody = detail.body || extractBodyFromPayload(detail.payload, false) || detail.snippet || null;
       const receivedAt = parseDate(detail.date ?? "");
 
-      // Fetch HTML body separately
-      let htmlBody: string | null = null;
-      if (readTextResult.success) {
-        const readHtmlResult = await runGmailOperation<GmailMessageDetail>(
-          "messages.read",
-          { args: [msgRef.id], body: true, html: true },
+      const htmlFromPayload = detail.htmlBody || extractBodyFromPayload(detail.payload, true);
+      const htmlBody = htmlFromPayload && htmlFromPayload !== textBody ? htmlFromPayload : null;
+
+      let attachmentList = collectAttachmentsFromPayload(detail.payload);
+      if (!detail.payload) {
+        const attListResult = await runGmailOperation<GmailAttachmentMeta[]>(
+          "attachments.list",
+          { args: [msgRef.id] },
           opts.profile,
         );
-        const htmlDetail = readHtmlResult.data;
-        // Only use if it differs from text (indicates actual HTML content)
-        if (htmlDetail?.body && htmlDetail.body !== textBody) {
-          htmlBody = htmlDetail.body;
-        }
+        attachmentList = attListResult.success && Array.isArray(attListResult.data)
+          ? attListResult.data
+          : [];
       }
-
-      // List attachments metadata
-      const attListResult = await runGmailOperation<GmailAttachmentMeta[]>(
-        "attachments.list",
-        { args: [msgRef.id] },
-        opts.profile,
-      );
-      const attachmentList = attListResult.success && Array.isArray(attListResult.data)
-        ? attListResult.data
-        : [];
 
       const attachmentMeta = attachmentList.map((a) => ({
         filename: a.filename,
@@ -360,13 +396,19 @@ async function syncGmailMessages(
       let manifestUploaded = false;
       if (downloadAttachments && attachmentList.length > 0 && syncConfig.attachment_storage !== "none") {
         const outputDir = getAttachmentDir(stored.id);
-        const dlResult = await runGmailOperation(
+        const downloadResults = await Promise.all(attachmentList.map((attachment) => runGmailOperation(
           "attachments.download",
-          { args: [msgRef.id], dir: outputDir },
+          {
+            args: [msgRef.id],
+            attachmentId: attachment.attachmentId,
+            filename: attachment.filename,
+            mimeType: attachment.mimeType,
+            dir: outputDir,
+          },
           opts.profile,
-        );
+        )));
 
-        if (dlResult.success) {
+        if (downloadResults.every((downloadResult) => downloadResult.success)) {
           // Scan outputDir for downloaded files
           const paths: AttachmentPath[] = [];
           try {

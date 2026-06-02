@@ -10,34 +10,21 @@
 
 import type { Database } from "./database.js";
 import { getDatabase, now, uuid } from "./database.js";
+import type { DomainState, AddressState } from "../lib/provision/state-machine.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 /** Terminal states never re-enter the daemon queue. */
 export const TERMINAL_STATES = ["ready", "failed", "none"] as const;
 
-export type DomainProvisioningStatus =
-  | "none"
-  | "requested"
-  | "purchasing"
-  | "registered"
-  | "cf_zone_creating"
-  | "ns_delegating"
-  | "ns_propagating"
-  | "ses_identity_creating"
-  | "dns_publishing"
-  | "verifying"
-  | "inbound_setup"
-  | "ready"
-  | "failed";
+/**
+ * Persisted provisioning status. The canonical state names come from the
+ * state machine (src/lib/provision/state-machine.ts); `none` is the
+ * not-yet-started default for rows that were never enrolled in provisioning.
+ */
+export type DomainProvisioningStatus = DomainState | "none";
 
-export type AddressProvisioningStatus =
-  | "none"
-  | "requested"
-  | "receive_wiring"
-  | "validating"
-  | "ready"
-  | "failed";
+export type AddressProvisioningStatus = AddressState | "none";
 
 export type ReceiveStrategy = "ses-s3" | "cf-routing" | "resend-webhook";
 

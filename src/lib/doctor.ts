@@ -85,6 +85,16 @@ export async function runDiagnostics(db?: Database): Promise<DoctorCheck[]> {
     }
   }
 
+  // 6c. Provisioning credentials (AWS / Cloudflare / Resend)
+  const { checkProvisionCredentials } = await import("./provision-creds.js");
+  for (const c of checkProvisionCredentials()) {
+    checks.push({
+      name: `Provisioning: ${c.provider}`,
+      status: c.configured ? "pass" : c.provider === "resend" ? "warn" : "fail",
+      message: c.detail,
+    });
+  }
+
   // 7. Contacts
   const contacts = listContacts(undefined, db);
   const suppressed = listContacts({ suppressed: true }, db);

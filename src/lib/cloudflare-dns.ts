@@ -15,7 +15,12 @@ import { runConnectorOperation } from "@hasna/connectors";
 import type { DnsRecord } from "../types/index.js";
 import type { Provider } from "../types/index.js";
 import { getAdapter } from "../providers/index.js";
-import { getCloudflareToken } from "./config.js";
+import { getCloudflareToken, getCloudflareAuth } from "./config.js";
+import {
+  type CloudflareAuth,
+  cloudflareAuthEnv,
+  resolveCloudflareAuth,
+} from "./cloudflare-auth.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -70,7 +75,13 @@ export interface CloudflareDnsClient {
 // ─── Cloudflare factory ───────────────────────────────────────────────────────
 
 class ConnectorsCloudflareClient implements CloudflareDnsClient {
-  constructor(private readonly apiToken?: string) {}
+  private readonly auth?: CloudflareAuth;
+
+  constructor(auth?: CloudflareAuth | string) {
+    // Back-compat: a bare string is treated as a scoped token.
+    if (typeof auth === "string") this.auth = { kind: "token", token: auth };
+    else this.auth = auth;
+  }
 
   async listZones(params?: { name?: string; page?: number; perPage?: number }): Promise<CloudflareZone[]> {
     const data = await this.run<unknown>("zones.list", {
@@ -119,8 +130,14 @@ class ConnectorsCloudflareClient implements CloudflareDnsClient {
   }
 
   private async run<T>(operation: string, input: Record<string, unknown>): Promise<T> {
-    const previousToken = process.env["CLOUDFLARE_API_KEY"];
-    if (this.apiToken) process.env["CLOUDFLARE_API_KEY"] = this.apiToken;
+    // Inject the auth env vars the Cloudflare connector expects (token or
+    // global key + email), restoring any previous values afterwards.
+    const injected = this.auth ? cloudflareAuthEnv(this.auth) : {};
+    const previous: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(injected)) {
+      previous[key] = process.env[key];
+      process.env[key] = value;
+    }
     try {
       const result = await runConnectorOperation<T>({
         connector: "cloudflare",
@@ -132,9 +149,9 @@ class ConnectorsCloudflareClient implements CloudflareDnsClient {
       }
       return result.data as T;
     } finally {
-      if (this.apiToken) {
-        if (previousToken === undefined) delete process.env["CLOUDFLARE_API_KEY"];
-        else process.env["CLOUDFLARE_API_KEY"] = previousToken;
+      for (const key of Object.keys(injected)) {
+        if (previous[key] === undefined) delete process.env[key];
+        else process.env[key] = previous[key]!;
       }
     }
   }
@@ -170,8 +187,13 @@ function unwrapRecord(data: unknown): CloudflareDnsRecord {
  * Create a Cloudflare instance from an explicit token, config file, or env var.
  */
 export function getCloudflare(apiToken?: string): CloudflareDnsClient {
-  const token = apiToken || getCloudflareToken();
-  return new ConnectorsCloudflareClient(token);
+  // Explicit token wins (back-compat). Otherwise resolve full auth — scoped
+  // token OR global key + email — from config + env + vault names.
+  if (apiToken) return new ConnectorsCloudflareClient(apiToken);
+  const auth = getCloudflareAuth() ?? resolveCloudflareAuth();
+  // Last-ditch back-compat: a bare configured token via the old accessor.
+  if (!auth) return new ConnectorsCloudflareClient(getCloudflareToken());
+  return new ConnectorsCloudflareClient(auth);
 }
 
 // ─── Zone lookup ──────────────────────────────────────────────────────────────

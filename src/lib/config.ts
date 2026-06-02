@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { getDataDir } from "../db/database.js";
+import { resolveCloudflareAuth, type CloudflareAuth } from "./cloudflare-auth.js";
 
 // Lazy getters so tests can override HOME via process.env before calling
 function getConfigDir(): string { return getDataDir(); }
@@ -67,6 +68,20 @@ export interface GmailSyncConfig {
 export function getCloudflareToken(): string | undefined {
   const fromConfig = loadConfig()["cloudflare_api_token"] as string | undefined;
   return fromConfig || process.env["CLOUDFLARE_API_TOKEN"] || undefined;
+}
+
+/**
+ * Resolve Cloudflare auth (scoped token OR global key + email) from the emails
+ * config file, standard env vars, or the HASNAXYZ vault env names. Returns
+ * undefined when nothing is configured.
+ */
+export function getCloudflareAuth(): CloudflareAuth | undefined {
+  const config = loadConfig();
+  return resolveCloudflareAuth({
+    configToken: config["cloudflare_api_token"] as string | undefined,
+    configApiKey: config["cloudflare_api_key"] as string | undefined,
+    configEmail: config["cloudflare_email"] as string | undefined,
+  });
 }
 
 export function getGmailSyncConfig(): GmailSyncConfig {

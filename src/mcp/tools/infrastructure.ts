@@ -81,7 +81,7 @@ export function registerInfrastructureTools(server: McpServer): void {
 
   server.tool(
   "setup_domain_for_email",
-  "Full setup: buy domain + create Route 53 hosted zone + register with SES + configure DKIM/SPF/DMARC DNS records. One call to go from domain name to fully configured email sending.",
+  "Full setup: buy domain (Route53) + create Cloudflare zone + delegate nameservers to Cloudflare + register with SES + publish DKIM/SPF/DMARC DNS records IN CLOUDFLARE. DNS is always managed in Cloudflare regardless of registrar. One call to go from domain name to fully configured email sending.",
   {
     domain: z.string().describe("Domain to set up"),
     provider_id: z.string().describe("SES or Resend provider ID"),
@@ -92,57 +92,63 @@ export function registerInfrastructureTools(server: McpServer): void {
       organization_name: z.string().optional(),
     }).optional().describe("Registrant contact info (omit if domain already purchased)"),
     duration_years: z.number().optional(),
+    add_mx: z.boolean().optional().describe("Also publish an inbound MX record for receiving (default false)"),
   },
-  async ({ domain, provider_id, contact, duration_years }) => {
+  async ({ domain, provider_id, contact, duration_years, add_mx }) => {
     try {
-      const { r53CheckAvailability, r53RegisterDomain, r53CreateHostedZone, r53FindHostedZoneByDomain, r53UpsertRecords } = await import("@hasna/domains");
+      const {
+        r53CheckAvailability, r53RegisterDomain, r53GetRegistrationStatus,
+        r53UpdateNameservers, cfEnsureZone, pollRegistrationUntilDone,
+      } = await import("@hasna/domains");
 
       const provider = getProvider(resolveId("providers", provider_id));
       if (!provider) throw new ProviderNotFoundError(provider_id);
 
       const steps: string[] = [];
 
-      // 1. Buy domain if contact info provided
-      let operationId: string | undefined;
+      // 1. Buy domain if contact info provided, and wait for registration.
       if (contact) {
         const avail = await r53CheckAvailability(domain);
         if (!avail.available) throw new Error(`${domain} is not available for registration`);
         steps.push(`availability: ${avail.available}, price: ${avail.price ?? "unknown"} ${avail.currency ?? ""}`);
         const reg = await r53RegisterDomain(domain, contact, duration_years ?? 1);
-        operationId = reg.operationId;
-        steps.push(`registration submitted, operation_id: ${operationId}`);
+        steps.push(`registration submitted, operation_id: ${reg.operationId}`);
+        const result = await pollRegistrationUntilDone(reg.operationId, {
+          getStatus: async (id: string) => await r53GetRegistrationStatus(id),
+        });
+        if (result.status !== "success") throw new Error(`registration ${result.status}: ${result.message ?? ""}`);
+        steps.push("registration complete");
       }
 
-      // 2. Find or create hosted zone
-      let zone = await r53FindHostedZoneByDomain(domain);
-      if (!zone) {
-        zone = await r53CreateHostedZone(domain, `Email sending for ${domain}`);
-        steps.push(`hosted zone created: ${zone.id}`);
-      } else {
-        steps.push(`using existing zone: ${zone.id}`);
+      // 2. Create/reuse the CLOUDFLARE zone and delegate the registrar NS to it.
+      //    DNS is always Cloudflare — never a Route53 hosted zone.
+      const zone = await cfEnsureZone(domain);
+      steps.push(`cloudflare zone: ${zone.id} (ns ${zone.nameservers.join(", ")})`);
+      try {
+        await r53UpdateNameservers(domain, zone.nameservers);
+        steps.push("registrar nameservers delegated to Cloudflare");
+      } catch (e) {
+        steps.push(`nameserver delegation skipped/failed (domain may be at another registrar): ${formatError(e)}`);
       }
 
-      // 3. Register with SES + get DNS records
+      // 3. Register with SES.
       const adapter = getAdapter(provider);
       await adapter.addDomain(domain);
       createDomain(resolveId("providers", provider_id), domain);
       steps.push("domain registered with SES");
 
-      // 4. Create DNS records in Route 53
-      const dnsRecords = await adapter.getDnsRecords(domain);
-      const r53Recs = dnsRecords.map((r) => ({
-        name: r.name, type: r.type, ttl: 300,
-        values: r.type === "TXT" ? [`"${r.value}"`] : [r.value],
-      }));
-      await r53UpsertRecords(zone.id, r53Recs);
-      steps.push(`${r53Recs.length} DNS records created (DKIM, SPF, DMARC)`);
+      // 4. Publish DKIM/SPF/DMARC (+ optional MX) records IN CLOUDFLARE.
+      const { setupEmailDns } = await import("../../lib/cloudflare-dns.js");
+      const dns = await setupEmailDns({ domain, provider, addMx: add_mx ?? false });
+      steps.push(`${dns.created} DNS records published to Cloudflare (${dns.skipped} skipped, ${dns.failed} failed)`);
 
       return {
         content: [{
           type: "text",
           text: JSON.stringify({
-            domain, zone_id: zone.id, operation_id: operationId ?? null,
-            steps, next: `Run verify to check DNS propagation: emails domain verify ${domain} --provider ${provider_id}`,
+            domain, cloudflare_zone_id: zone.id, nameservers: zone.nameservers,
+            dns_provider: "cloudflare",
+            steps, next: `Verify SES: emails domain verify ${domain} --provider ${provider_id}`,
           }, null, 2),
         }],
       };

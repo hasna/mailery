@@ -56,7 +56,7 @@
     "@aws-sdk/credential-provider-ini": "^3.972.27",
     "@hasna/cloud": "^0.1.24",
     "@hasna/connectors": "^1.3.30",
-    "@hasna/domains": "^0.0.3",
+    "@hasna/domains": "0.0.14",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",

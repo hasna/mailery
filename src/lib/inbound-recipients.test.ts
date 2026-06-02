@@ -16,10 +16,12 @@ function fakeClient(rule: any) {
   return {
     calls,
     client: {
+      // Distinguish by input shape (robust to constructor-name mangling from
+      // other test files' mock.module): Update carries a full Rule; Describe
+      // carries only RuleName.
       send: async (cmd: any) => {
-        const name = cmd.constructor.name;
-        if (name.includes("Describe")) return { Rule: rule };
-        if (name.includes("Update")) { calls.push(cmd.input.Rule.Recipients); rule = cmd.input.Rule; return {}; }
+        if (cmd.input?.Rule) { calls.push(cmd.input.Rule.Recipients); rule = cmd.input.Rule; return {}; }
+        if (cmd.input?.RuleName) return { Rule: rule };
         return {};
       },
     },

@@ -369,4 +369,89 @@ export function registerInfrastructureTools(server: McpServer): void {
   return { content: [{ type: "text" as const, text: JSON.stringify([...emailAgents.values()]) }] };
   });
 
+  // ─── PROVISIONING ───────────────────────────────────────────────────────────
+
+  server.tool(
+    "provision_domain",
+    "Provision a domain for sending: create the SES identity and publish DKIM/SPF/DMARC (+optional MX) DNS records in Cloudflare. DNS is always Cloudflare.",
+    {
+      domain: z.string(),
+      provider_id: z.string().describe("SES provider ID"),
+      send_provider: z.string().optional(),
+      add_mx: z.boolean().optional().describe("Also publish inbound MX (ses-s3 receive)"),
+    },
+    async ({ domain, provider_id, send_provider, add_mx }) => {
+      try {
+        const db = getDatabase();
+        const provider = getProvider(resolveId("providers", provider_id));
+        if (!provider) throw new ProviderNotFoundError(provider_id);
+        const { getDomainByName } = await import("../../db/domains.js");
+        const { setDomainProvisioning } = await import("../../db/provisioning.js");
+        const rec = getDomainByName(resolveId("providers", provider_id), domain, db) ?? createDomain(resolveId("providers", provider_id), domain, db);
+        setDomainProvisioning(rec.id, { provisioning_status: "ses_identity_created", send_provider: send_provider ?? "ses", dns_provider: "cloudflare" }, db);
+        const adapter = getAdapter(provider);
+        await adapter.addDomain(domain);
+        const { setupEmailDns } = await import("../../lib/cloudflare-dns.js");
+        const dns = await setupEmailDns({ domain, provider, addMx: !!add_mx });
+        setDomainProvisioning(rec.id, { provisioning_status: "dns_published", next_check_at: new Date().toISOString() }, db);
+        return { content: [{ type: "text" as const, text: JSON.stringify({ domain, dns_provider: "cloudflare", records_published: dns.created, dns }, null, 2) }] };
+      } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
+    },
+  );
+
+  server.tool(
+    "provision_address",
+    "Create an email address on a provisioned domain with a receive strategy (ses-s3 | cf-routing | resend-webhook).",
+    {
+      email: z.string(),
+      provider_id: z.string(),
+      receive_strategy: z.enum(["ses-s3", "cf-routing", "resend-webhook"]).optional(),
+      forward_to: z.string().optional(),
+    },
+    async ({ email, provider_id, receive_strategy, forward_to }) => {
+      try {
+        const db = getDatabase();
+        const pid = resolveId("providers", provider_id);
+        if (!getProvider(pid)) throw new ProviderNotFoundError(provider_id);
+        const { createAddress, getAddressByEmail } = await import("../../db/addresses.js");
+        const { getDomainByName } = await import("../../db/domains.js");
+        const { setAddressProvisioning } = await import("../../db/provisioning.js");
+        const addr = getAddressByEmail(pid, email, db) ?? createAddress({ provider_id: pid, email }, db);
+        const domainName = email.split("@")[1];
+        const domainId = domainName ? getDomainByName(pid, domainName, db)?.id ?? null : null;
+        setAddressProvisioning(addr.id, {
+          domain_id: domainId,
+          receive_strategy: receive_strategy ?? "ses-s3",
+          forward_to: forward_to ?? null,
+          provisioning_status: "requested",
+          next_check_at: new Date().toISOString(),
+        }, db);
+        return { content: [{ type: "text" as const, text: JSON.stringify({ email, receive_strategy: receive_strategy ?? "ses-s3", domain_id: domainId }, null, 2) }] };
+      } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
+    },
+  );
+
+  server.tool(
+    "provision_status",
+    "Show provisioning status of domains and their addresses.",
+    { domain: z.string().optional() },
+    async ({ domain }) => {
+      try {
+        const db = getDatabase();
+        const { listDomains } = await import("../../db/domains.js");
+        const { listAddresses } = await import("../../db/addresses.js");
+        const { getDomainProvisioning, getAddressProvisioning } = await import("../../db/provisioning.js");
+        const domains = listDomains(undefined, db).filter((d) => !domain || d.domain === domain);
+        const result = domains.map((d) => ({
+          domain: d.domain,
+          provisioning: getDomainProvisioning(d.id, db),
+          addresses: listAddresses(undefined, db)
+            .filter((a) => getAddressProvisioning(a.id, db)?.domain_id === d.id)
+            .map((a) => ({ email: a.email, provisioning: getAddressProvisioning(a.id, db) })),
+        }));
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
+    },
+  );
+
 }

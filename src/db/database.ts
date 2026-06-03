@@ -499,6 +499,26 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_addresses_domain ON addresses(domain_id);
   INSERT OR IGNORE INTO _migrations (id) VALUES (19);
   `,
+
+  // Migration 20: tenancy — owners (human|agent) + address ownership/administration.
+  `
+  CREATE TABLE IF NOT EXISTS owners (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL CHECK(type IN ('human','agent')),
+    name TEXT NOT NULL,
+    contact_email TEXT,
+    external_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_owners_type ON owners(type);
+  CREATE INDEX IF NOT EXISTS idx_owners_name ON owners(name);
+  ALTER TABLE addresses ADD COLUMN owner_id TEXT REFERENCES owners(id) ON DELETE SET NULL;
+  ALTER TABLE addresses ADD COLUMN administrator_id TEXT REFERENCES owners(id) ON DELETE SET NULL;
+  CREATE INDEX IF NOT EXISTS idx_addresses_owner ON addresses(owner_id);
+  CREATE INDEX IF NOT EXISTS idx_addresses_admin ON addresses(administrator_id);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (20);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -593,6 +613,22 @@ function ensureSchema(db: Database): void {
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_domains_provstatus ON domains(provisioning_status)");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_addresses_provstatus ON addresses(provisioning_status)");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_addresses_domain ON addresses(domain_id)");
+
+  // Migration 20 idempotent guarantee: owners + address ownership.
+  ensureProvTable(`CREATE TABLE IF NOT EXISTS owners (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    contact_email TEXT,
+    external_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_owners_type ON owners(type)");
+  ensureColumn("ALTER TABLE addresses ADD COLUMN owner_id TEXT REFERENCES owners(id) ON DELETE SET NULL");
+  ensureColumn("ALTER TABLE addresses ADD COLUMN administrator_id TEXT REFERENCES owners(id) ON DELETE SET NULL");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_addresses_owner ON addresses(owner_id)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_addresses_admin ON addresses(administrator_id)");
 
   const ensureIndex = (sql: string) => {
     try { db.exec(sql); } catch {}

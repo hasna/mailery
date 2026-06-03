@@ -46,7 +46,9 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .option("--domain <id>", "Domain ID (defaults to the address's domain if registered)")
     .option("--receive <strategy>", "Receive strategy: ses-s3 | cf-routing | resend-webhook", "ses-s3")
     .option("--forward-to <email>", "Forward target (for cf-routing)")
-    .action(async (email: string, opts: { provider: string; domain?: string; receive: string; forwardTo?: string }) => {
+    .option("--owner <name|id>", "Owner (human or agent). Human owners require --administrator.")
+    .option("--administrator <name|id>", "Administering agent (required for human owners; defaults to owner for agents)")
+    .action(async (email: string, opts: { provider: string; domain?: string; receive: string; forwardTo?: string; owner?: string; administrator?: string }) => {
       try {
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
@@ -61,7 +63,16 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
           provisioning_status: "requested",
           next_check_at: new Date().toISOString(),
         }, db);
-        output({ id: addr.id, email, receive: opts.receive }, chalk.green(`✓ address ${email} provisioned (receive=${opts.receive})`));
+        let ownerNote = "";
+        if (opts.owner) {
+          const { getOwnerByName, getOwner, assignAddressOwner } = await import("../../db/owners.js");
+          const owner = getOwnerByName(opts.owner, db) ?? getOwner(opts.owner, db);
+          if (!owner) return handleError(new Error(`Owner not found: ${opts.owner}`));
+          const admin = opts.administrator ? (getOwnerByName(opts.administrator, db) ?? getOwner(opts.administrator, db)) : null;
+          const own = assignAddressOwner(addr.id, owner.id, admin?.id, db);
+          ownerNote = ` owner=${owner.name}(${owner.type}) admin=${own.administrator_id === owner.id ? "self" : opts.administrator}`;
+        }
+        output({ id: addr.id, email, receive: opts.receive }, chalk.green(`✓ address ${email} provisioned (receive=${opts.receive})${ownerNote}`));
       } catch (e) { handleError(e); }
     });
 

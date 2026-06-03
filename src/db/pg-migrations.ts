@@ -423,6 +423,26 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (19) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 20: tenancy — owners (human|agent) + address ownership/administration.
+  `
+  CREATE TABLE IF NOT EXISTS owners (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    contact_email TEXT,
+    external_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS idx_owners_type ON owners(type);
+  CREATE INDEX IF NOT EXISTS idx_owners_name ON owners(name);
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS owner_id TEXT;
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS administrator_id TEXT;
+  CREATE INDEX IF NOT EXISTS idx_addresses_owner ON addresses(owner_id);
+  CREATE INDEX IF NOT EXISTS idx_addresses_admin ON addresses(administrator_id);
+  INSERT INTO _migrations (id) VALUES (20) ON CONFLICT DO NOTHING;
+  `,
+
   // Feedback table
   `
   CREATE TABLE IF NOT EXISTS feedback (

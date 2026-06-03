@@ -97,7 +97,13 @@ export class ResendAdapter implements ProviderAdapter {
   }
 
   async addDomain(domain: string): Promise<void> {
-    await this.client.domains.create({ name: domain });
+    // The Resend SDK returns { data, error } and does NOT throw — surface the
+    // error (e.g. plan limit: "Your plan includes 1 domain. Upgrade to add more.")
+    // so callers get a clear message instead of a silent no-op.
+    const res = (await this.client.domains.create({ name: domain })) as { data?: unknown; error?: { message?: string } | null };
+    if (res?.error) {
+      throw new Error(`Resend could not add domain ${domain}: ${res.error.message ?? JSON.stringify(res.error)}`);
+    }
   }
 
   async listAddresses(): Promise<RemoteAddress[]> {

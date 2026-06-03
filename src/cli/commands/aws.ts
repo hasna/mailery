@@ -13,15 +13,15 @@ export function registerAwsCommands(program: Command, output: (data: unknown, fo
 
   awsCmd
     .command("setup-inbound")
-    .description("Create S3 bucket + SES receipt rules to receive inbound email")
+    .description("Create S3 bucket + SES receipt rules to receive inbound email. Defaults --bucket/--region to config inbound_s3_bucket/region.")
     .requiredOption("--domain <domain>", "Domain to receive email for (e.g. example.com)")
-    .requiredOption("--bucket <name>", "S3 bucket name to store incoming emails")
-    .option("--region <region>", "AWS region", "us-east-1")
+    .option("--bucket <name>", "S3 bucket name (defaults to config inbound_s3_bucket)")
+    .option("--region <region>", "AWS region (defaults to config inbound_s3_region or us-east-1)")
     .option("--prefix <prefix>", "S3 key prefix (default: inbound/<domain>/)")
     .option("--catch-all", "Also catch subdomains (*.example.com)")
     .option("--profile <profile>", "AWS profile name (uses env vars if not set)")
     .action(async (opts: {
-      domain: string; bucket: string; region: string;
+      domain: string; bucket?: string; region?: string;
       prefix?: string; catchAll?: boolean; profile?: string;
     }) => {
       try {
@@ -29,15 +29,21 @@ export function registerAwsCommands(program: Command, output: (data: unknown, fo
           process.env["AWS_PROFILE"] = opts.profile;
         }
 
+        const { getInboundConfig } = await import("../../lib/config.js");
+        const inbound = getInboundConfig();
+        const bucket = opts.bucket ?? inbound.bucket;
+        const region = opts.region ?? inbound.region;
+        if (!bucket) { handleError(new Error("No S3 bucket: pass --bucket or set 'emails config set inbound_s3_bucket <name>'")); return; }
+
         const { setupInboundEmail } = await import("../../lib/aws-inbound.js");
 
         console.log(chalk.dim(`Setting up inbound email for ${opts.domain}...`));
 
-        console.log(chalk.dim(`  [1/3] Setting up S3 bucket: ${opts.bucket}`));
+        console.log(chalk.dim(`  [1/3] Setting up S3 bucket: ${bucket}`));
         const result = await setupInboundEmail({
           domain: opts.domain,
-          bucket: opts.bucket,
-          region: opts.region,
+          bucket,
+          region,
           prefix: opts.prefix,
           catchAll: opts.catchAll,
         });
@@ -65,7 +71,7 @@ export function registerAwsCommands(program: Command, output: (data: unknown, fo
         console.log(chalk.dim("  (For Cloudflare: emails domain setup-cloudflare ... will set it automatically)\n"));
 
         console.log(chalk.dim("  To sync received emails locally:"));
-        console.log(chalk.dim(`    emails inbox sync-s3 --bucket ${opts.bucket} --prefix ${result.s3_prefix}\n`));
+        console.log(chalk.dim(`    emails inbox sync-s3 --bucket ${bucket} --prefix ${result.s3_prefix}\n`));
 
         output(result, "");
       } catch (e) { handleError(e); }

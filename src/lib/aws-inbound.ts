@@ -111,29 +111,27 @@ async function ensureS3Bucket(s3: S3Client, bucket: string, region: string): Pro
 }
 
 /**
- * Attach SES delivery policy to bucket.
- * Allows SES to PutObject into the bucket.
+ * Build the SES inbound bucket policy. The aws:SourceAccount condition must be
+ * the REAL account id — a literal "*" with StringEquals never matches, which
+ * denies SES (InvalidS3ConfigurationException). When the account id is unknown,
+ * omit the condition entirely (SES can still write). Pure + testable.
  */
-async function attachSesBucketPolicy(s3: S3Client, bucket: string, prefix: string): Promise<void> {
-  const policy = {
-    Version: "2012-10-17",
-    Statement: [
-      {
-        Sid: "AllowSESPuts",
-        Effect: "Allow",
-        Principal: { Service: "ses.amazonaws.com" },
-        Action: "s3:PutObject",
-        Resource: `arn:aws:s3:::${bucket}/${prefix}*`,
-        Condition: {
-          StringEquals: { "AWS:SourceAccount": process.env["AWS_ACCOUNT_ID"] || "*" },
-        },
-      },
-    ],
+export function buildSesBucketPolicy(bucket: string, prefix: string, accountId?: string): object {
+  const statement: Record<string, unknown> = {
+    Sid: "AllowSESPuts",
+    Effect: "Allow",
+    Principal: { Service: "ses.amazonaws.com" },
+    Action: "s3:PutObject",
+    Resource: `arn:aws:s3:::${bucket}/${prefix}*`,
   };
+  if (accountId) statement["Condition"] = { StringEquals: { "aws:SourceAccount": accountId } };
+  return { Version: "2012-10-17", Statement: [statement] };
+}
 
+async function attachSesBucketPolicy(s3: S3Client, bucket: string, prefix: string, accountId?: string): Promise<void> {
   await s3.send(new PutBucketPolicyCommand({
     Bucket: bucket,
-    Policy: JSON.stringify(policy),
+    Policy: JSON.stringify(buildSesBucketPolicy(bucket, prefix, accountId)),
   }));
 }
 
@@ -172,9 +170,25 @@ export async function setupInboundEmail(opts: InboundSetupOptions): Promise<Inbo
   const { ses, s3, region } = makeClients(opts);
   const prefix = opts.prefix ?? `inbound/${opts.domain}/`;
 
+  // Resolve the account id so the SES bucket policy condition is correct.
+  let accountId = process.env["AWS_ACCOUNT_ID"];
+  if (!accountId) {
+    try {
+      const { STSClient, GetCallerIdentityCommand } = await import("@aws-sdk/client-sts");
+      const credentials = opts.accessKeyId && opts.secretAccessKey
+        ? { accessKeyId: opts.accessKeyId, secretAccessKey: opts.secretAccessKey }
+        : undefined;
+      const sts = new STSClient({ region, credentials });
+      const id = await sts.send(new GetCallerIdentityCommand({}));
+      accountId = id.Account;
+    } catch {
+      // leave undefined — policy will omit the condition
+    }
+  }
+
   // 1. S3 bucket
   const bucketCreated = await ensureS3Bucket(s3, opts.bucket, region);
-  await attachSesBucketPolicy(s3, opts.bucket, prefix);
+  await attachSesBucketPolicy(s3, opts.bucket, prefix, accountId);
 
   // 2. Receipt rule set
   const ruleSet = await ensureReceiptRuleSet(ses);

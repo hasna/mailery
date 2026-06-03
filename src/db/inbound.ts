@@ -43,6 +43,7 @@ export interface InboundEmail {
   read_at: string | null;
   is_archived: boolean;
   is_starred: boolean;
+  is_sent: boolean;
   received_at: string;
   created_at: string;
 }
@@ -73,6 +74,7 @@ interface InboundEmailRow {
   read_at?: string | null;
   is_archived?: number;
   is_starred?: number;
+  is_sent?: number;
   received_at: string;
   created_at: string;
 }
@@ -115,6 +117,7 @@ function rowToEmail(row: InboundEmailRow): InboundEmail {
     read_at: row.read_at ?? null,
     is_archived: !!row.is_archived,
     is_starred: !!row.is_starred,
+    is_sent: !!row.is_sent,
     received_at: row.received_at,
     created_at: row.created_at,
   };
@@ -141,7 +144,7 @@ export function storeInboundEmail(
     InboundEmail,
     "id" | "created_at" | "provider_thread_id" | "provider_history_id" |
     "provider_internal_date" | "label_ids" | "raw_s3_url" | "metadata_s3_url" | "thread_id" |
-    "is_read" | "read_at" | "is_archived" | "is_starred"
+    "is_read" | "read_at" | "is_archived" | "is_starred" | "is_sent"
   > & Partial<Pick<
     InboundEmail,
     "provider_thread_id" | "provider_history_id" | "provider_internal_date" |
@@ -155,12 +158,16 @@ export function storeInboundEmail(
   // Auto-detect reply linkage from email headers
   const replyToEmailId = input.in_reply_to_email_id ?? detectReplyToEmailId(input.headers, d);
 
+  // Mail synced from Gmail's Sent folder carries the SENT label — flag it so it
+  // lands in the Sent folder, not the inbox.
+  const isSent = (input.label_ids ?? []).includes("SENT") ? 1 : 0;
+
   d.run(
     `INSERT INTO inbound_emails
        (id, provider_id, message_id, in_reply_to_email_id, provider_thread_id, provider_history_id,
         provider_internal_date, label_ids_json, raw_s3_url, metadata_s3_url, from_address, to_addresses, cc_addresses,
-        subject, text_body, html_body, attachments_json, attachment_paths, headers_json, raw_size, received_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        subject, text_body, html_body, attachments_json, attachment_paths, headers_json, raw_size, received_at, is_sent)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.provider_id,
@@ -183,6 +190,7 @@ export function storeInboundEmail(
       JSON.stringify(input.headers),
       input.raw_size,
       input.received_at || now(),
+      isSent,
     ],
   );
 

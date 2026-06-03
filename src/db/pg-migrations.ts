@@ -520,6 +520,14 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (27) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 28: denormalized is_sent flag on inbound_emails (see SQLite).
+  `
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS is_sent INTEGER NOT NULL DEFAULT 0;
+  UPDATE inbound_emails SET is_sent = 1 WHERE label_ids_json LIKE '%"SENT"%';
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_arch_recv ON inbound_emails(is_sent, is_archived, received_at);
+  INSERT INTO _migrations (id) VALUES (28) ON CONFLICT DO NOTHING;
+  `,
+
 
   // Feedback table
   `

@@ -141,3 +141,43 @@ describe("tui data — attachments + markdown + profiles", () => {
     expect(p.addresses).toContain("ops@acme.com");
   });
 });
+
+describe("tui data — Sent folder (Gmail SENT + app-sent)", () => {
+  it("routes Gmail SENT-labelled mail to Sent (not inbox) and unions app-sent", async () => {
+    const db = getDatabase();
+    // a Gmail-synced sent message (labelled SENT)
+    storeInboundEmail({
+      provider_id: null, message_id: "<sent1@x>", from_address: "me@x.com", to_addresses: ["client@y.com"],
+      cc_addresses: [], subject: "gmail sent", text_body: "b", html_body: null, attachments: [],
+      label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
+    }, db);
+    // a received message
+    seed("received-1");
+    // an app-sent message
+    await sendComposed({ from: "me@x.com", to: "z@y.com", subject: "app sent", body: "hi" });
+
+    const sent = listMailbox("sent").map((m) => m.subject);
+    expect(sent).toContain("gmail sent");
+    expect(sent).toContain("app sent");
+    expect(sent).not.toContain("received-1");
+
+    const inbox = listMailbox("inbox").map((m) => m.subject);
+    expect(inbox).toContain("received-1");
+    expect(inbox).not.toContain("gmail sent");   // SENT excluded from inbox
+
+    const c = mailboxCounts();
+    expect(c.sent).toBe(2);   // 1 gmail-sent + 1 app-sent
+  });
+
+  it("marks sentByMe + shows the recipient for sent mail", () => {
+    const db = getDatabase();
+    storeInboundEmail({
+      provider_id: null, message_id: "<s2@x>", from_address: "me@x.com", to_addresses: ["client@y.com"],
+      cc_addresses: [], subject: "to a client", text_body: "b", html_body: null, attachments: [],
+      label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
+    }, db);
+    const m = listMailbox("sent").find((x) => x.subject === "to a client")!;
+    expect(m.sentByMe).toBe(true);
+    expect(m.to).toBe("client@y.com");
+  });
+});

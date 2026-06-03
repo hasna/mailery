@@ -233,7 +233,7 @@ function List({ messages, sel, now, width, height, searching, search, emptyStore
         ) : <Text dimColor>No messages here.</Text>
       ) : win.map((m, i) => {
         const selected = start + i === sel;
-        const who = senderName(m.kind === "sent" ? m.to : m.from);
+        const who = (m.sentByMe ? "→ " : "") + senderName(m.sentByMe ? m.to : m.from);
         const subjCell = m.attachments > 0 ? `📎 ${m.subject}` : m.subject;
         return (
           <Text key={m.id} wrap="truncate" backgroundColor={selected ? "blue" : undefined}>

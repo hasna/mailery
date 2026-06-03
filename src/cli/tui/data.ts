@@ -9,7 +9,7 @@
 import type { Database } from "../../db/database.js";
 import { getDatabase } from "../../db/database.js";
 import {
-  getInboundEmail, getUnreadCount,
+  getInboundEmail,
   setInboundRead, setInboundArchived, setInboundStarred,
 } from "../../db/inbound.js";
 import { getEmail, createEmail } from "../../db/emails.js";
@@ -40,6 +40,8 @@ export interface TuiMessage {
   snippet: string;
   thread_id: string | null;
   attachments: number;
+  /** True if I sent it (app-sent, or a Gmail-synced message labelled SENT). */
+  sentByMe: boolean;
 }
 
 export interface AttachmentInfo {
@@ -72,13 +74,30 @@ function liteToMessage(r: LiteRow, kind: "inbound" | "sent"): TuiMessage {
     is_starred: !!r.is_starred,
     labels, snippet: snippetOf(r.snippet), thread_id: r.thread_id ?? null,
     attachments: r.attachments ?? 0,
+    sentByMe: kind === "sent" || labels.includes("SENT"),
   };
 }
 
+// Lean inbound projection columns (no html_body). Reused across folder queries.
+const INBOUND_LITE_COLS = `id, from_address, to_addresses, subject, received_at AS date,
+  is_read, is_starred, label_ids_json, thread_id, substr(text_body, 1, 140) AS snippet,
+  (CASE WHEN attachments_json IS NULL OR attachments_json = '[]' THEN 0
+        ELSE (LENGTH(attachments_json) - LENGTH(REPLACE(attachments_json, '"filename"', ''))) / LENGTH('"filename"') END) AS attachments`;
+
+// The receiving folders exclude mail I sent (is_sent is a denormalized, indexed
+// flag set from the Gmail SENT label at sync time — no JSON scanning at query time).
+const FOLDER_WHERE: Record<Exclude<Mailbox, "sent">, string> = {
+  inbox: "is_sent = 0 AND is_archived = 0",
+  unread: "is_sent = 0 AND is_read = 0 AND is_archived = 0",
+  starred: "is_sent = 0 AND is_starred = 1 AND is_archived = 0",
+  archived: "is_archived = 1",
+};
+
 /**
  * List the messages in a mailbox, newest first. Uses a LEAN projection
- * (no html_body, snippet via substr) so it stays fast on very large mailboxes
- * — loading full bodies for hundreds of rows is what made the TUI freeze.
+ * (no html_body, snippet via substr) over indexed columns so it stays fast on
+ * very large mailboxes. The Sent folder unions app-sent mail (`emails`) with
+ * Gmail-synced sent mail (`inbound_emails` where is_sent = 1).
  */
 export function listMailbox(mailbox: Mailbox, opts?: { limit?: number; search?: string }, db?: Database): TuiMessage[] {
   const d = db || getDatabase();
@@ -86,24 +105,20 @@ export function listMailbox(mailbox: Mailbox, opts?: { limit?: number; search?: 
   let messages: TuiMessage[];
 
   if (mailbox === "sent") {
-    const rows = d.query(
+    const appSent = (d.query(
       `SELECT e.id, e.from_address, e.to_addresses, e.subject, e.sent_at AS date, e.thread_id,
               e.attachment_count AS attachments, substr(c.text_body, 1, 140) AS snippet
        FROM emails e LEFT JOIN email_content c ON c.email_id = e.id
        ORDER BY e.sent_at DESC LIMIT ?`,
-    ).all(limit) as LiteRow[];
-    messages = rows.map((r) => liteToMessage(r, "sent"));
+    ).all(limit) as LiteRow[]).map((r) => liteToMessage(r, "sent"));
+    const gmailSent = (d.query(
+      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0
+       ORDER BY received_at DESC LIMIT ?`,
+    ).all(limit) as LiteRow[]).map((r) => liteToMessage(r, "inbound"));
+    messages = [...appSent, ...gmailSent].sort((a, b) => b.date.localeCompare(a.date)).slice(0, limit);
   } else {
-    const where = mailbox === "unread" ? "is_read = 0 AND is_archived = 0"
-      : mailbox === "starred" ? "is_starred = 1 AND is_archived = 0"
-      : mailbox === "archived" ? "is_archived = 1"
-      : "is_archived = 0";
     const rows = d.query(
-      `SELECT id, from_address, to_addresses, subject, received_at AS date,
-              is_read, is_starred, label_ids_json, thread_id, substr(text_body, 1, 140) AS snippet,
-              (CASE WHEN attachments_json IS NULL OR attachments_json = '[]' THEN 0
-                    ELSE (LENGTH(attachments_json) - LENGTH(REPLACE(attachments_json, '"filename"', ''))) / LENGTH('"filename"') END) AS attachments
-       FROM inbound_emails WHERE ${where} ORDER BY received_at DESC LIMIT ?`,
+      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE ${FOLDER_WHERE[mailbox]} ORDER BY received_at DESC LIMIT ?`,
     ).all(limit) as LiteRow[];
     messages = rows.map((r) => liteToMessage(r, "inbound"));
   }
@@ -123,15 +138,15 @@ function count(d: Database, sql: string): number {
   return row?.c ?? 0;
 }
 
-/** Folder counts via COUNT(*) — never materialize rows (that froze big DBs). */
+/** Folder counts via COUNT(*) over indexed columns — never materialize rows. */
 export function mailboxCounts(db?: Database): MailboxCounts {
   const d = db || getDatabase();
   return {
-    inbox: count(d, "SELECT COUNT(*) AS c FROM inbound_emails WHERE is_archived = 0"),
-    unread: getUnreadCount(undefined, d),
-    starred: count(d, "SELECT COUNT(*) AS c FROM inbound_emails WHERE is_starred = 1 AND is_archived = 0"),
-    sent: count(d, "SELECT COUNT(*) AS c FROM emails"),
-    archived: count(d, "SELECT COUNT(*) AS c FROM inbound_emails WHERE is_archived = 1"),
+    inbox: count(d, `SELECT COUNT(*) AS c FROM inbound_emails WHERE ${FOLDER_WHERE.inbox}`),
+    unread: count(d, `SELECT COUNT(*) AS c FROM inbound_emails WHERE ${FOLDER_WHERE.unread}`),
+    starred: count(d, `SELECT COUNT(*) AS c FROM inbound_emails WHERE ${FOLDER_WHERE.starred}`),
+    sent: count(d, "SELECT COUNT(*) AS c FROM emails") + count(d, "SELECT COUNT(*) AS c FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0"),
+    archived: count(d, `SELECT COUNT(*) AS c FROM inbound_emails WHERE ${FOLDER_WHERE.archived}`),
   };
 }
 

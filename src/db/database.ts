@@ -604,6 +604,16 @@ const MIGRATIONS = [
   ALTER TABLE aliases ADD COLUMN protected INTEGER NOT NULL DEFAULT 0;
   INSERT OR IGNORE INTO _migrations (id) VALUES (27);
   `,
+
+  // Migration 28: denormalized is_sent flag on inbound_emails. Mail I sent shows
+  // up in a Gmail sync labelled SENT; this indexed flag lets the Sent folder and
+  // the receiving folders be plain indexed seeks (no JSON label scanning).
+  `
+  ALTER TABLE inbound_emails ADD COLUMN is_sent INTEGER NOT NULL DEFAULT 0;
+  UPDATE inbound_emails SET is_sent = 1 WHERE label_ids_json LIKE '%"SENT"%';
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_arch_recv ON inbound_emails(is_sent, is_archived, received_at);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (28);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -772,6 +782,9 @@ function ensureSchema(db: Database): void {
   // The default, protected global catch-all (all domains) — never deletable, so
   // mail to any of our domains is never dropped. Empty target = keep, no rewrite.
   ensureProvTable("INSERT OR IGNORE INTO aliases (id, domain, local_part, target_address, protected, created_at, updated_at) VALUES ('global-catch-all', '*', '*', '', 1, datetime('now'), datetime('now'))");
+  // Migration 28 idempotent guarantee: is_sent flag + index.
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN is_sent INTEGER NOT NULL DEFAULT 0");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_sent_arch_recv ON inbound_emails(is_sent, is_archived, received_at)");
 
   const ensureIndex = (sql: string) => {
     try { db.exec(sql); } catch {}

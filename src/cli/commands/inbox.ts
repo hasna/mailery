@@ -4,10 +4,14 @@ import { fromIni } from "@aws-sdk/credential-provider-ini";
 import { S3Client } from "@aws-sdk/client-s3";
 import { runConnectorOperation } from "@hasna/connectors";
 import { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory, listGmailConnectorProfiles, listGmailLabels } from "../../lib/gmail-sync.js";
-import { listInboundEmails, getInboundEmail, deleteInboundEmail, clearInboundEmails, getInboundCount } from "../../db/inbound.js";
+import {
+  listInboundEmails, getInboundEmail, deleteInboundEmail, clearInboundEmails, getInboundCount,
+  setInboundRead, setInboundArchived, setInboundStarred,
+  addInboundLabel, removeInboundLabel, getUnreadCount,
+} from "../../db/inbound.js";
 import { getGmailSyncState, updateLastSynced } from "../../db/gmail-sync-state.js";
 import { createProvider, listProviders } from "../../db/providers.js";
-import { getDatabase } from "../../db/database.js";
+import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { confirmDestructiveAction, handleError } from "../utils.js";
 
 const DEFAULT_GMAIL_ARCHIVE_BUCKET = "hasna-xyz-prod-emails";
@@ -165,12 +169,21 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N emails", "0")
     .option("--search <query>", "Filter by subject/from (local, not Gmail API)")
-    .action((opts: { provider?: string; since?: string; limit?: string; offset?: string; search?: string }) => {
+    .option("--unread", "Only unread mail")
+    .option("--read", "Only read mail")
+    .option("--starred", "Only starred mail")
+    .option("--archived", "Show archived mail (hidden by default)")
+    .option("--label <label>", "Only mail carrying this label")
+    .action((opts: { provider?: string; since?: string; limit?: string; offset?: string; search?: string; unread?: boolean; read?: boolean; starred?: boolean; archived?: boolean; label?: string }) => {
       try {
         const db = getDatabase();
         const limit = parseInt(opts.limit ?? "20", 10);
         const offset = parseInt(opts.offset ?? "0", 10);
-        let emails = listInboundEmails({ provider_id: opts.provider, since: opts.since, limit, offset }, db);
+        let emails = listInboundEmails({
+          provider_id: opts.provider, since: opts.since, limit, offset,
+          unread: opts.unread, read: opts.read, starred: opts.starred,
+          archived: opts.archived, label: opts.label,
+        }, db);
 
         if (opts.search) {
           const q = opts.search.toLowerCase();
@@ -257,8 +270,9 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         for (const p of providers) {
           const state = getGmailSyncState(p.id, db);
           const count = getInboundCount(p.id, db);
+          const unread = getUnreadCount(p.id, db);
           console.log(`\n  ${chalk.cyan(p.name)} ${chalk.dim(`[${p.id.slice(0, 8)}]`)}`);
-          console.log(`    Synced emails:  ${count}`);
+          console.log(`    Synced emails:  ${count} ${unread > 0 ? chalk.cyan(`(${unread} unread)`) : ""}`);
           console.log(`    Last synced:    ${state?.last_synced_at ? chalk.green(state.last_synced_at) : chalk.dim("never")}`);
           if (state?.last_message_id) console.log(`    Last message:   ${state.last_message_id}`);
         }
@@ -298,58 +312,104 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   // ─── READ ─────────────────────────────────────────────────────────────────
   inboxCmd
     .command("read <id>")
-    .description("Read a synced email from local DB")
-    .action((id: string) => {
+    .description("Read a synced email from local DB (marks it read)")
+    .option("--keep-unread", "Do not mark the email as read")
+    .action((id: string, opts: { keepUnread?: boolean }) => {
       try {
         const db = getDatabase();
-        const email = getInboundEmail(id, db);
+        const fullId = resolvePartialId(db, "inbound_emails", id) ?? id;
+        let email = getInboundEmail(fullId, db);
         if (!email) {
           console.error(chalk.red(`Email not found: ${id}`));
           process.exit(1);
         }
+        // Opening an email marks it read (Gmail parity), unless --keep-unread.
+        if (!opts.keepUnread && !email.is_read) email = setInboundRead(email.id, true, db);
         output(email, formatEmailDetail(email));
       } catch (e) {
         handleError(e);
       }
     });
 
-  // ─── GMAIL ACTIONS ────────────────────────────────────────────────────────
+  // ─── READ-STATE / ARCHIVE / STAR / LABELS ─────────────────────────────────
+  // Local state is authoritative and works for any inbound mail (SES-S3, SMTP,
+  // Gmail). When the email belongs to a Gmail provider, the change is also
+  // mirrored to Gmail (best-effort).
 
-  async function gmailAction(emailId: string, connectorArgs: string[], label: string) {
+  async function gmailMirror(emailId: string, connectorArgs: string[]): Promise<boolean> {
     const db = getDatabase();
-    const row = db.query("SELECT message_id FROM inbound_emails WHERE id = ?").get(emailId) as { message_id: string } | null;
-    if (!row?.message_id) throw new Error(`No Gmail message ID for email ${emailId}`);
+    const row = db.query(
+      `SELECT i.message_id AS message_id, p.type AS provider_type
+         FROM inbound_emails i LEFT JOIN providers p ON p.id = i.provider_id
+        WHERE i.id = ?`,
+    ).get(emailId) as { message_id: string | null; provider_type: string | null } | null;
+    if (!row || row.provider_type !== "gmail" || !row.message_id) return false;
     const r = await runConnectorOperation({
       connector: "gmail",
       operation: connectorArgs.join("."),
       input: { args: [row.message_id] },
     });
     if (!r.success) throw new Error(r.stderr || r.stdout);
-    console.log(chalk.green(`✓ ${label}: ${emailId.slice(0, 8)}`));
+    return true;
+  }
+
+  function requireLocal(id: string): string {
+    const db = getDatabase();
+    const fullId = resolvePartialId(db, "inbound_emails", id) ?? id;
+    const e = getInboundEmail(fullId, db);
+    if (!e) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
+    return e.id;
   }
 
   inboxCmd
     .command("mark-read <emailId>")
-    .description("Mark a Gmail message as read")
-    .action(async (emailId: string) => {
-      try { await gmailAction(emailId, ["messages", "mark-read"], "Marked as read"); }
-      catch (e) { handleError(e); }
+    .description("Mark an inbound email as read (mirrors to Gmail when applicable)")
+    .option("--unread", "Mark as unread instead")
+    .action(async (emailId: string, opts: { unread?: boolean }) => {
+      try {
+        const id = requireLocal(emailId);
+        const e = setInboundRead(id, !opts.unread, getDatabase());
+        await gmailMirror(id, ["messages", opts.unread ? "mark-unread" : "mark-read"]).catch(() => false);
+        output(e, chalk.green(`✓ Marked ${opts.unread ? "unread" : "read"}: ${e.subject.slice(0, 40)}`));
+      } catch (e) { handleError(e); }
     });
 
   inboxCmd
     .command("archive <emailId>")
-    .description("Archive a Gmail message (remove from INBOX)")
-    .action(async (emailId: string) => {
-      try { await gmailAction(emailId, ["messages", "archive"], "Archived"); }
-      catch (e) { handleError(e); }
+    .description("Archive an inbound email (mirrors to Gmail when applicable)")
+    .option("--undo", "Unarchive (restore to inbox) instead")
+    .action(async (emailId: string, opts: { undo?: boolean }) => {
+      try {
+        const id = requireLocal(emailId);
+        const e = setInboundArchived(id, !opts.undo, getDatabase());
+        if (!opts.undo) await gmailMirror(id, ["messages", "archive"]).catch(() => false);
+        output(e, chalk.green(`✓ ${opts.undo ? "Unarchived" : "Archived"}: ${e.subject.slice(0, 40)}`));
+      } catch (e) { handleError(e); }
     });
 
   inboxCmd
     .command("star <emailId>")
-    .description("Star a Gmail message")
-    .action(async (emailId: string) => {
-      try { await gmailAction(emailId, ["messages", "star"], "Starred"); }
-      catch (e) { handleError(e); }
+    .description("Star an inbound email (mirrors to Gmail when applicable)")
+    .option("--undo", "Unstar instead")
+    .action(async (emailId: string, opts: { undo?: boolean }) => {
+      try {
+        const id = requireLocal(emailId);
+        const e = setInboundStarred(id, !opts.undo, getDatabase());
+        if (!opts.undo) await gmailMirror(id, ["messages", "star"]).catch(() => false);
+        output(e, chalk[opts.undo ? "green" : "yellow"](`${opts.undo ? "✓ Unstarred" : "★ Starred"}: ${e.subject.slice(0, 40)}`));
+      } catch (e) { handleError(e); }
+    });
+
+  inboxCmd
+    .command("label <emailId> <label>")
+    .description("Add (or with --remove, remove) a label on an inbound email")
+    .option("--remove", "Remove the label instead of adding")
+    .action((emailId: string, label: string, opts: { remove?: boolean }) => {
+      try {
+        const id = requireLocal(emailId);
+        const e = opts.remove ? removeInboundLabel(id, label, getDatabase()) : addInboundLabel(id, label, getDatabase());
+        output(e, chalk.green(`✓ ${opts.remove ? "Removed" : "Added"} label "${label}": ${e.label_ids.join(", ") || "(none)"}`));
+      } catch (e) { handleError(e); }
     });
 
   // ─── REPLY ────────────────────────────────────────────────────────────────
@@ -670,14 +730,18 @@ function formatSyncResult(
 }
 
 function formatEmailList(
-  emails: { id: string; from_address: string; subject: string; received_at: string; text_body?: string | null }[],
+  emails: { id: string; from_address: string; subject: string; received_at: string; text_body?: string | null; is_read?: boolean; is_starred?: boolean; label_ids?: string[] }[],
   title = "Inbound Emails",
 ): string {
   const lines: string[] = [chalk.bold(`\n${title} (${emails.length}):`)];
   for (const e of emails) {
     const date = new Date(e.received_at).toLocaleDateString();
+    const star = e.is_starred ? chalk.yellow("★") : " ";
+    const unread = e.is_read === false ? chalk.cyan("●") : " ";
+    const subj = e.is_read === false ? chalk.bold(e.subject.slice(0, 50).padEnd(50)) : e.subject.slice(0, 50).padEnd(50);
+    const labels = e.label_ids && e.label_ids.length ? chalk.magenta(` {${e.label_ids.join(",")}}`) : "";
     lines.push(
-      `  ${chalk.dim(e.id.slice(0, 8))}  ${chalk.cyan(e.from_address.slice(0, 28).padEnd(28))}  ${e.subject.slice(0, 50).padEnd(50)}  ${chalk.dim(date)}`,
+      `  ${star}${unread} ${chalk.dim(e.id.slice(0, 8))}  ${chalk.cyan(e.from_address.slice(0, 28).padEnd(28))}  ${subj}  ${chalk.dim(date)}${labels}`,
     );
   }
   lines.push("");
@@ -726,14 +790,21 @@ function formatArchiveMigrationResult(result: { scanned: number; copied: number;
 }
 
 function formatEmailDetail(
-  email: { id: string; from_address: string; subject: string; received_at: string; text_body?: string | null; to_addresses: string[]; cc_addresses: string[] },
+  email: { id: string; from_address: string; subject: string; received_at: string; text_body?: string | null; to_addresses: string[]; cc_addresses: string[]; is_read?: boolean; is_starred?: boolean; is_archived?: boolean; label_ids?: string[] },
 ): string {
+  const flags = [
+    email.is_read === false ? "unread" : "read",
+    email.is_starred ? "starred" : null,
+    email.is_archived ? "archived" : null,
+    ...(email.label_ids ?? []),
+  ].filter(Boolean).join(", ");
   const lines: string[] = [
     chalk.bold(`\n  Subject: ${email.subject}`),
     `  From:    ${chalk.cyan(email.from_address)}`,
     `  To:      ${email.to_addresses.join(", ")}`,
     email.cc_addresses.length > 0 ? `  CC:      ${email.cc_addresses.join(", ")}` : "",
     `  Date:    ${email.received_at}`,
+    `  Flags:   ${flags}`,
     `  ID:      ${chalk.dim(email.id)}`,
     "",
     email.text_body ?? chalk.dim("(no body)"),

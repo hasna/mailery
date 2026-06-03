@@ -463,6 +463,17 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (22) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 23: inbound local read-state / archive / star.
+  `
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS is_read INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS read_at TEXT;
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS is_archived INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE inbound_emails ADD COLUMN IF NOT EXISTS is_starred INTEGER NOT NULL DEFAULT 0;
+  CREATE INDEX IF NOT EXISTS idx_inbound_is_read ON inbound_emails(is_read);
+  CREATE INDEX IF NOT EXISTS idx_inbound_is_archived ON inbound_emails(is_archived);
+  INSERT INTO _migrations (id) VALUES (23) ON CONFLICT DO NOTHING;
+  `,
+
 
   // Feedback table
   `

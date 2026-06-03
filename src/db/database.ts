@@ -540,6 +540,18 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_addresses_status ON addresses(status);
   INSERT OR IGNORE INTO _migrations (id) VALUES (22);
   `,
+
+  // Migration 23: local read-state / archive / star for inbound mail (parity
+  // with Gmail flags, but server-independent — works for SES-S3 mail too).
+  `
+  ALTER TABLE inbound_emails ADD COLUMN is_read INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE inbound_emails ADD COLUMN read_at TEXT;
+  ALTER TABLE inbound_emails ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE inbound_emails ADD COLUMN is_starred INTEGER NOT NULL DEFAULT 0;
+  CREATE INDEX IF NOT EXISTS idx_inbound_is_read ON inbound_emails(is_read);
+  CREATE INDEX IF NOT EXISTS idx_inbound_is_archived ON inbound_emails(is_archived);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (23);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -660,6 +672,19 @@ function ensureSchema(db: Database): void {
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_emails_thread ON emails(thread_id)");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(message_id)");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_threadid ON inbound_emails(thread_id)");
+
+  // Migration 22 idempotent guarantee: address lifecycle columns.
+  ensureColumn("ALTER TABLE addresses ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+  ensureColumn("ALTER TABLE addresses ADD COLUMN daily_quota INTEGER");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_addresses_status ON addresses(status)");
+
+  // Migration 23 idempotent guarantee: inbound local read-state / archive / star.
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN is_read INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN read_at TEXT");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("ALTER TABLE inbound_emails ADD COLUMN is_starred INTEGER NOT NULL DEFAULT 0");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_is_read ON inbound_emails(is_read)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_is_archived ON inbound_emails(is_archived)");
 
   const ensureIndex = (sql: string) => {
     try { db.exec(sql); } catch {}

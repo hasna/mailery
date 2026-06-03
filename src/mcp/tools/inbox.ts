@@ -1,6 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { listInboundEmails, getInboundEmail, clearInboundEmails } from "../../db/inbound.js";
+import {
+  listInboundEmails, getInboundEmail, clearInboundEmails,
+  setInboundRead, setInboundArchived, setInboundStarred,
+  addInboundLabel, removeInboundLabel,
+} from "../../db/inbound.js";
 import { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory } from "../../lib/gmail-sync.js";
 import { getGmailSyncState, updateLastSynced } from "../../db/gmail-sync-state.js";
 import { getDatabase } from "../../db/database.js";
@@ -18,10 +22,15 @@ export function registerInboxTools(server: McpServer): void {
     since: z.string().optional().describe("ISO 8601 date — only return emails received after this time"),
     limit: z.number().int().positive().optional().describe("Max results (default 50)"),
     offset: z.number().int().nonnegative().optional().describe("Pagination offset (default 0)"),
+    unread: z.boolean().optional().describe("Only unread mail"),
+    read: z.boolean().optional().describe("Only read mail"),
+    starred: z.boolean().optional().describe("Only starred mail"),
+    archived: z.boolean().optional().describe("Show archived mail (hidden by default)"),
+    label: z.string().optional().describe("Only mail carrying this label"),
   },
-  async ({ provider_id, since, limit, offset }) => {
+  async ({ provider_id, since, limit, offset, unread, read, starred, archived, label }) => {
     try {
-      const emails = listInboundEmails({ provider_id, since, limit, offset });
+      const emails = listInboundEmails({ provider_id, since, limit, offset, unread, read, starred, archived, label });
       return { content: [{ type: "text", text: JSON.stringify(emails, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -115,10 +124,20 @@ export function registerInboxTools(server: McpServer): void {
   },
 );
 
-async function gmailMessageAction(email_id: string, connectorArgs: string[]): Promise<string> {
+/**
+ * Best-effort Gmail mirror of a local state change. Only attempts the connector
+ * when the inbound email belongs to a Gmail-type provider; for SES-S3 (or any
+ * non-Gmail) mail the local state change stands on its own. Returns true if the
+ * Gmail action ran.
+ */
+async function gmailMessageAction(email_id: string, connectorArgs: string[]): Promise<boolean> {
   const db = getDatabase();
-  const row = db.query("SELECT message_id FROM inbound_emails WHERE id = ?").get(email_id) as { message_id: string } | null;
-  if (!row?.message_id) throw new Error(`No Gmail message ID for email ${email_id}`);
+  const row = db.query(
+    `SELECT i.message_id AS message_id, p.type AS provider_type
+       FROM inbound_emails i LEFT JOIN providers p ON p.id = i.provider_id
+      WHERE i.id = ?`,
+  ).get(email_id) as { message_id: string | null; provider_type: string | null } | null;
+  if (!row || row.provider_type !== "gmail" || !row.message_id) return false;
   const { runConnectorOperation } = await import("@hasna/connectors");
   const r = await runConnectorOperation({
     connector: "gmail",
@@ -126,41 +145,60 @@ async function gmailMessageAction(email_id: string, connectorArgs: string[]): Pr
     input: { args: [row.message_id] },
   });
   if (!r.success) throw new Error(r.stderr || r.stdout);
-  return row.message_id;
+  return true;
 }
 
   server.tool(
   "mark_email_read",
-  "Mark a synced inbound Gmail email as read",
-  { email_id: z.string() },
-  async ({ email_id }) => {
+  "Mark an inbound email as read (local state; mirrors to Gmail when applicable)",
+  { email_id: z.string(), unread: z.boolean().optional().describe("Mark unread instead") },
+  async ({ email_id, unread }) => {
     try {
-      await gmailMessageAction(email_id, ["messages", "mark-read"]);
-      return { content: [{ type: "text", text: `Marked as read: ${email_id}` }] };
+      const id = resolveId("inbound_emails", email_id);
+      const e = setInboundRead(id, !unread);
+      const synced = await gmailMessageAction(id, ["messages", unread ? "mark-unread" : "mark-read"]).catch(() => false);
+      return { content: [{ type: "text", text: JSON.stringify({ ...e, gmail_synced: synced }, null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
 );
 
   server.tool(
   "archive_email",
-  "Archive a synced inbound Gmail email (removes from INBOX)",
-  { email_id: z.string() },
-  async ({ email_id }) => {
+  "Archive (or unarchive) an inbound email (local state; mirrors to Gmail when applicable)",
+  { email_id: z.string(), unarchive: z.boolean().optional().describe("Restore to inbox instead") },
+  async ({ email_id, unarchive }) => {
     try {
-      await gmailMessageAction(email_id, ["messages", "archive"]);
-      return { content: [{ type: "text", text: `Archived: ${email_id}` }] };
+      const id = resolveId("inbound_emails", email_id);
+      const e = setInboundArchived(id, !unarchive);
+      const synced = unarchive ? false : await gmailMessageAction(id, ["messages", "archive"]).catch(() => false);
+      return { content: [{ type: "text", text: JSON.stringify({ ...e, gmail_synced: synced }, null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
 );
 
   server.tool(
   "star_email",
-  "Star a synced inbound Gmail email",
-  { email_id: z.string() },
-  async ({ email_id }) => {
+  "Star (or unstar) an inbound email (local state; mirrors to Gmail when applicable)",
+  { email_id: z.string(), unstar: z.boolean().optional().describe("Remove the star instead") },
+  async ({ email_id, unstar }) => {
     try {
-      await gmailMessageAction(email_id, ["messages", "star"]);
-      return { content: [{ type: "text", text: `Starred: ${email_id}` }] };
+      const id = resolveId("inbound_emails", email_id);
+      const e = setInboundStarred(id, !unstar);
+      const synced = unstar ? false : await gmailMessageAction(id, ["messages", "star"]).catch(() => false);
+      return { content: [{ type: "text", text: JSON.stringify({ ...e, gmail_synced: synced }, null, 2) }] };
+    } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
+  },
+);
+
+  server.tool(
+  "label_email",
+  "Add or remove a label on an inbound email (local state)",
+  { email_id: z.string(), label: z.string(), remove: z.boolean().optional().describe("Remove the label instead of adding") },
+  async ({ email_id, label, remove }) => {
+    try {
+      const id = resolveId("inbound_emails", email_id);
+      const e = remove ? removeInboundLabel(id, label) : addInboundLabel(id, label);
+      return { content: [{ type: "text", text: JSON.stringify(e, null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
 );

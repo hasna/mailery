@@ -39,6 +39,10 @@ export interface InboundEmail {
   attachment_paths: AttachmentPath[];
   headers: Record<string, string>;
   raw_size: number;
+  is_read: boolean;
+  read_at: string | null;
+  is_archived: boolean;
+  is_starred: boolean;
   received_at: string;
   created_at: string;
 }
@@ -65,6 +69,10 @@ interface InboundEmailRow {
   attachment_paths: string;
   headers_json: string;
   raw_size: number;
+  is_read?: number;
+  read_at?: string | null;
+  is_archived?: number;
+  is_starred?: number;
   received_at: string;
   created_at: string;
 }
@@ -92,6 +100,10 @@ function rowToEmail(row: InboundEmailRow): InboundEmail {
     attachment_paths: JSON.parse(row.attachment_paths ?? "[]") as AttachmentPath[],
     headers: JSON.parse(row.headers_json) as Record<string, string>,
     raw_size: row.raw_size,
+    is_read: !!row.is_read,
+    read_at: row.read_at ?? null,
+    is_archived: !!row.is_archived,
+    is_starred: !!row.is_starred,
     received_at: row.received_at,
     created_at: row.created_at,
   };
@@ -117,7 +129,8 @@ export function storeInboundEmail(
   input: Omit<
     InboundEmail,
     "id" | "created_at" | "provider_thread_id" | "provider_history_id" |
-    "provider_internal_date" | "label_ids" | "raw_s3_url" | "metadata_s3_url" | "thread_id"
+    "provider_internal_date" | "label_ids" | "raw_s3_url" | "metadata_s3_url" | "thread_id" |
+    "is_read" | "read_at" | "is_archived" | "is_starred"
   > & Partial<Pick<
     InboundEmail,
     "provider_thread_id" | "provider_history_id" | "provider_internal_date" |
@@ -213,8 +226,23 @@ export function getInboundEmail(id: string, db?: Database): InboundEmail | null 
   return rowToEmail(row);
 }
 
+export interface ListInboundOpts {
+  provider_id?: string;
+  since?: string;
+  limit?: number;
+  offset?: number;
+  /** Filter by read state. */
+  unread?: boolean;
+  read?: boolean;
+  /** When false (default), archived mail is excluded; when true, only archived. */
+  archived?: boolean;
+  starred?: boolean;
+  /** Only mail carrying this label. */
+  label?: string;
+}
+
 export function listInboundEmails(
-  opts?: { provider_id?: string; since?: string; limit?: number; offset?: number },
+  opts?: ListInboundOpts,
   db?: Database,
 ): InboundEmail[] {
   const d = db || getDatabase();
@@ -233,8 +261,17 @@ export function listInboundEmails(
     conditions.push("received_at >= ?");
     params.push(opts.since);
   }
+  if (opts?.unread) conditions.push("is_read = 0");
+  if (opts?.read) conditions.push("is_read = 1");
+  if (opts?.starred) conditions.push("is_starred = 1");
+  // Archived mail is hidden unless explicitly requested.
+  conditions.push(opts?.archived ? "is_archived = 1" : "is_archived = 0");
+  if (opts?.label) {
+    conditions.push("EXISTS (SELECT 1 FROM json_each(inbound_emails.label_ids_json) WHERE value = ?)");
+    params.push(opts.label);
+  }
 
-  const where = conditions.length > 0 ? 
+  const where = conditions.length > 0 ?
     `WHERE ${conditions.join(" AND ")}` : "";
   params.push(limit);
   params.push(offset);
@@ -272,5 +309,64 @@ export function getInboundCount(provider_id?: string, db?: Database): number {
   } else {
     row = d.query("SELECT COUNT(*) as count FROM inbound_emails").get() as { count: number } | null;
   }
+  return row?.count ?? 0;
+}
+
+// ── Local read-state / archive / star / labels (provider-independent) ──────────
+
+function requireInbound(id: string, d: Database): InboundEmailRow {
+  const row = d.query("SELECT * FROM inbound_emails WHERE id = ?").get(id) as InboundEmailRow | null;
+  if (!row) throw new Error(`Inbound email not found: ${id}`);
+  return row;
+}
+
+/** Mark an inbound email read (stamps read_at) or unread (clears it). */
+export function setInboundRead(id: string, read: boolean, db?: Database): InboundEmail {
+  const d = db || getDatabase();
+  requireInbound(id, d);
+  d.run("UPDATE inbound_emails SET is_read = ?, read_at = ? WHERE id = ?", [read ? 1 : 0, read ? now() : null, id]);
+  return getInboundEmail(id, d)!;
+}
+
+export function setInboundArchived(id: string, archived: boolean, db?: Database): InboundEmail {
+  const d = db || getDatabase();
+  requireInbound(id, d);
+  d.run("UPDATE inbound_emails SET is_archived = ? WHERE id = ?", [archived ? 1 : 0, id]);
+  return getInboundEmail(id, d)!;
+}
+
+export function setInboundStarred(id: string, starred: boolean, db?: Database): InboundEmail {
+  const d = db || getDatabase();
+  requireInbound(id, d);
+  d.run("UPDATE inbound_emails SET is_starred = ? WHERE id = ?", [starred ? 1 : 0, id]);
+  return getInboundEmail(id, d)!;
+}
+
+/** Add a label (no-op if already present). */
+export function addInboundLabel(id: string, label: string, db?: Database): InboundEmail {
+  const d = db || getDatabase();
+  const row = requireInbound(id, d);
+  const labels = JSON.parse(row.label_ids_json ?? "[]") as string[];
+  if (!labels.includes(label)) labels.push(label);
+  d.run("UPDATE inbound_emails SET label_ids_json = ? WHERE id = ?", [JSON.stringify(labels), id]);
+  return getInboundEmail(id, d)!;
+}
+
+/** Remove a label (no-op if absent). */
+export function removeInboundLabel(id: string, label: string, db?: Database): InboundEmail {
+  const d = db || getDatabase();
+  const row = requireInbound(id, d);
+  const labels = (JSON.parse(row.label_ids_json ?? "[]") as string[]).filter((l) => l !== label);
+  d.run("UPDATE inbound_emails SET label_ids_json = ? WHERE id = ?", [JSON.stringify(labels), id]);
+  return getInboundEmail(id, d)!;
+}
+
+/** Count unread, non-archived inbound mail (optionally scoped to a provider). */
+export function getUnreadCount(provider_id?: string, db?: Database): number {
+  const d = db || getDatabase();
+  const sql = provider_id
+    ? "SELECT COUNT(*) as count FROM inbound_emails WHERE is_read = 0 AND is_archived = 0 AND provider_id = ?"
+    : "SELECT COUNT(*) as count FROM inbound_emails WHERE is_read = 0 AND is_archived = 0";
+  const row = (provider_id ? d.query(sql).get(provider_id) : d.query(sql).get()) as { count: number } | null;
   return row?.count ?? 0;
 }

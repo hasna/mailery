@@ -118,25 +118,48 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
 
   emailCmd
     .command("thread <id>")
-    .description("Show full conversation thread (sent email + all replies)")
-    .action((id: string) => {
+    .description("Show the full conversation (sent + received), grouped by thread_id")
+    .action(async (id: string) => {
       try {
         const db = getDatabase();
-        const resolvedId = resolveId("emails", id);
-        const emailRecord = getEmail(resolvedId, db);
-        if (!emailRecord) handleError(new Error(`Email not found: ${id}`));
-        const replies = listReplies(resolvedId, db);
+        const { getEmailThreading, getThreadMessages } = await import("../../db/threads.js");
+        const { getInboundEmail } = await import("../../db/inbound.js");
+
+        let threadId: string | null = null;
+        const sentId = resolveId("emails", id);
+        const sent = sentId ? getEmail(sentId, db) : null;
+        if (sent) threadId = getEmailThreading(sent.id, db)?.thread_id ?? null;
+        if (!threadId) {
+          const inb = getInboundEmail(resolveId("inbound_emails", id) ?? id, db);
+          if (inb) threadId = inb.thread_id;
+        }
+
+        if (threadId) {
+          const msgs = getThreadMessages(threadId, db);
+          console.log(chalk.bold(`\nThread ${threadId.slice(0, 8)} (${msgs.length} message${msgs.length !== 1 ? "s" : ""})\n`));
+          for (const m of msgs) {
+            const tag = m.kind === "sent" ? chalk.green("→ sent") : chalk.cyan("← recv");
+            console.log(`  ${tag}  ${m.at.slice(0, 16)}  ${chalk.dim(m.from)}`);
+            console.log(`         ${m.subject}`);
+          }
+          console.log();
+          output({ thread_id: threadId, messages: msgs }, "");
+          return;
+        }
+
+        if (!sent) return handleError(new Error(`Email not found: ${id}`));
+        const replies = listReplies(sent.id, db);
         console.log(chalk.bold(`\nThread (${1 + replies.length} message${replies.length !== 1 ? "s" : ""})\n`));
-        console.log(chalk.bold(`  [Sent] ${emailRecord!.sent_at.slice(0,16)}`));
-        console.log(`  ${chalk.cyan(emailRecord!.from_address)} → ${emailRecord!.to_addresses.join(", ")}`);
-        console.log(`  ${chalk.dim("Subject:")} ${emailRecord!.subject}  ${colorStatus(emailRecord!.status)}`);
+        console.log(chalk.bold(`  [Sent] ${sent.sent_at.slice(0, 16)}`));
+        console.log(`  ${chalk.cyan(sent.from_address)} → ${sent.to_addresses.join(", ")}`);
+        console.log(`  ${chalk.dim("Subject:")} ${sent.subject}  ${colorStatus(sent.status)}`);
         for (const r of replies) {
-          console.log(`\n  ${chalk.bold(`[Reply] ${r.received_at.slice(0,16)}`)}`);
-          console.log(`  ${chalk.cyan(r.from_address)}: ${(r.text_body ?? "").slice(0,150).replace(/\n/g," ")}${(r.text_body ?? "").length > 150 ? "..." : ""}`);
+          console.log(`\n  ${chalk.bold(`[Reply] ${r.received_at.slice(0, 16)}`)}`);
+          console.log(`  ${chalk.cyan(r.from_address)}: ${(r.text_body ?? "").slice(0, 150).replace(/\n/g, " ")}`);
         }
         if (!replies.length) console.log(chalk.dim("\n  No replies yet."));
         console.log();
-        output({ email: emailRecord, replies }, "");
+        output({ email: sent, replies }, "");
       } catch (e) { handleError(e); }
     });
 

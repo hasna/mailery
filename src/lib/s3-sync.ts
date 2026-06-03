@@ -213,6 +213,19 @@ export async function syncS3Inbox(opts: S3SyncOptions): Promise<S3SyncResult> {
         received_at: (parsed.date ?? new Date()).toISOString(),
       }, db);
 
+      // Threading: link this inbound to an existing thread if it replies to one
+      // of our sent emails (via In-Reply-To / References), else start a new one.
+      try {
+        const headerObj = Object.fromEntries(
+          Object.entries(parsed.headers ?? {}).map(([k, v]) => [k, String(v)]),
+        );
+        const { resolveThreadForInbound, setInboundThreadId } = await import("../db/threads.js");
+        const { uuid } = await import("../db/database.js");
+        const { thread_id, parent_email_id } = resolveThreadForInbound(headerObj, uuid(), db);
+        setInboundThreadId(stored.id, thread_id, db);
+        if (parent_email_id) db.run("UPDATE inbound_emails SET in_reply_to_email_id = ? WHERE id = ?", [parent_email_id, stored.id]);
+      } catch { /* threading is best-effort */ }
+
       result.synced++;
       result.last_key = obj.key;
 

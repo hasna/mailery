@@ -37,5 +37,8 @@ export function buildThreadingHeaders(parent: ParentRef): ThreadingHeaders {
 
 export function parseReferences(header: string | undefined | null): string[] {
   if (!header) return [];
-  return header.split(/\s+/).map((s) => s.trim()).filter(Boolean);
+  // Prefer extracting <...> Message-IDs (robust to space/comma separators).
+  const matches = header.match(/<[^>]+>/g);
+  if (matches) return matches;
+  return header.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
 }

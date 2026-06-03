@@ -63,3 +63,30 @@ export function getThreadMessages(threadId: string, db?: Database): Array<{ kind
   ];
   return all.sort((a, b) => a.at.localeCompare(b.at));
 }
+
+import { parseReferences } from "../lib/threading.js";
+
+/**
+ * Resolve the thread for an inbound email from its In-Reply-To / References
+ * headers. If any referenced Message-ID matches one of our sent emails, return
+ * that email's thread_id (and id); otherwise start a new thread.
+ */
+export function resolveThreadForInbound(
+  headers: Record<string, string> | undefined,
+  newThreadId: string,
+  db?: Database,
+): { thread_id: string; parent_email_id: string | null } {
+  const d = db || getDatabase();
+  const h = headers ?? {};
+  const inReplyTo = h["In-Reply-To"] ?? h["in-reply-to"] ?? "";
+  const refs = parseReferences(h["References"] ?? h["references"]);
+  // Try In-Reply-To first, then References from newest to oldest.
+  const candidates = [inReplyTo, ...refs.reverse()].map((s) => s.trim()).filter(Boolean);
+  for (const c of candidates) {
+    const parent = getEmailByMessageId(c, d);
+    if (parent) {
+      return { thread_id: parent.thread_id ?? newThreadId, parent_email_id: parent.id };
+    }
+  }
+  return { thread_id: newThreadId, parent_email_id: null };
+}

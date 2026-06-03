@@ -222,6 +222,13 @@ export class SESAdapter implements ProviderAdapter {
       const result = await this.client.send(
         new SendEmailCommand({
           FromEmailAddress: opts.from,
+          // SESv2 SendEmail with Raw content still needs explicit recipients —
+          // omitting Destination means the message is accepted but not delivered.
+          Destination: {
+            ToAddresses: toArr,
+            CcAddresses: ccArr.length > 0 ? ccArr : undefined,
+            BccAddresses: bccArr.length > 0 ? bccArr : undefined,
+          },
           Content: {
             Raw: { Data: Buffer.from(rawMessage) },
           },
@@ -333,49 +340,55 @@ export class SESAdapter implements ProviderAdapter {
 
 function buildRawMime(opts: SendEmailOptions): string {
   const toArr = Array.isArray(opts.to) ? opts.to : [opts.to];
-  const boundary = `boundary_${crypto.randomUUID().replace(/-/g, "")}`;
+  const rnd = () => crypto.randomUUID().replace(/-/g, "");
+  // Fully independent boundaries (no prefix collision — a nested boundary that
+  // is a prefix of its parent makes MIME parsers ambiguous and gets rejected).
+  const mixedB = `mixed_${rnd()}`;
+  const altB = `alt_${rnd()}`;
+  const hasAttachments = (opts.attachments?.length ?? 0) > 0;
 
-  const lines: string[] = [
+  const headerLines: string[] = [
     `From: ${opts.from}`,
     `To: ${toArr.join(", ")}`,
+    ...(opts.cc ? [`Cc: ${(Array.isArray(opts.cc) ? opts.cc : [opts.cc]).join(", ")}`] : []),
     `Subject: ${opts.subject}`,
+    `Date: ${new Date().toUTCString()}`,
     `MIME-Version: 1.0`,
+    ...(opts.reply_to ? [`Reply-To: ${opts.reply_to}`] : []),
     ...(opts.headers ? Object.entries(opts.headers).map(([k, v]) => `${k}: ${v}`) : []),
-    `Content-Type: multipart/mixed; boundary="${boundary}"`,
-    "",
-    `--${boundary}`,
-    `Content-Type: multipart/alternative; boundary="${boundary}_alt"`,
-    "",
   ];
 
-  if (opts.text) {
-    lines.push(`--${boundary}_alt`);
-    lines.push(`Content-Type: text/plain; charset=UTF-8`);
-    lines.push("");
-    lines.push(opts.text);
-    lines.push("");
+  // The body: an alternative part (text + html) when both exist, else a single
+  // part. Wrapped in multipart/mixed ONLY when there are attachments.
+  const altParts: string[] = [];
+  if (opts.text) altParts.push(`--${altB}`, `Content-Type: text/plain; charset=UTF-8`, "", opts.text, "");
+  if (opts.html) altParts.push(`--${altB}`, `Content-Type: text/html; charset=UTF-8`, "", opts.html, "");
+
+  function bodyBlock(): { ctype: string; lines: string[] } {
+    if (opts.text && opts.html) {
+      return { ctype: `multipart/alternative; boundary="${altB}"`, lines: [...altParts, `--${altB}--`] };
+    }
+    if (opts.html) return { ctype: `text/html; charset=UTF-8`, lines: [opts.html] };
+    return { ctype: `text/plain; charset=UTF-8`, lines: [opts.text ?? ""] };
   }
 
-  if (opts.html) {
-    lines.push(`--${boundary}_alt`);
-    lines.push(`Content-Type: text/html; charset=UTF-8`);
-    lines.push("");
-    lines.push(opts.html);
-    lines.push("");
+  const lines: string[] = [...headerLines];
+  if (!hasAttachments) {
+    const b = bodyBlock();
+    lines.push(`Content-Type: ${b.ctype}`, "", ...b.lines);
+    return lines.join("\r\n");
   }
 
-  lines.push(`--${boundary}_alt--`);
-
-  for (const attachment of opts.attachments ?? []) {
-    lines.push(`--${boundary}`);
-    lines.push(`Content-Type: ${attachment.content_type}; name="${attachment.filename}"`);
-    lines.push(`Content-Disposition: attachment; filename="${attachment.filename}"`);
-    lines.push(`Content-Transfer-Encoding: base64`);
-    lines.push("");
-    lines.push(attachment.content);
-    lines.push("");
+  // With attachments: multipart/mixed { body, attachments... }
+  lines.push(`Content-Type: multipart/mixed; boundary="${mixedB}"`, "");
+  const b = bodyBlock();
+  lines.push(`--${mixedB}`, `Content-Type: ${b.ctype}`, "", ...b.lines, "");
+  for (const a of opts.attachments ?? []) {
+    lines.push(`--${mixedB}`,
+      `Content-Type: ${a.content_type}; name="${a.filename}"`,
+      `Content-Disposition: attachment; filename="${a.filename}"`,
+      `Content-Transfer-Encoding: base64`, "", a.content, "");
   }
-
-  lines.push(`--${boundary}--`);
+  lines.push(`--${mixedB}--`);
   return lines.join("\r\n");
 }

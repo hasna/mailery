@@ -117,6 +117,68 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
       } catch (e) { handleError(e); }
     });
 
+  // ── roundtrip (acceptance test) ─────────────────────────────────────────
+  cmd
+    .command("roundtrip")
+    .description("Send N tokened emails around a ring of addresses and confirm 100% receipt (via SES inbound → S3 → SQLite)")
+    .requiredOption("--domain <domain>", "Domain whose addresses to test")
+    .requiredOption("--provider <id>", "SES provider ID (sends + inbound association)")
+    .option("--addresses <list>", "Comma-separated local parts", "one,two,three")
+    .option("--count <n>", "Messages per directed pair", "16")
+    .option("--bucket <name>", "Inbound S3 bucket (defaults to config inbound_s3_bucket)")
+    .option("--profile <profile>", "AWS profile for S3 sync")
+    .option("--poll-attempts <n>", "Receipt poll attempts", "12")
+    .option("--poll-interval <ms>", "Receipt poll interval ms", "10000")
+    .option("--throttle <ms>", "Delay between sends (SES sandbox = 1100)", "1100")
+    .action(async (opts: { domain: string; provider: string; addresses: string; count: string; bucket?: string; profile?: string; pollAttempts: string; pollInterval: string; throttle: string }) => {
+      try {
+        if (opts.profile) process.env["AWS_PROFILE"] = opts.profile;
+        const db = getDatabase();
+        const providerId = resolveId("providers", opts.provider);
+        if (!getProvider(providerId)) handleError(new Error(`Provider not found: ${opts.provider}`));
+        const addresses = opts.addresses.split(",").map((a) => `${a.trim()}@${opts.domain}`);
+        const { getInboundConfig } = await import("../../lib/config.js");
+        const bucket = opts.bucket ?? getInboundConfig().bucket;
+        if (!bucket) handleError(new Error("No inbound bucket: pass --bucket or set inbound_s3_bucket"));
+        const throttle = parseInt(opts.throttle, 10);
+
+        const { sendWithFailover } = await import("../../lib/send.js");
+        const { syncS3Inbox } = await import("../../lib/s3-sync.js");
+        const { runRoundtrip } = await import("../../lib/provision/roundtrip.js");
+
+        const report = await runRoundtrip(
+          {
+            send: async ({ from, to, subject, text }) => {
+              const r = await sendWithFailover(providerId, { from, to, subject, text, html: `<p>${text}</p>` }, db);
+              await new Promise((res) => setTimeout(res, throttle));
+              return { messageId: r.messageId };
+            },
+            fetchReceived: async (mailbox) => {
+              const domain = mailbox.split("@")[1]!;
+              await syncS3Inbox({ bucket: bucket!, prefix: `inbound/${domain}/`, providerId, limit: 1000, db });
+              const rows = db.query("SELECT subject FROM inbound_emails WHERE to_addresses LIKE ?").all(`%${mailbox}%`) as { subject: string }[];
+              return rows;
+            },
+          },
+          {
+            addresses,
+            count: parseInt(opts.count, 10),
+            tokenPrefix: `RT-${opts.domain.split(".")[0]}`,
+            pollAttempts: parseInt(opts.pollAttempts, 10),
+            pollIntervalMs: parseInt(opts.pollInterval, 10),
+          },
+        );
+
+        const lines = [chalk.bold(`\nRound-trip ${opts.domain}: ${report.totalReceived}/${report.totalSent} received`)];
+        for (const d of report.directions) {
+          lines.push(`  ${d.from} → ${d.to}: ${d.received}/${d.sent}${d.missing.length ? chalk.red(` (missing ${d.missing.length})`) : chalk.green(" ✓")}`);
+        }
+        lines.push(report.success ? chalk.green("✓ 100% delivery/receipt") : chalk.red(`✗ ${report.totalSent - report.totalReceived} missing`));
+        output(report, lines.join("\n"));
+        if (!report.success) process.exitCode = 1;
+      } catch (e) { handleError(e); }
+    });
+
   // ── retry ───────────────────────────────────────────────────────────────
   cmd
     .command("retry <domain>")

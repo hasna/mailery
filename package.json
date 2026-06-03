@@ -1,6 +1,6 @@
 {
   "name": "@hasna/emails",
-  "version": "0.5.46",
+  "version": "0.5.47",
   "description": "Email management CLI + MCP server + dashboard for Resend and AWS SES",
   "type": "module",
   "repository": {

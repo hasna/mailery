@@ -1,13 +1,26 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { getDatabase, uuid } from "../../db/database.js";
-import { getInboundEmail } from "../../db/inbound.js";
+import { getDatabase, uuid, resolvePartialId, type Database } from "../../db/database.js";
+import { getInboundEmail, type InboundEmail } from "../../db/inbound.js";
 import { getEmail, createEmail } from "../../db/emails.js";
+import type { Email } from "../../types/index.js";
 import { storeEmailContent } from "../../db/email-content.js";
 import { getEmailThreading, setEmailThreading, setInboundThreadId } from "../../db/threads.js";
 import { generateMessageId, buildThreadingHeaders, parseReferences } from "../../lib/threading.js";
 import { sendWithFailover } from "../../lib/send.js";
 import { handleError, resolveId } from "../utils.js";
+
+/**
+ * Resolve an id that may name an inbound OR a sent email. Uses resolvePartialId
+ * (returns null on miss) rather than resolveId (which exits the process) so a
+ * sent-email id doesn't get killed by the inbound lookup.
+ */
+export function resolveInboundOrSent(id: string, db: Database): { inbound: InboundEmail | null; sent: Email | null } {
+  const inbound = getInboundEmail(resolvePartialId(db, "inbound_emails", id) ?? id, db);
+  if (inbound) return { inbound, sent: null };
+  const sent = getEmail(resolvePartialId(db, "emails", id) ?? id, db);
+  return { inbound: null, sent };
+}
 
 function rePrefix(subject: string): string {
   return /^re:/i.test(subject.trim()) ? subject : `Re: ${subject}`;
@@ -33,8 +46,7 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
     .action(async (id: string, opts: { to: string[]; from: string; body?: string; provider?: string }) => {
       try {
         const db = getDatabase();
-        const inbound = getInboundEmail(resolveId("inbound_emails", id) ?? id, db);
-        const sent = inbound ? null : getEmail(resolveId("emails", id) ?? id, db);
+        const { inbound, sent } = resolveInboundOrSent(id, db);
         if (!inbound && !sent) return handleError(new Error(`Email not found: ${id}`));
 
         const origFrom = inbound ? inbound.from_address : sent!.from_address;
@@ -73,8 +85,7 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
         const db = getDatabase();
 
         // Resolve the email being replied to: inbound first, then sent.
-        const inbound = getInboundEmail(resolveId("inbound_emails", id) ?? id, db);
-        const sent = inbound ? null : getEmail(resolveId("emails", id) ?? id, db);
+        const { inbound, sent } = resolveInboundOrSent(id, db);
         if (!inbound && !sent) return handleError(new Error(`Email not found: ${id}`));
 
         let from: string, to: string[], subject: string;

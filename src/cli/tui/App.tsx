@@ -1,14 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import {
   listMailbox, mailboxCounts, getMessageBody, getConversation,
-  toggleStar, toggleRead, markRead, archiveMessage, replyDefaults, sendComposed,
-  MAILBOXES, mailboxLabel, type Mailbox, type TuiMessage, type MailboxCounts,
+  toggleStar, toggleRead, markRead, archiveMessage, replyDefaults, sendComposed, listProfiles,
+  MAILBOXES, mailboxLabel, type Mailbox, type TuiMessage, type MailboxCounts, type ProfileInfo,
 } from "./data.js";
 import { autoPull } from "./autopull.js";
 import { truncate, senderName, relativeTime, formatDate, wrapText } from "./format.js";
 
-type View = "list" | "reader" | "compose";
+type View = "list" | "reader" | "compose" | "profiles";
 type ComposeField = "to" | "subject" | "body";
 interface ComposeState { to: string; subject: string; body: string; field: ComposeField; replyTo?: TuiMessage }
 interface Status { text: string; tone: "info" | "ok" | "err" }
@@ -110,8 +110,11 @@ export function App({ initialMailbox = "inbox" }: AppProps) {
     if (view === "compose" && compose) return handleCompose(input, key);
     if (searching) return handleSearch(input, key);
 
+    if (view === "profiles") { if (input === "q" || key.escape || input === "p") setView("list"); return; }
+
     if (input === "q" || (key.ctrl && input === "c")) { if (view === "reader") { setView("list"); return; } exit(); return; }
     if (input === "c") { startCompose(); return; }
+    if (input === "p") { setView("profiles"); return; }
     if (input === "g") { flash("refreshing…"); void autoPull().then((r) => { reload(); flash(r?.pulled ? `↓ ${r.pulled} new` : "up to date", "ok"); }); return; }
 
     if (view === "reader") {
@@ -166,6 +169,7 @@ export function App({ initialMailbox = "inbox" }: AppProps) {
 
   let content;
   if (view === "compose" && compose) content = <Compose compose={compose} from={deriveFrom(compose)} width={innerW} height={contentH} />;
+  else if (view === "profiles") content = <Profiles width={innerW} height={contentH} />;
   else if (view === "reader") content = <Reader body={body} conversation={conversation} scroll={scroll} width={innerW} height={contentH} />;
   else content = <List messages={messages} sel={sel} now={now} width={innerW} height={contentH} searching={searching} search={search} />;
 
@@ -217,12 +221,13 @@ function List({ messages, sel, now, width, height, searching, search }: { messag
       {messages.length === 0 ? <Text dimColor>No messages here.</Text> : win.map((m, i) => {
         const selected = start + i === sel;
         const who = senderName(m.kind === "sent" ? m.to : m.from);
+        const subjCell = m.attachments > 0 ? `📎 ${m.subject}` : m.subject;
         return (
           <Text key={m.id} wrap="truncate" backgroundColor={selected ? "blue" : undefined}>
             <Text color={m.is_starred ? "yellow" : "gray"}>{m.is_starred ? "★" : " "}</Text>
             <Text color="cyan">{m.is_read ? " " : "●"}</Text>{" "}
             <Text bold={!m.is_read} color={selected ? "whiteBright" : undefined}>{truncate(who, whoW).padEnd(whoW)}</Text>{" "}
-            <Text bold={!m.is_read} dimColor={m.is_read && !selected}>{truncate(m.subject, subjW).padEnd(subjW)}</Text>{" "}
+            <Text bold={!m.is_read} dimColor={m.is_read && !selected}>{truncate(subjCell, subjW).padEnd(subjW)}</Text>{" "}
             <Text dimColor={!selected}>{relativeTime(m.date, now).padStart(timeW)}</Text>
           </Text>
         );
@@ -231,10 +236,18 @@ function List({ messages, sel, now, width, height, searching, search }: { messag
   );
 }
 
+function bytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function Reader({ body, conversation, scroll, width, height }: { body: ReturnType<typeof getMessageBody>; conversation: ReturnType<typeof getConversation>; scroll: number; width: number; height: number }) {
   if (!body) return <Text dimColor>No message selected.</Text>;
   const text = body.text ?? (body.html ? body.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : "(no text content)");
-  const headerH = 4 + (conversation.length > 1 ? 1 : 0);
+  const atts = body.attachments ?? [];
+  const attH = atts.length ? Math.min(atts.length, 6) + 1 : 0;
+  const headerH = 4 + (conversation.length > 1 ? 1 : 0) + attH;
   const lines = wrapText(text, Math.max(20, width), 5000);
   const avail = Math.max(2, height - headerH - 1);
   const view = lines.slice(scroll, scroll + avail);
@@ -246,9 +259,36 @@ function Reader({ body, conversation, scroll, width, height }: { body: ReturnTyp
       <Text wrap="truncate"><Text dimColor>to   </Text>{truncate(body.to, width - 5)}</Text>
       <Text dimColor>{formatDate(body.date)} · {body.flags.join(", ")}</Text>
       {conversation.length > 1 && <Text color="magenta">🧵 {conversation.length} in thread</Text>}
+      {atts.length > 0 && <Text color="yellow">📎 {atts.length} attachment{atts.length > 1 ? "s" : ""}:</Text>}
+      {atts.slice(0, 6).map((a, i) => (
+        <Text key={i} wrap="truncate"><Text dimColor> • </Text>{truncate(a.filename, width - 28)} <Text dimColor>{bytes(a.size)} · {a.content_type.split("/").pop()}{a.location ? " ✓saved" : ""}</Text></Text>
+      ))}
       <Text> </Text>
       {view.map((l, i) => <Text key={i} wrap="truncate">{l || " "}</Text>)}
       {scroll + avail < lines.length && <Text dimColor>↓ {lines.length - scroll - avail} more — j/k to scroll</Text>}
+    </Box>
+  );
+}
+
+function Profiles({ width, height }: { width: number; height: number }) {
+  const profiles = listProfiles();
+  const byProvider = new Map<string, ProfileInfo[]>();
+  for (const p of profiles) { const a = byProvider.get(p.provider) ?? []; a.push(p); byProvider.set(p.provider, a); }
+  const rows: ReactNode[] = [];
+  for (const [provider, list] of byProvider) {
+    rows.push(<Text key={`h-${provider}`} bold color="magentaBright">{provider.toUpperCase()}</Text>);
+    for (const p of list) {
+      rows.push(<Text key={p.id} wrap="truncate">  <Text color="cyanBright">{p.name}</Text>{p.active ? "" : <Text dimColor> (inactive)</Text>}</Text>);
+      if (p.domains.length) rows.push(<Text key={p.id + "d"} wrap="truncate"><Text dimColor>    domains:   </Text>{truncate(p.domains.join(", "), width - 14)}</Text>);
+      if (p.addresses.length) rows.push(<Text key={p.id + "a"} wrap="truncate"><Text dimColor>    addresses: </Text>{truncate(p.addresses.join(", "), width - 14)} <Text dimColor>({p.addresses.length})</Text></Text>);
+      if (!p.domains.length && !p.addresses.length) rows.push(<Text key={p.id + "e"} dimColor>    (no domains/addresses)</Text>);
+    }
+  }
+  return (
+    <Box flexDirection="column" width={width} height={height}>
+      <Text bold color="whiteBright">Profiles — your configured accounts (provider = the service)</Text>
+      <Text> </Text>
+      {rows.slice(0, height - 3)}
     </Box>
   );
 }
@@ -261,13 +301,13 @@ function Compose({ compose, from, width, height }: { compose: ComposeState; from
   const bodyLines = (compose.body || "").split("\n");
   return (
     <Box flexDirection="column" width={width} height={height}>
-      <Text color="magentaBright" bold>✎ {compose.replyTo ? "Reply" : "New message"}</Text>
+      <Text color="magentaBright" bold>✎ {compose.replyTo ? "Reply" : "New message"} <Text dimColor>· markdown — **bold**, lists, etc. render in the sent email</Text></Text>
       <Text><Text color="gray" bold>{"from".padEnd(8)}</Text><Text dimColor>{from || "(no sender found — pass --from to the send command)"}</Text></Text>
       {field("to", compose.to)}
       {field("subject", compose.subject)}
       <Text dimColor>{"─".repeat(Math.min(width, 60))}</Text>
       {bodyLines.map((line, i) => (
-        <Text key={i} wrap="truncate">{line}{compose.field === "body" && i === bodyLines.length - 1 ? <Text color="cyan">▌</Text> : null}</Text>
+        <Text key={i} wrap="truncate">{line || " "}{compose.field === "body" && i === bodyLines.length - 1 ? <Text color="cyan">▌</Text> : null}</Text>
       ))}
     </Box>
   );
@@ -275,8 +315,9 @@ function Compose({ compose, from, width, height }: { compose: ComposeState; from
 
 function Footer({ view, searching }: { view: View; searching: boolean }) {
   const hint = searching ? "type to filter · Enter apply · Esc clear"
-    : view === "compose" ? "Tab field · Enter newline · Ctrl-S send · Esc cancel"
+    : view === "compose" ? "Tab field · Enter blank/new line · Ctrl-S send (markdown→HTML) · Esc cancel"
+    : view === "profiles" ? "your accounts & their domains/addresses · p or Esc back"
     : view === "reader" ? "j/k scroll · J/K next/prev · r reply · s star · e archive · Esc back"
-    : "↑↓ move · Enter open · ]/[ or 1-5 folders · r reply · c compose · s star · e archive · / search · q quit";
+    : "↑↓ move · Enter open · ]/[ or 1-5 folders · r reply · c compose · p profiles · s star · e archive · / search · q quit";
   return <Box paddingX={1}><Text dimColor>{hint}</Text></Box>;
 }

@@ -97,3 +97,47 @@ describe("tui data — compose / reply", () => {
     await expect(sendComposed({ from: "me@x.com", to: "  ", subject: "x", body: "y" })).rejects.toThrow(/recipient/i);
   });
 });
+
+import { renderMarkdown, listProfiles } from "./data.js";
+import { createDomain } from "../../db/domains.js";
+
+describe("tui data — attachments + markdown + profiles", () => {
+  it("surfaces attachment count + details", () => {
+    const db = getDatabase();
+    db.run(`INSERT INTO inbound_emails (id, message_id, from_address, to_addresses, cc_addresses, subject, text_body, attachments_json, attachment_paths, headers_json, raw_size, received_at) VALUES ('att1','<a@x>','s@x.com','["me@x.com"]','[]','has files','body','[{"filename":"report.pdf","content_type":"application/pdf","size":2048},{"filename":"pic.png","content_type":"image/png","size":512}]','[{"filename":"report.pdf","s3_url":"s3://b/report.pdf"}]','{}',1,'2026-06-03T10:00:00.000Z')`);
+    const m = listMailbox("inbox").find((x) => x.id === "att1")!;
+    expect(m.attachments).toBe(2);
+    const body = getMessageBody(m)!;
+    expect(body.attachments).toHaveLength(2);
+    expect(body.attachments[0]!.filename).toBe("report.pdf");
+    expect(body.attachments[0]!.location).toBe("s3://b/report.pdf"); // merged from paths
+    expect(body.attachments[1]!.location).toBeUndefined();
+  });
+
+  it("renders markdown to HTML", () => {
+    const html = renderMarkdown("# Hi\n\n- one\n- two\n\n**bold**");
+    expect(html).toContain("<h1>");
+    expect(html).toContain("<li>one</li>");
+    expect(html).toContain("<strong>bold</strong>");
+  });
+
+  it("sends a markdown message as HTML by default", async () => {
+    const r = await sendComposed({ from: "me@x.com", to: "you@y.com", subject: "md", body: "**hello** world" });
+    const { getEmailContent } = await import("../../db/email-content.js");
+    const content = getEmailContent(r.id, getDatabase());
+    expect(content?.html).toContain("<strong>hello</strong>");
+    expect(content?.text_body).toBe("**hello** world");
+  });
+
+  it("lists profiles with provider type + domains + addresses", () => {
+    const db = getDatabase();
+    createDomain(providerId, "acme.com", db);
+    const { createAddress } = require("../../db/addresses.js");
+    createAddress({ provider_id: providerId, email: "ops@acme.com" }, db);
+    const profiles = listProfiles();
+    const p = profiles.find((x) => x.id === providerId)!;
+    expect(p.provider).toBe("sandbox");
+    expect(p.domains).toContain("acme.com");
+    expect(p.addresses).toContain("ops@acme.com");
+  });
+});

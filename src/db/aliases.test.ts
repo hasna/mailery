@@ -3,6 +3,7 @@ import { closeDatabase, resetDatabase } from "./database.js";
 import {
   createAlias, createCatchAll, removeAlias, getAlias,
   listAliases, resolveAlias, CATCH_ALL,
+  setGlobalCatchAll, ensureDefaultCatchAll,
 } from "./aliases.js";
 
 beforeEach(() => { process.env["EMAILS_DB_PATH"] = ":memory:"; resetDatabase(); });
@@ -67,10 +68,42 @@ describe("list / remove", () => {
   it("lists all and per-domain, and removes by id", () => {
     const a = createAlias("a@x.com", "t@x.com");
     createCatchAll("y.com", "t@y.com");
-    expect(listAliases()).toHaveLength(2);
+    // exclude the default protected global catch-all that's always seeded
+    expect(listAliases().filter((x) => x.domain !== "*")).toHaveLength(2);
     expect(listAliases("x.com")).toHaveLength(1);
     expect(removeAlias(a.id)).toBe(true);
     expect(getAlias(a.id)).toBeNull();
     expect(resolveAlias("a@x.com")).toBeNull();
+  });
+});
+
+describe("global catch-all (protected, all domains)", () => {
+  it("resolves any domain when no specific/domain match", () => {
+    setGlobalCatchAll("inbox@hq.com");
+    expect(resolveAlias("anything@whatever.com")).toBe("inbox@hq.com");
+    expect(resolveAlias("x@another.org")).toBe("inbox@hq.com");
+  });
+
+  it("precedence: specific > domain catch-all > global", () => {
+    setGlobalCatchAll("global@hq.com");
+    createCatchAll("acme.com", "acme-inbox@hq.com");
+    createAlias("ceo@acme.com", "ceo@hq.com");
+    expect(resolveAlias("ceo@acme.com")).toBe("ceo@hq.com");        // specific
+    expect(resolveAlias("random@acme.com")).toBe("acme-inbox@hq.com"); // domain catch-all
+    expect(resolveAlias("x@other.com")).toBe("global@hq.com");       // global
+  });
+
+  it("the protected global catch-all cannot be deleted", () => {
+    const g = setGlobalCatchAll("inbox@hq.com");
+    expect(g.protected).toBe(true);
+    expect(() => removeAlias(g.id)).toThrow(/protected/i);
+  });
+
+  it("ensureDefaultCatchAll is idempotent and protected", () => {
+    const a = ensureDefaultCatchAll();
+    const b = ensureDefaultCatchAll();
+    expect(a.id).toBe(b.id);
+    expect(a.protected).toBe(true);
+    expect(listAliases().filter((x) => x.domain === "*")).toHaveLength(1);
   });
 });

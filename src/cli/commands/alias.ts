@@ -1,9 +1,10 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { createAlias, createCatchAll, removeAlias, getAlias, listAliases, resolveAlias, CATCH_ALL } from "../../db/aliases.js";
+import { createAlias, createCatchAll, setGlobalCatchAll, getGlobalCatchAll, ensureDefaultCatchAll, removeAlias, getAlias, listAliases, resolveAlias, CATCH_ALL, ALL_DOMAINS } from "../../db/aliases.js";
 import { handleError } from "../utils.js";
 
 function display(a: { local_part: string; domain: string }): string {
+  if (a.domain === ALL_DOMAINS) return "*@* (all domains)";
   return a.local_part === CATCH_ALL ? `*@${a.domain}` : `${a.local_part}@${a.domain}`;
 }
 
@@ -31,17 +32,31 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
     });
 
   cmd
+    .command("global <target>")
+    .description("Set the protected GLOBAL catch-all (all domains) → target (never deletable)")
+    .action((target: string) => {
+      try {
+        const a = setGlobalCatchAll(target);
+        output(a, chalk.green(`✓ global catch-all (all domains) → ${a.target_address || "(keep, no forward)"}`));
+      } catch (e) { handleError(e); }
+    });
+
+  cmd
     .command("list")
-    .description("List aliases (optionally for one domain)")
+    .description("List aliases (optionally for one domain), incl. the protected global catch-all")
     .option("--domain <domain>", "Filter by domain")
     .action((opts: { domain?: string }) => {
+      if (!opts.domain) ensureDefaultCatchAll(); // make sure the protected default exists
       const aliases = listAliases(opts.domain);
       if (aliases.length === 0) { output([], chalk.dim("No aliases configured.")); return; }
       const lines = [chalk.bold("\nAliases:")];
       for (const a of aliases) {
-        const kind = a.local_part === CATCH_ALL ? chalk.magenta("[catch-all]") : "           ";
-        lines.push(`  ${chalk.cyan(a.id.slice(0, 8))} ${kind} ${display(a).padEnd(32)} → ${a.target_address}`);
+        const kind = a.protected ? chalk.green("[protected]") : a.local_part === CATCH_ALL ? chalk.magenta("[catch-all]") : "           ";
+        const target = a.target_address || chalk.dim("(keep, no forward)");
+        lines.push(`  ${chalk.cyan(a.id.slice(0, 8))} ${kind} ${display(a).padEnd(34)} → ${target}`);
       }
+      const g = getGlobalCatchAll();
+      if (g) lines.push(chalk.dim("\n  The global catch-all is protected — it catches mail for every domain and can't be deleted."));
       output(aliases, lines.join("\n"));
     });
 

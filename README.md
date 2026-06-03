@@ -51,15 +51,18 @@ emails interactive --mailbox unread
 ```
 
 Keys — list: `↑↓`/`j k` move · `Enter` open · `]`/`[` or `1`–`5` switch folder ·
-`r` reply · `c` compose · `s` star · `e` archive · `u` unread · `/` search ·
-`g` refresh now · `q` quit. Reader: `j/k` scroll · `J/K` next/prev message ·
-`Esc` back. Composer: `Tab` next field · `Ctrl-S` send · `Esc` cancel.
-Folders: Inbox · Unread · Starred · Sent · Archived.
+`r` reply · `c` compose · `p` profiles · `s` star · `e` archive · `u` unread ·
+`/` search · `g` refresh now · `q` quit. Reader: `j/k` scroll · `J/K` next/prev ·
+`Esc` back — shows 📎 attachments with size/type. Composer writes **markdown**
+(rendered to HTML on send), `Enter` for blank/new lines · `Tab` next field ·
+`Ctrl-S` send · `Esc` cancel. `p` shows your profiles (accounts) + their
+domains/addresses. Folders: Inbox · Unread · Starred · Sent · Archived.
 
 ## Command Structure
 
 ```
-emails interactive       # 📬 Gmail-style mailbox TUI (alias: emails ui)
+emails interactive       # 📬 Mailbox TUI (alias: emails ui) — markdown compose, attachments, profiles
+emails profiles          # your accounts (gmail/ses/resend) + their domains & addresses
 emails provider          # add/list/remove/sync providers (ses, resend, gmail)
 emails domain            # add/verify/buy/setup/dns/check domains
 emails address           # manage sender addresses (add, suspend, activate, quota)
@@ -106,6 +109,7 @@ emails sendkey list / revoke <id>
 # Per-domain aliases + catch-all
 emails alias add support@example.com ops@example.com
 emails alias catch-all example.com inbox@example.com   # *@example.com → inbox@
+emails alias global inbox@example.com                   # protected global catch-all (ALL domains)
 emails alias resolve anything@example.com               # show where it routes
 
 # Address lifecycle

@@ -56,10 +56,18 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           : undefined;
 
         if (opts.allProfiles) {
-          const profiles = await listGmailConnectorProfiles();
-          if (profiles.length === 0) {
+          const discovered = await listGmailConnectorProfiles();
+          if (discovered.length === 0) {
             console.error(chalk.red("No Gmail connector profiles found."));
             process.exit(1);
+          }
+          // The generic "default" connector profile is an alias of a named
+          // account (same mailbox) — syncing it duplicates every email. Skip it
+          // when named profiles exist so we don't re-create "Gmail (default)".
+          const named = discovered.filter((p) => p.toLowerCase() !== "default");
+          const profiles = named.length > 0 ? named : discovered;
+          if (profiles.length < discovered.length) {
+            console.log(chalk.dim(`Skipping the generic "default" profile (duplicate of a named account).`));
           }
 
           const aggregate = { synced: 0, skipped: 0, attachments_saved: 0, errors: [] as string[], done: true };
@@ -880,8 +888,17 @@ function formatArchiveMigrationResult(result: { scanned: number; copied: number;
   return lines.join("\n");
 }
 
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+interface AttMeta { filename: string; content_type: string; size: number }
+interface AttPath { filename: string; local_path?: string; s3_url?: string }
+
 function formatEmailDetail(
-  email: { id: string; from_address: string; subject: string; received_at: string; text_body?: string | null; to_addresses: string[]; cc_addresses: string[]; is_read?: boolean; is_starred?: boolean; is_archived?: boolean; label_ids?: string[] },
+  email: { id: string; from_address: string; subject: string; received_at: string; text_body?: string | null; to_addresses: string[]; cc_addresses: string[]; is_read?: boolean; is_starred?: boolean; is_archived?: boolean; label_ids?: string[]; attachments?: AttMeta[]; attachment_paths?: AttPath[] },
 ): string {
   const flags = [
     email.is_read === false ? "unread" : "read",
@@ -889,6 +906,8 @@ function formatEmailDetail(
     email.is_archived ? "archived" : null,
     ...(email.label_ids ?? []),
   ].filter(Boolean).join(", ");
+  const atts = email.attachments ?? [];
+  const byName = new Map((email.attachment_paths ?? []).map((p) => [p.filename, p.local_path ?? p.s3_url]));
   const lines: string[] = [
     chalk.bold(`\n  Subject: ${email.subject}`),
     `  From:    ${chalk.cyan(email.from_address)}`,
@@ -897,9 +916,14 @@ function formatEmailDetail(
     `  Date:    ${email.received_at}`,
     `  Flags:   ${flags}`,
     `  ID:      ${chalk.dim(email.id)}`,
-    "",
-    email.text_body ?? chalk.dim("(no body)"),
-    "",
   ];
+  if (atts.length > 0) {
+    lines.push(chalk.yellow(`  📎 Attachments (${atts.length}):`));
+    for (const a of atts) {
+      const loc = byName.get(a.filename);
+      lines.push(`     ${a.filename.padEnd(44)} ${chalk.dim(`${fmtBytes(a.size)} · ${a.content_type}`)}${loc ? chalk.green("  ✓saved") : chalk.dim("  (run: emails inbox sync to download)")}`);
+    }
+  }
+  lines.push("", email.text_body ?? chalk.dim("(no body)"), "");
   return lines.filter((l) => l !== "").join("\n");
 }

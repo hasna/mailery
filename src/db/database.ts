@@ -597,6 +597,13 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_inbound_star_arch_recv ON inbound_emails(is_starred, is_archived, received_at);
   INSERT OR IGNORE INTO _migrations (id) VALUES (26);
   `,
+
+  // Migration 27: aliases.protected — flags an alias that can't be deleted
+  // (the default global catch-all that catches mail for every domain).
+  `
+  ALTER TABLE aliases ADD COLUMN protected INTEGER NOT NULL DEFAULT 0;
+  INSERT OR IGNORE INTO _migrations (id) VALUES (27);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -761,6 +768,10 @@ function ensureSchema(db: Database): void {
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_arch_recv ON inbound_emails(is_archived, received_at)");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_read_arch_recv ON inbound_emails(is_read, is_archived, received_at)");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_star_arch_recv ON inbound_emails(is_starred, is_archived, received_at)");
+  ensureColumn("ALTER TABLE aliases ADD COLUMN protected INTEGER NOT NULL DEFAULT 0");
+  // The default, protected global catch-all (all domains) — never deletable, so
+  // mail to any of our domains is never dropped. Empty target = keep, no rewrite.
+  ensureProvTable("INSERT OR IGNORE INTO aliases (id, domain, local_part, target_address, protected, created_at, updated_at) VALUES ('global-catch-all', '*', '*', '', 1, datetime('now'), datetime('now'))");
 
   const ensureIndex = (sql: string) => {
     try { db.exec(sql); } catch {}

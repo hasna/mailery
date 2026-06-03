@@ -17,6 +17,7 @@ import { getEmailContent, storeEmailContent } from "../../db/email-content.js";
 import { getThreadMessages } from "../../db/threads.js";
 import { listProviders } from "../../db/providers.js";
 import { sendWithFailover } from "../../lib/send.js";
+import { marked } from "marked";
 
 export type Mailbox = "inbox" | "unread" | "starred" | "sent" | "archived";
 
@@ -38,6 +39,14 @@ export interface TuiMessage {
   labels: string[];
   snippet: string;
   thread_id: string | null;
+  attachments: number;
+}
+
+export interface AttachmentInfo {
+  filename: string;
+  content_type: string;
+  size: number;
+  location?: string; // local path or s3:// url, if downloaded
 }
 
 function snippetOf(text: string | null | undefined): string {
@@ -48,6 +57,7 @@ function snippetOf(text: string | null | undefined): string {
 interface LiteRow {
   id: string; from_address: string; to_addresses: string; subject: string; date: string;
   is_read?: number; is_starred?: number; label_ids_json?: string | null; thread_id?: string | null; snippet?: string | null;
+  attachments?: number;
 }
 
 function liteToMessage(r: LiteRow, kind: "inbound" | "sent"): TuiMessage {
@@ -61,6 +71,7 @@ function liteToMessage(r: LiteRow, kind: "inbound" | "sent"): TuiMessage {
     is_read: kind === "sent" ? true : !!r.is_read,
     is_starred: !!r.is_starred,
     labels, snippet: snippetOf(r.snippet), thread_id: r.thread_id ?? null,
+    attachments: r.attachments ?? 0,
   };
 }
 
@@ -77,7 +88,7 @@ export function listMailbox(mailbox: Mailbox, opts?: { limit?: number; search?: 
   if (mailbox === "sent") {
     const rows = d.query(
       `SELECT e.id, e.from_address, e.to_addresses, e.subject, e.sent_at AS date, e.thread_id,
-              substr(c.text_body, 1, 140) AS snippet
+              e.attachment_count AS attachments, substr(c.text_body, 1, 140) AS snippet
        FROM emails e LEFT JOIN email_content c ON c.email_id = e.id
        ORDER BY e.sent_at DESC LIMIT ?`,
     ).all(limit) as LiteRow[];
@@ -89,7 +100,9 @@ export function listMailbox(mailbox: Mailbox, opts?: { limit?: number; search?: 
       : "is_archived = 0";
     const rows = d.query(
       `SELECT id, from_address, to_addresses, subject, received_at AS date,
-              is_read, is_starred, label_ids_json, thread_id, substr(text_body, 1, 140) AS snippet
+              is_read, is_starred, label_ids_json, thread_id, substr(text_body, 1, 140) AS snippet,
+              (CASE WHEN attachments_json IS NULL OR attachments_json = '[]' THEN 0
+                    ELSE (LENGTH(attachments_json) - LENGTH(REPLACE(attachments_json, '"filename"', ''))) / LENGTH('"filename"') END) AS attachments
        FROM inbound_emails WHERE ${where} ORDER BY received_at DESC LIMIT ?`,
     ).all(limit) as LiteRow[];
     messages = rows.map((r) => liteToMessage(r, "inbound"));
@@ -131,6 +144,13 @@ export interface MessageBody {
   text: string | null;
   html: string | null;
   flags: string[];
+  attachments: AttachmentInfo[];
+}
+
+/** Merge attachment metadata with downloaded-path info (local/s3 location). */
+function mergeAttachments(meta: { filename: string; content_type: string; size: number }[], paths: { filename: string; local_path?: string; s3_url?: string }[]): AttachmentInfo[] {
+  const byName = new Map(paths.map((p) => [p.filename, p.local_path ?? p.s3_url]));
+  return meta.map((a) => ({ filename: a.filename, content_type: a.content_type, size: a.size, location: byName.get(a.filename) }));
 }
 
 export function getMessageBody(msg: TuiMessage, db?: Database): MessageBody | null {
@@ -143,6 +163,7 @@ export function getMessageBody(msg: TuiMessage, db?: Database): MessageBody | nu
       subject: e.subject || "(no subject)", date: e.received_at,
       text: e.text_body, html: e.html_body,
       flags: [e.is_read ? "read" : "unread", e.is_starred && "starred", e.is_archived && "archived", ...e.label_ids].filter(Boolean) as string[],
+      attachments: mergeAttachments(e.attachments ?? [], e.attachment_paths ?? []),
     };
   }
   const e = getEmail(msg.id, d);
@@ -153,6 +174,7 @@ export function getMessageBody(msg: TuiMessage, db?: Database): MessageBody | nu
     subject: e.subject || "(no subject)", date: e.sent_at,
     text: content?.text_body ?? null, html: content?.html ?? null,
     flags: ["sent", e.status].filter(Boolean) as string[],
+    attachments: [],
   };
 }
 
@@ -196,19 +218,62 @@ export function replyDefaults(msg: TuiMessage): { from: string; to: string; subj
   return { from, to, subject };
 }
 
-export interface ComposeInput { from: string; to: string; subject: string; body: string; providerId?: string }
+export interface ComposeInput { from: string; to: string; subject: string; body: string; providerId?: string; markdown?: boolean }
 
-/** Send a composed/replied message via the configured provider. Returns the sent id. */
+/** Render markdown body to a simple, email-safe HTML document. */
+export function renderMarkdown(md: string): string {
+  // marked is synchronous in default mode; wrap output in a minimal HTML shell.
+  const inner = marked.parse(md, { async: false, gfm: true, breaks: true }) as string;
+  return `<!doctype html><html><body style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;color:#1a1a1a">${inner}</body></html>`;
+}
+
+/**
+ * Send a composed/replied message. By default the body is treated as MARKDOWN:
+ * it's rendered to HTML and sent as a multipart message (HTML + the raw
+ * markdown as the plain-text part), so it arrives nicely formatted.
+ */
 export async function sendComposed(input: ComposeInput, db?: Database): Promise<{ id: string; messageId: string }> {
   const d = db || getDatabase();
-  const providerId = input.providerId ?? activeProviderId(d);
-  if (!providerId) throw new Error("No active provider. Add one with 'emails provider add'.");
+  const raw = input.providerId ?? activeProviderId(d);
+  if (!raw) throw new Error("No active provider. Add one with 'emails provider add'.");
+  // Accept a full or partial provider id.
+  const providerId = (await import("../../db/database.js")).resolvePartialId(d, "providers", raw) ?? raw;
   const to = input.to.split(",").map((s) => s.trim()).filter(Boolean);
   if (to.length === 0) throw new Error("At least one recipient is required.");
   if (!input.from) throw new Error("A From address is required.");
-  const sendOpts = { provider_id: providerId, from: input.from, to, subject: input.subject, text: input.body };
+  const useMd = input.markdown !== false && input.body.trim().length > 0;
+  const html = useMd ? renderMarkdown(input.body) : undefined;
+  const sendOpts = { provider_id: providerId, from: input.from, to, subject: input.subject, text: input.body, ...(html ? { html } : {}) };
   const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, d);
   const email = createEmail(actual, sendOpts, messageId, d);
-  storeEmailContent(email.id, { text: input.body }, d);
+  storeEmailContent(email.id, { text: input.body, ...(html ? { html } : {}) }, d);
   return { id: email.id, messageId };
+}
+
+// ── profiles (configured accounts) + their domains/addresses ───────────────────
+
+export interface ProfileInfo {
+  id: string;
+  name: string;
+  provider: string;   // the kind: gmail | ses | resend | cloudflare | sandbox
+  active: boolean;
+  domains: string[];
+  addresses: string[];
+}
+
+/**
+ * A "profile" is a configured account (a row in `providers`); the "provider" is
+ * the kind of service it uses (gmail/ses/resend/cloudflare). This returns each
+ * profile with the domains and sender addresses registered under it.
+ */
+export function listProfiles(db?: Database): ProfileInfo[] {
+  const d = db || getDatabase();
+  return listProviders(d).map((p) => ({
+    id: p.id,
+    name: p.name,
+    provider: p.type,
+    active: !!p.active,
+    domains: (d.query("SELECT domain FROM domains WHERE provider_id = ? ORDER BY domain").all(p.id) as { domain: string }[]).map((r) => r.domain),
+    addresses: (d.query("SELECT email FROM addresses WHERE provider_id = ? ORDER BY email").all(p.id) as { email: string }[]).map((r) => r.email),
+  }));
 }

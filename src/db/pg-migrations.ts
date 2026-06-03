@@ -514,6 +514,12 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (26) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 27: aliases.protected.
+  `
+  ALTER TABLE aliases ADD COLUMN IF NOT EXISTS protected INTEGER NOT NULL DEFAULT 0;
+  INSERT INTO _migrations (id) VALUES (27) ON CONFLICT DO NOTHING;
+  `,
+
 
   // Feedback table
   `

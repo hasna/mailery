@@ -23,6 +23,7 @@ export interface InboundEmail {
   message_id: string | null;
   in_reply_to_email_id: string | null;  // linked sent email if this is a reply
   provider_thread_id: string | null;
+  thread_id: string | null;
   provider_history_id: string | null;
   provider_internal_date: string | null;
   label_ids: string[];
@@ -48,6 +49,7 @@ interface InboundEmailRow {
   message_id: string | null;
   in_reply_to_email_id?: string | null;
   provider_thread_id?: string | null;
+  thread_id?: string | null;
   provider_history_id?: string | null;
   provider_internal_date?: string | null;
   label_ids_json?: string;
@@ -74,6 +76,7 @@ function rowToEmail(row: InboundEmailRow): InboundEmail {
     message_id: row.message_id,
     in_reply_to_email_id: row.in_reply_to_email_id ?? null,
     provider_thread_id: row.provider_thread_id ?? null,
+    thread_id: row.thread_id ?? null,
     provider_history_id: row.provider_history_id ?? null,
     provider_internal_date: row.provider_internal_date ?? null,
     label_ids: JSON.parse(row.label_ids_json ?? "[]") as string[],
@@ -114,11 +117,11 @@ export function storeInboundEmail(
   input: Omit<
     InboundEmail,
     "id" | "created_at" | "provider_thread_id" | "provider_history_id" |
-    "provider_internal_date" | "label_ids" | "raw_s3_url" | "metadata_s3_url"
+    "provider_internal_date" | "label_ids" | "raw_s3_url" | "metadata_s3_url" | "thread_id"
   > & Partial<Pick<
     InboundEmail,
     "provider_thread_id" | "provider_history_id" | "provider_internal_date" |
-    "label_ids" | "raw_s3_url" | "metadata_s3_url"
+    "label_ids" | "raw_s3_url" | "metadata_s3_url" | "thread_id"
   >>,
   db?: Database,
 ): InboundEmail {

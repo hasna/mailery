@@ -208,15 +208,29 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           return;
         }
 
-        // Build threading headers if replying to an existing email
-        let threadingHeaders: Record<string, string> = {};
+        // Threading: assign our own RFC Message-ID, and (if replying) build the
+        // full In-Reply-To / References ancestry chain + inherit the thread_id.
+        const { generateMessageId, buildThreadingHeaders } = await import("../../lib/threading.js");
+        const { getEmailThreading, setEmailThreading } = await import("../../db/threads.js");
+        const ourMessageId = generateMessageId(fromDomain ?? "localhost");
+        let threadId = ourMessageId.replace(/[<>]/g, "");
+        let inReplyTo: string | null = null;
+        let references: string[] = [];
+        const threadingHeaders: Record<string, string> = { "Message-ID": ourMessageId };
         const inReplyToId = (opts as Record<string, unknown>).inReplyTo as string | undefined;
         if (inReplyToId) {
-          const originalEmail = getEmail(resolveId("emails", inReplyToId), db);
-          if (originalEmail?.provider_message_id) {
-            threadingHeaders["In-Reply-To"] = `<${originalEmail.provider_message_id}>`;
-            threadingHeaders["References"] = `<${originalEmail.provider_message_id}>`;
-            log.info(chalk.dim(`  Threading reply to: ${originalEmail.subject}`));
+          const parent = getEmail(resolveId("emails", inReplyToId), db);
+          const parentThreading = parent ? getEmailThreading(parent.id, db) : null;
+          const parentMsgId = parentThreading?.message_id
+            ?? (parent?.provider_message_id ? `<${parent.provider_message_id}>` : null);
+          if (parentMsgId) {
+            const h = buildThreadingHeaders({ message_id: parentMsgId, references: parentThreading?.references ?? [] });
+            inReplyTo = h.inReplyTo;
+            references = h.references;
+            threadingHeaders["In-Reply-To"] = h.inReplyToHeader;
+            threadingHeaders["References"] = h.referencesHeader;
+            if (parentThreading?.thread_id) threadId = parentThreading.thread_id;
+            log.info(chalk.dim(`  Threading reply to: ${parent?.subject}`));
           }
         }
 
@@ -231,7 +245,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           text: textBody,
           html: htmlBody,
           attachments: attachments.length > 0 ? attachments : undefined,
-          headers: Object.keys(threadingHeaders).length > 0 ? threadingHeaders : undefined,
+          headers: threadingHeaders,
           unsubscribe_url: (opts as Record<string, unknown>).unsubscribeUrl as string | undefined,
           idempotency_key: (opts as Record<string, unknown>).idempotencyKey as string | undefined,
         };
@@ -255,6 +269,8 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         if (usedFailover) log.info(chalk.yellow(`  (Used failover provider)`));
 
         const email = createEmail(actualProviderId, sendOpts, messageId, db);
+        // Persist threading (own Message-ID, thread_id, In-Reply-To, References).
+        setEmailThreading(email.id, { message_id: ourMessageId, thread_id: threadId, in_reply_to: inReplyTo, references }, db);
 
         // Store email content (with tracking injected if requested)
         let storedHtml = htmlBody;

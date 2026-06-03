@@ -620,6 +620,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const sync = async () => {
           const r = await syncS3Inbox({ bucket, prefix, region, providerId: opts.provider, limit: 100 });
           if (r.synced > 0) console.log(chalk.green(`  ✓ ${r.synced} new email(s) delivered`) + chalk.dim(` (${r.skipped} already stored)`));
+          return { synced: r.synced };
         };
 
         if (opts.once) {

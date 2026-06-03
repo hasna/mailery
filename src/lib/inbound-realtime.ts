@@ -82,20 +82,30 @@ export interface WatchResult {
 }
 
 /**
- * One poll cycle: receive a batch, and if anything arrived, run `sync` ONCE
- * (the sync is a dedup-safe full-prefix scan, so one call drains the batch),
- * then delete the processed messages. If `sync` throws, messages are left on
+ * One poll cycle: receive a batch, and if anything arrived, drain the bucket by
+ * running the dedup-safe `sync` REPEATEDLY until it stops pulling new mail —
+ * each scan is capped (e.g. 100 objects), so a backlog larger than one scan
+ * would otherwise be lost when we delete the messages. Only after a full drain
+ * do we delete the processed messages. If `sync` throws, messages are left on
  * the queue for redelivery.
+ *
+ * `sync` may return `{ synced }`; when it does, draining continues while
+ * `synced > 0`. A void-returning sync runs exactly once (back-compat).
  */
+const MAX_DRAIN_ITERATIONS = 50;
+
 export async function watchInboundOnce(
   sqs: SqsLike,
   _queueUrl: string,
-  sync: () => Promise<void>,
+  sync: () => Promise<{ synced: number } | void>,
 ): Promise<WatchResult> {
   const messages = await sqs.receive();
   if (messages.length === 0) return { messages: 0, triggered: false };
-  // Run the sync first; only delete messages once it succeeds.
-  await sync();
+  // Drain fully before deleting anything.
+  for (let i = 0; i < MAX_DRAIN_ITERATIONS; i++) {
+    const r = await sync();
+    if (!r || r.synced === 0) break;
+  }
   for (const m of messages) await sqs.deleteMessage(m.ReceiptHandle);
   return { messages: messages.length, triggered: true };
 }

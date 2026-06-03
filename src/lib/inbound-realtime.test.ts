@@ -82,3 +82,20 @@ describe("watchInboundOnce", () => {
     expect(deleted).toEqual([]);
   });
 });
+
+describe("watchInboundOnce — drains backlog before deleting", () => {
+  function fakeSqs2(messages: Array<{ ReceiptHandle: string; Body: string }>) {
+    const deleted: string[] = [];
+    const sqs = { receive: async () => messages, deleteMessage: async (h: string) => { deleted.push(h); } };
+    return { sqs, deleted };
+  }
+  it("repeats sync while it keeps pulling new mail, then deletes", async () => {
+    const { sqs, deleted } = fakeSqs2([{ ReceiptHandle: "h1", Body: snsEnvelope }]);
+    let calls = 0;
+    // simulate a backlog: first 3 scans pull mail, then 0
+    const r = await watchInboundOnce(sqs, "q", async () => { calls++; return { synced: calls <= 3 ? 100 : 0 }; });
+    expect(calls).toBe(4);        // 3 productive + 1 empty
+    expect(r.triggered).toBe(true);
+    expect(deleted).toEqual(["h1"]); // deleted only after the full drain
+  });
+})

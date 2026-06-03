@@ -6,12 +6,13 @@
  * owner owns or administers, so one caller can never act as another tenant.
  */
 import { verifySendKey, canOwnerSendFrom } from "../../db/send-keys.js";
-import { getOwner, assignAddressOwner, listAddressesByOwner } from "../../db/owners.js";
+import { getOwner, assignAddressOwner, listAddressesByOwner, getAddressOwnership } from "../../db/owners.js";
 import { getActiveProvider, getProvider } from "../../db/providers.js";
 import { createAddress, getAddressByEmail } from "../../db/addresses.js";
 import { createEmail } from "../../db/emails.js";
 import { storeEmailContent } from "../../db/email-content.js";
 import { listInboundEmails, getInboundEmail, setInboundRead } from "../../db/inbound.js";
+import { listAliases, CATCH_ALL } from "../../db/aliases.js";
 import { getAdapter } from "../../providers/index.js";
 import { sendWithFailover } from "../../lib/send.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
@@ -40,6 +41,23 @@ function scopedEmails(ownerId: string): Set<string> {
   return new Set(addrs.map((a) => a.email.toLowerCase()));
 }
 
+/**
+ * The full set of recipient addresses + domains whose inbound mail belongs to
+ * this owner: their own addresses, plus alias sources and catch-all domains
+ * that route TO one of their addresses.
+ */
+function scopedRecipients(ownerId: string): { addresses: string[]; domains: string[] } {
+  const owned = scopedEmails(ownerId);
+  const addresses = new Set(owned);
+  const domains = new Set<string>();
+  for (const a of listAliases()) {
+    if (!owned.has(a.target_address.toLowerCase())) continue;
+    if (a.local_part === CATCH_ALL) domains.add(a.domain.toLowerCase());
+    else addresses.add(`${a.local_part}@${a.domain}`.toLowerCase());
+  }
+  return { addresses: [...addresses], domains: [...domains] };
+}
+
 export async function handle(req: Request, _url: URL, path: string, method: string): Promise<Response | null> {
   if (!path.startsWith("/api/v1/")) return null;
 
@@ -60,6 +78,13 @@ export async function handle(req: Request, _url: URL, path: string, method: stri
       if (!provider) return notFound("Provider not found");
 
       const existing = getAddressByEmail(providerId, email);
+      // Don't let one caller take over an address another owner already holds.
+      if (existing) {
+        const own = getAddressOwnership(existing.id);
+        if (own && own.owner_id !== owner.id) {
+          return json({ error: `Address ${email} is already owned by another owner` }, 409);
+        }
+      }
       const adapter = getAdapter(provider);
       await adapter.addAddress(email);
       const addr = existing ?? createAddress({ provider_id: providerId, email, display_name: body.display_name as string | undefined });
@@ -113,13 +138,14 @@ export async function handle(req: Request, _url: URL, path: string, method: stri
     } catch (e) { return internalError(e); }
   }
 
-  // GET /api/v1/inbox — inbound mail addressed to the caller's addresses.
+  // GET /api/v1/inbox — inbound mail addressed to the caller's addresses
+  // (including alias / catch-all routing), scoped in SQL so it can't leak or be
+  // truncated by a global row cap.
   if (path === "/api/v1/inbox" && method === "GET") {
     try {
-      const scope = scopedEmails(owner.id);
-      const limit = 200;
-      const all = listInboundEmails({ limit });
-      const mine = all.filter((m) => m.to_addresses.some((t) => scope.has(t.toLowerCase())));
+      const { addresses, domains } = scopedRecipients(owner.id);
+      if (addresses.length === 0 && domains.length === 0) return json([]);
+      const mine = listInboundEmails({ limit: 200, recipients: addresses, recipientDomains: domains });
       return json(mine);
     } catch (e) { return internalError(e); }
   }
@@ -132,10 +158,13 @@ export async function handle(req: Request, _url: URL, path: string, method: stri
       const id = resolvePartialId(db, "inbound_emails", inboxMatch[1]!) ?? inboxMatch[1]!;
       const email = getInboundEmail(id, db);
       if (!email) return notFound("Inbound email not found");
-      const scope = scopedEmails(owner.id);
-      if (!email.to_addresses.some((t) => scope.has(t.toLowerCase()))) {
-        return forbidden("This email is not addressed to one of your addresses");
-      }
+      const { addresses, domains } = scopedRecipients(owner.id);
+      const addrSet = new Set(addresses);
+      const mine = email.to_addresses.some((t) => {
+        const lt = t.toLowerCase();
+        return addrSet.has(lt) || domains.some((d) => lt.endsWith(`@${d}`));
+      });
+      if (!mine) return forbidden("This email is not addressed to one of your addresses");
       const updated = email.is_read ? email : setInboundRead(id, true, db);
       return json(updated);
     } catch (e) { return internalError(e); }

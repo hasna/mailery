@@ -40,7 +40,7 @@ export function countSendsToday(email: string, db?: Database): number {
   const d = db || getDatabase();
   const today = now().slice(0, 10); // YYYY-MM-DD (ISO sorts lexicographically)
   const row = d.query(
-    "SELECT COUNT(*) AS c FROM emails WHERE from_address = ? AND sent_at LIKE ?",
+    "SELECT COUNT(*) AS c FROM emails WHERE LOWER(from_address) = LOWER(?) AND sent_at LIKE ?",
   ).get(email, `${today}%`) as { c: number } | null;
   return row?.c ?? 0;
 }
@@ -57,8 +57,11 @@ export interface Sendability {
  */
 export function getAddressSendability(email: string, db?: Database): Sendability {
   const d = db || getDatabase();
+  // Case-insensitive: a suspended `Ceo@x` must still block a send as `ceo@x`.
+  // A suspended row (any provider) takes precedence over an active one.
   const row = d.query(
-    "SELECT status, daily_quota FROM addresses WHERE email = ? ORDER BY created_at DESC LIMIT 1",
+    `SELECT status, daily_quota FROM addresses WHERE LOWER(email) = LOWER(?)
+     ORDER BY CASE WHEN status = 'suspended' THEN 0 ELSE 1 END, created_at DESC LIMIT 1`,
   ).get(email) as { status: AddressStatus | null; daily_quota: number | null } | null;
   if (!row) return { sendable: true };
   if ((row.status ?? "active") === "suspended") {

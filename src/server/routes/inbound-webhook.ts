@@ -14,6 +14,13 @@ import { json, badRequest } from "./helpers.js";
 /** Injected fetch so confirmation is testable. */
 export type FetchLike = (url: string) => Promise<unknown>;
 
+/** True only for genuine AWS SNS HTTPS endpoints (host-pinned, anti-SSRF). */
+export function isAwsSnsUrl(url: string): boolean {
+  let u: URL;
+  try { u = new URL(url); } catch { return false; }
+  return u.protocol === "https:" && /^sns\.[a-z0-9-]+\.amazonaws\.com$/.test(u.hostname);
+}
+
 export async function handleInboundWebhook(
   req: Request,
   path: string,
@@ -27,8 +34,13 @@ export async function handleInboundWebhook(
 
   const type = body["Type"] ?? req.headers.get("x-amz-sns-message-type");
 
-  // 1. Auto-confirm the SNS subscription.
+  // 1. Auto-confirm the SNS subscription — but only fetch genuine AWS SNS
+  //    confirmation URLs (host-pinned to sns.<region>.amazonaws.com over HTTPS)
+  //    so a forged body can't turn this into a server-side request forgery.
   if (type === "SubscriptionConfirmation" && typeof body["SubscribeURL"] === "string") {
+    if (!isAwsSnsUrl(body["SubscribeURL"] as string)) {
+      return badRequest("SubscribeURL is not a valid AWS SNS endpoint");
+    }
     const fetchUrl = deps?.fetchUrl ?? (async (u: string) => { await fetch(u); });
     await fetchUrl(body["SubscribeURL"] as string);
     return json({ ok: true, confirmed: true });
@@ -41,7 +53,10 @@ export async function handleInboundWebhook(
 
     const { getInboundConfig } = await import("../../lib/config.js");
     const inbound = getInboundConfig();
-    const bucket = note.bucket ?? inbound.bucket;
+    // SECURITY: never trust note.bucket from the (unauthenticated) payload — a
+    // forged notification could otherwise make us ingest an arbitrary bucket.
+    // Always sync the operator-configured inbound bucket.
+    const bucket = inbound.bucket;
     const region = inbound.region;
     const prefix = inbound.prefix;
     if (!bucket) return json({ ok: true, ignored: "no bucket configured" });

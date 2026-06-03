@@ -1027,7 +1027,18 @@ export function uuid(): string {
   return crypto.randomUUID();
 }
 
+// The `table` name is interpolated into SQL, so it must never be caller-derived.
+// All call sites pass a literal; this allowlist makes that a hard guarantee.
+const RESOLVABLE_TABLES = new Set([
+  "providers", "domains", "addresses", "emails", "inbound_emails", "sandbox_emails",
+  "templates", "contacts", "groups", "scheduled_emails", "sequences", "owners",
+  "aliases", "send_keys",
+]);
+
 export function resolvePartialId(db: Database, table: string, partialId: string): string | null {
+  if (!RESOLVABLE_TABLES.has(table)) {
+    throw new Error(`resolvePartialId: refusing unknown table '${table}'`);
+  }
   if (partialId.length >= 36) {
     const row = db.query(`SELECT id FROM ${table} WHERE id = ?`).get(partialId) as { id: string } | null;
     return row?.id ?? null;

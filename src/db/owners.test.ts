@@ -73,3 +73,15 @@ describe("assignAddressOwner — human-owned must be agent-administered", () => 
     expect(() => assignAddressOwner(a.id, "nonexistent")).toThrow(/owner not found/i);
   });
 });
+
+describe("assignAddressOwner — anti-hijack", () => {
+  it("refuses to reassign an address already owned by another owner", () => {
+    const a1 = createOwner({ type: "agent", name: "Galba" });
+    const a2 = createOwner({ type: "agent", name: "Vitellius" });
+    const addr = createAddress({ provider_id: providerId, email: "shared@x.com" });
+    assignAddressOwner(addr.id, a1.id);
+    expect(() => assignAddressOwner(addr.id, a2.id)).toThrow(/already owned/i);
+    // re-assigning to the same owner stays allowed (idempotent)
+    expect(() => assignAddressOwner(addr.id, a1.id)).not.toThrow();
+  });
+});

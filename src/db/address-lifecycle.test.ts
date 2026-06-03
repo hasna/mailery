@@ -90,3 +90,12 @@ describe("address lifecycle — sendability", () => {
     expect(countSendsToday("a@x.com")).toBe(0);
   });
 });
+
+describe("address lifecycle — case-insensitive enforcement", () => {
+  it("a suspended Mixed-Case address blocks a lowercase send", () => {
+    const a = createAddress({ provider_id: providerId, email: "Ceo@x.com" });
+    suspendAddress(a.id);
+    expect(getAddressSendability("ceo@x.com").sendable).toBe(false);
+    expect(getAddressSendability("CEO@X.COM").sendable).toBe(false);
+  });
+});

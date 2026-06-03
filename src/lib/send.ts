@@ -3,6 +3,7 @@ import { getAdapter } from "../providers/index.js";
 import { getFailoverProviderIds } from "./config.js";
 import { getAddressSendability } from "../db/address-lifecycle.js";
 import { assertSendAuthorized } from "../db/send-keys.js";
+import { canonicalSender } from "./email-address.js";
 import type { SendEmailOptions } from "../types/index.js";
 import type { Database } from "../db/database.js";
 
@@ -31,7 +32,7 @@ export async function sendWithFailover(
   // Lifecycle guard: a suspended or over-quota sender address is blocked before
   // any provider is touched.
   if (opts.from) {
-    const senderEmail = opts.from.match(/<([^>]+)>/)?.[1] ?? opts.from;
+    const senderEmail = canonicalSender(opts.from) ?? opts.from;
     const s = getAddressSendability(senderEmail, db);
     if (!s.sendable) throw new Error(`Send blocked: ${s.reason}`);
   }

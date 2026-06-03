@@ -80,3 +80,21 @@ describe("send keys — scope enforcement", () => {
     expect(assertSendAuthorized(token, "Ops Team <ops@x.com>").id).toBe(agent.id);
   });
 });
+
+describe("send keys — From-spoofing resistance", () => {
+  it("denies a double angle-addr From even if the bracketed addr is owned", () => {
+    const agent = createOwner({ type: "agent", name: "Galba" });
+    const mine = createAddress({ provider_id: providerId, email: "ops@x.com" });
+    assignAddressOwner(mine.id, agent.id);
+    // attacker owns ops@x.com but smuggles victim@y.com as a second angle-addr
+    expect(canOwnerSendFrom(agent.id, "x <ops@x.com> <victim@y.com>")).toBe(false);
+  });
+
+  it("matches case-insensitively on a clean From", () => {
+    const agent = createOwner({ type: "agent", name: "Otho" });
+    const mine = createAddress({ provider_id: providerId, email: "ops@x.com" });
+    assignAddressOwner(mine.id, agent.id);
+    expect(canOwnerSendFrom(agent.id, "OPS@X.COM")).toBe(true);
+    expect(canOwnerSendFrom(agent.id, "Ops Team <Ops@X.com>")).toBe(true);
+  });
+});

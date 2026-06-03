@@ -77,6 +77,17 @@ interface InboundEmailRow {
   created_at: string;
 }
 
+/** Parse a JSON array column, defaulting to [] on null/malformed content. */
+function safeParseArray<T = string>(s: string | null | undefined): T[] {
+  if (!s) return [];
+  try { const v = JSON.parse(s); return Array.isArray(v) ? (v as T[]) : []; } catch { return []; }
+}
+/** Parse a JSON object column, defaulting to {} on null/malformed content. */
+function safeParseObject(s: string | null | undefined): Record<string, string> {
+  if (!s) return {};
+  try { const v = JSON.parse(s); return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, string>) : {}; } catch { return {}; }
+}
+
 function rowToEmail(row: InboundEmailRow): InboundEmail {
   return {
     id: row.id,
@@ -87,18 +98,18 @@ function rowToEmail(row: InboundEmailRow): InboundEmail {
     thread_id: row.thread_id ?? null,
     provider_history_id: row.provider_history_id ?? null,
     provider_internal_date: row.provider_internal_date ?? null,
-    label_ids: JSON.parse(row.label_ids_json ?? "[]") as string[],
+    label_ids: safeParseArray(row.label_ids_json),
     raw_s3_url: row.raw_s3_url ?? null,
     metadata_s3_url: row.metadata_s3_url ?? null,
     from_address: row.from_address,
-    to_addresses: JSON.parse(row.to_addresses) as string[],
-    cc_addresses: JSON.parse(row.cc_addresses) as string[],
+    to_addresses: safeParseArray(row.to_addresses),
+    cc_addresses: safeParseArray(row.cc_addresses),
     subject: row.subject,
     text_body: row.text_body,
     html_body: row.html_body,
-    attachments: JSON.parse(row.attachments_json) as AttachmentMeta[],
+    attachments: safeParseArray<AttachmentMeta>(row.attachments_json),
     attachment_paths: JSON.parse(row.attachment_paths ?? "[]") as AttachmentPath[],
-    headers: JSON.parse(row.headers_json) as Record<string, string>,
+    headers: safeParseObject(row.headers_json),
     raw_size: row.raw_size,
     is_read: !!row.is_read,
     read_at: row.read_at ?? null,
@@ -239,6 +250,10 @@ export interface ListInboundOpts {
   starred?: boolean;
   /** Only mail carrying this label. */
   label?: string;
+  /** Only mail addressed (To) to one of these addresses (case-insensitive). */
+  recipients?: string[];
+  /** ...or addressed to any address on one of these domains (catch-all routing). */
+  recipientDomains?: string[];
 }
 
 export function listInboundEmails(
@@ -267,8 +282,24 @@ export function listInboundEmails(
   // Archived mail is hidden unless explicitly requested.
   conditions.push(opts?.archived ? "is_archived = 1" : "is_archived = 0");
   if (opts?.label) {
-    conditions.push("EXISTS (SELECT 1 FROM json_each(inbound_emails.label_ids_json) WHERE value = ?)");
+    // json_valid guards against one malformed row failing the whole query.
+    conditions.push("(json_valid(inbound_emails.label_ids_json) AND EXISTS (SELECT 1 FROM json_each(inbound_emails.label_ids_json) WHERE value = ?))");
     params.push(opts.label);
+  }
+  const recip = (opts?.recipients ?? []).map((r) => r.toLowerCase());
+  const recipDomains = (opts?.recipientDomains ?? []).map((d) => d.toLowerCase());
+  if (recip.length > 0 || recipDomains.length > 0) {
+    const ors: string[] = [];
+    if (recip.length > 0) {
+      const ph = recip.map(() => "?").join(", ");
+      ors.push(`EXISTS (SELECT 1 FROM json_each(inbound_emails.to_addresses) WHERE LOWER(value) IN (${ph}))`);
+      params.push(...recip);
+    }
+    for (const dom of recipDomains) {
+      ors.push("EXISTS (SELECT 1 FROM json_each(inbound_emails.to_addresses) WHERE LOWER(value) LIKE ?)");
+      params.push(`%@${dom}`);
+    }
+    conditions.push(`(json_valid(inbound_emails.to_addresses) AND (${ors.join(" OR ")}))`);
   }
 
   const where = conditions.length > 0 ?

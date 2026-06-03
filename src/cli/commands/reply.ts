@@ -9,7 +9,7 @@ import { storeEmailContent } from "../../db/email-content.js";
 import { getEmailThreading, setEmailThreading, setInboundThreadId } from "../../db/threads.js";
 import { generateMessageId, buildThreadingHeaders, parseReferences } from "../../lib/threading.js";
 import { sendWithFailover } from "../../lib/send.js";
-import { handleError, resolveId } from "../utils.js";
+import { handleError } from "../utils.js";
 
 /**
  * Resolve an id that may name an inbound OR a sent email. Uses resolvePartialId
@@ -25,7 +25,13 @@ export function resolveInboundOrSent(id: string, db: Database): { inbound: Inbou
 
 /** Resolve the provider to send through — the given one, else the first active. */
 function resolveSendProvider(optProvider: string | undefined, db: Database): string {
-  if (optProvider) return resolveId("providers", optProvider);
+  if (optProvider) {
+    // resolvePartialId returns null (vs resolveId which calls process.exit),
+    // so a bad --provider surfaces through the command's catch/handleError.
+    const id = resolvePartialId(db, "providers", optProvider);
+    if (!id) throw new Error(`Provider not found: ${optProvider}`);
+    return id;
+  }
   const active = listProviders(db).filter((p) => p.active);
   if (active.length === 0) throw new Error("No active providers. Add one with 'emails provider add'");
   return active[0]!.id;

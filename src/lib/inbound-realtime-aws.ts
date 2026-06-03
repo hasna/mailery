@@ -93,8 +93,10 @@ export async function setupRealtimeInbound(opts: SetupRealtimeOptions): Promise<
     const desc = await ses.send(new DescribeReceiptRuleCommand({ RuleSetName: opts.ruleSetName, RuleName: opts.ruleName }));
     const rule = desc.Rule;
     if (rule?.Actions) {
+      // Always (re)point the S3 action at this topic — re-running setup after
+      // the topic was recreated must rewire, not silently keep a stale ARN.
       for (const action of rule.Actions) {
-        if (action.S3Action && !action.S3Action.TopicArn) action.S3Action.TopicArn = topicArn;
+        if (action.S3Action) action.S3Action.TopicArn = topicArn;
       }
       await ses.send(new UpdateReceiptRuleCommand({ RuleSetName: opts.ruleSetName, Rule: rule }));
       ruleUpdated = true;
@@ -116,11 +118,23 @@ export interface SqsAdapterOptions extends RealtimeCreds {
 export function makeSqsAdapter(opts: SqsAdapterOptions): SqsLike {
   const region = regionOf(opts);
   const c = creds(opts);
+  // One client for the lifetime of the watcher — the loop reuses it instead of
+  // doing a TLS handshake on every poll.
+  let clientPromise: Promise<{ client: unknown; ReceiveMessageCommand: unknown; DeleteMessageCommand: unknown }> | null = null;
+  async function getClient() {
+    if (!clientPromise) {
+      clientPromise = import("@aws-sdk/client-sqs").then(({ SQSClient, ReceiveMessageCommand, DeleteMessageCommand }) => ({
+        client: new SQSClient({ region, credentials: c }),
+        ReceiveMessageCommand, DeleteMessageCommand,
+      }));
+    }
+    return clientPromise;
+  }
   return {
     async receive(): Promise<SqsMessage[]> {
-      const { SQSClient, ReceiveMessageCommand } = await import("@aws-sdk/client-sqs");
-      const sqs = new SQSClient({ region, credentials: c });
-      const res = await sqs.send(new ReceiveMessageCommand({
+      const { client, ReceiveMessageCommand } = await getClient();
+      const Cmd = ReceiveMessageCommand as new (i: unknown) => unknown;
+      const res = await (client as { send: (c: unknown) => Promise<{ Messages?: Array<{ ReceiptHandle?: string; Body?: string }> }> }).send(new Cmd({
         QueueUrl: opts.queueUrl,
         MaxNumberOfMessages: opts.maxMessages ?? 10,
         WaitTimeSeconds: opts.waitTimeSeconds ?? 20,
@@ -128,9 +142,9 @@ export function makeSqsAdapter(opts: SqsAdapterOptions): SqsLike {
       return (res.Messages ?? []).map((m) => ({ ReceiptHandle: m.ReceiptHandle ?? "", Body: m.Body ?? "" }));
     },
     async deleteMessage(receiptHandle: string): Promise<void> {
-      const { SQSClient, DeleteMessageCommand } = await import("@aws-sdk/client-sqs");
-      const sqs = new SQSClient({ region, credentials: c });
-      await sqs.send(new DeleteMessageCommand({ QueueUrl: opts.queueUrl, ReceiptHandle: receiptHandle }));
+      const { client, DeleteMessageCommand } = await getClient();
+      const Cmd = DeleteMessageCommand as new (i: unknown) => unknown;
+      await (client as { send: (c: unknown) => Promise<unknown> }).send(new Cmd({ QueueUrl: opts.queueUrl, ReceiptHandle: receiptHandle }));
     },
   };
 }

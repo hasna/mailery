@@ -100,3 +100,32 @@ describe("agent-api inbox", () => {
     expect(forb.status).toBe(403);
   });
 });
+
+import { createAlias, createCatchAll } from "../../db/aliases.js";
+
+describe("agent-api — provisioning anti-hijack + alias inbox", () => {
+  it("409s when provisioning an address another owner already owns", async () => {
+    // second owner + key
+    const { createOwner } = await import("../../db/owners.js");
+    const { createSendKey } = await import("../../db/send-keys.js");
+    const other = createOwner({ type: "agent", name: "Nerva" });
+    const otherToken = createSendKey(other.id).token;
+    // Trajan (default token) owns trajan@x.com already (from beforeEach)
+    const res = (await call(req("/api/v1/provision/address", "POST", { email: "trajan@x.com", provider_id: providerId }, otherToken)))!;
+    expect(res.status).toBe(409);
+  });
+
+  it("surfaces alias- and catch-all-routed mail in /api/v1/inbox", async () => {
+    // alias support@x.com -> trajan@x.com (Trajan owns trajan@x.com)
+    createAlias("support@x.com", "trajan@x.com");
+    createCatchAll("z.com", "trajan@x.com");
+    storeInboundEmail({ provider_id: null, message_id: "<s@x>", from_address: "e@e.com", to_addresses: ["support@x.com"], cc_addresses: [], subject: "via-alias", text_body: "b", html_body: null, attachments: [], headers: {}, raw_size: 1, received_at: new Date().toISOString() });
+    storeInboundEmail({ provider_id: null, message_id: "<c@z>", from_address: "e@e.com", to_addresses: ["anything@z.com"], cc_addresses: [], subject: "via-catchall", text_body: "b", html_body: null, attachments: [], headers: {}, raw_size: 1, received_at: new Date().toISOString() });
+    storeInboundEmail({ provider_id: null, message_id: "<n@n>", from_address: "e@e.com", to_addresses: ["stranger@q.com"], cc_addresses: [], subject: "not-mine", text_body: "b", html_body: null, attachments: [], headers: {}, raw_size: 1, received_at: new Date().toISOString() });
+    const body = await (await call(req("/api/v1/inbox")))!.json();
+    const subs = body.map((m: { subject: string }) => m.subject).sort();
+    expect(subs).toContain("via-alias");
+    expect(subs).toContain("via-catchall");
+    expect(subs).not.toContain("not-mine");
+  });
+});

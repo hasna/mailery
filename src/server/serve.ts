@@ -52,6 +52,17 @@ function resolveDashboardDir(): string {
 export async function startServer(port = 3900, hostname = "127.0.0.1"): Promise<void> {
   const dashboardDir = resolveDashboardDir();
 
+  // Safety: the dashboard /api/* routes are unauthenticated and assume a trusted
+  // loopback caller. Refuse to bind a non-loopback interface (exposing them to
+  // the LAN/internet) unless the operator explicitly opts in.
+  const isLoopback = hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+  if (!isLoopback && process.env["EMAILS_ALLOW_REMOTE"] !== "1") {
+    throw new Error(
+      `Refusing to bind ${hostname}: the dashboard /api/* routes are unauthenticated. ` +
+      `Set EMAILS_ALLOW_REMOTE=1 to override (put it behind an authenticating proxy / firewall first).`,
+    );
+  }
+
   const server = Bun.serve({
     port,
     hostname,
@@ -67,7 +78,7 @@ export async function startServer(port = 3900, hostname = "127.0.0.1"): Promise<
           headers: {
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
           },
         });
       }

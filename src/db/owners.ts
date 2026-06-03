@@ -82,6 +82,14 @@ export function assignAddressOwner(
   const owner = getOwner(ownerId, d);
   if (!owner) throw new Error(`Owner not found: ${ownerId}`);
 
+  // Refuse to silently take over an address already owned by someone else —
+  // prevents cross-tenant hijack on (re)provision. Reassigning to the same
+  // owner (e.g. updating the administrator) stays allowed.
+  const current = d.query("SELECT owner_id FROM addresses WHERE id = ?").get(addressId) as { owner_id: string | null } | null;
+  if (current?.owner_id && current.owner_id !== ownerId) {
+    throw new Error(`Address ${addressId} is already owned by another owner; transfer is not permitted`);
+  }
+
   let adminId: string;
   if (owner.type === "agent") {
     adminId = owner.id; // self-administered

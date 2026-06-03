@@ -9,6 +9,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Database } from "./database.js";
 import { getDatabase, now, uuid } from "./database.js";
 import { getOwner, getAddressOwnership, type Owner } from "./owners.js";
+import { canonicalSender } from "../lib/email-address.js";
 
 const TOKEN_PREFIX = "esk_";
 
@@ -27,9 +28,12 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-/** Extract the bare email from a possibly display-named From ("Name <a@b>"). */
+/**
+ * Extract the canonical sender address, or "" for an ambiguous/malformed From
+ * (an empty string never matches a stored address, so the send is denied).
+ */
 function bareEmail(from: string): string {
-  return (from.match(/<([^>]+)>/)?.[1] ?? from).trim().toLowerCase();
+  return canonicalSender(from) ?? "";
 }
 
 export function createSendKey(ownerId: string, label?: string, db?: Database): { token: string; key: SendKey } {

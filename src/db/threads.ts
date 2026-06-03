@@ -36,13 +36,20 @@ export function getEmailThreading(emailId: string, db?: Database): EmailThreadin
   return { message_id: row.message_id, thread_id: row.thread_id, in_reply_to: row.in_reply_to, references: parseJsonArray(row.references_json) };
 }
 
-/** Find a sent email by its RFC Message-ID (with or without angle brackets). */
+/**
+ * Find a sent email by its RFC Message-ID (with or without angle brackets).
+ * SES REWRITES our Message-ID to `<{provider_message_id}@email.amazonses.com>`,
+ * so we also match the Message-ID's local-part (before @) against the stored
+ * provider_message_id — that's how a received copy links back to our send.
+ */
 export function getEmailByMessageId(messageId: string, db?: Database): { id: string; thread_id: string | null; references: string[]; message_id: string | null } | null {
   const d = db || getDatabase();
-  const bare = messageId.replace(/[<>]/g, "");
+  const bare = messageId.replace(/[<>]/g, "").trim();
+  const localPart = bare.split("@")[0] ?? bare;
   const row = d.query(
-    "SELECT id, thread_id, references_json, message_id FROM emails WHERE message_id = ? OR message_id = ? OR provider_message_id = ? LIMIT 1",
-  ).get(messageId, `<${bare}>`, bare) as { id: string; thread_id: string | null; references_json: string | null; message_id: string | null } | null;
+    `SELECT id, thread_id, references_json, message_id FROM emails
+     WHERE message_id = ? OR message_id = ? OR provider_message_id = ? OR provider_message_id = ? LIMIT 1`,
+  ).get(messageId, `<${bare}>`, bare, localPart) as { id: string; thread_id: string | null; references_json: string | null; message_id: string | null } | null;
   if (!row) return null;
   return { id: row.id, thread_id: row.thread_id, references: parseJsonArray(row.references_json), message_id: row.message_id };
 }

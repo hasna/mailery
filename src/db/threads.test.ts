@@ -32,3 +32,22 @@ describe("threads db", () => {
     expect(getThreadMessages("t1").length).toBe(2);
   });
 });
+
+import { uuid as uuid2 } from "./database.js";
+describe("getEmailByMessageId — SES rewrites Message-ID to <provider_id@email.amazonses.com>", () => {
+  it("matches the local-part against provider_message_id", () => {
+    const { closeDatabase, resetDatabase, getDatabase } = require("./database.js");
+    const { createProvider } = require("./providers.js");
+    process.env["EMAILS_DB_PATH"] = ":memory:"; resetDatabase();
+    const pid = createProvider({ name: "ses", type: "ses" }).id;
+    const db = getDatabase();
+    const id = uuid2();
+    db.run(`INSERT INTO emails (id, provider_id, provider_message_id, from_address, to_addresses, subject, status, sent_at, created_at, updated_at) VALUES (?, ?, '0100abc-xyz-000000', 'a@x.com', '[]', 'S', 'sent', datetime('now'), datetime('now'), datetime('now'))`, [id, pid]);
+    setEmailThreading(id, { message_id: "<ours@x.com>", thread_id: "T", references: [] });
+    // SES-rewritten id as seen on the received copy
+    const r = getEmailByMessageId("<0100abc-xyz-000000@email.amazonses.com>");
+    expect(r?.id).toBe(id);
+    expect(r?.thread_id).toBe("T");
+    closeDatabase(); delete process.env["EMAILS_DB_PATH"];
+  });
+});

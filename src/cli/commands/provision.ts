@@ -68,11 +68,14 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
   // ── domain setup ─────────────────────────────────────────────────────────
   cmd
     .command("domain <domain>")
-    .description("Provision a domain for sending: SES identity + publish DNS in Cloudflare")
+    .description("Provision a domain for sending: SES identity + MAIL FROM + publish DNS in Cloudflare")
     .requiredOption("--provider <id>", "SES provider ID")
     .option("--send <provider>", "Send provider", "ses")
     .option("--add-mx", "Also publish inbound MX (ses-s3 receive)")
-    .action(async (domain: string, opts: { provider: string; send: string; addMx?: boolean }) => {
+    .option("--mail-from <subdomain>", "Custom MAIL FROM subdomain (default mail.<domain>)")
+    .option("--wait", "Poll SES until the domain is verified for sending")
+    .option("--timeout <sec>", "Max seconds to wait for verification", "600")
+    .action(async (domain: string, opts: { provider: string; send: string; addMx?: boolean; mailFrom?: string; wait?: boolean; timeout: string }) => {
       try {
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
@@ -83,12 +86,33 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
 
         const adapter = getAdapter(provider!);
         await adapter.addDomain(domain);
+        // Custom MAIL FROM (SES) for better SPF/DMARC alignment.
+        let mailFrom: string | undefined;
+        if (adapter.setMailFrom) {
+          mailFrom = await adapter.setMailFrom(domain, opts.mailFrom);
+          setDomainProvisioning(rec.id, { mail_from_domain: mailFrom }, db);
+        }
         const { setupEmailDns } = await import("../../lib/cloudflare-dns.js");
         const dns = await setupEmailDns({ domain, provider: provider!, addMx: !!opts.addMx });
         setDomainProvisioning(rec.id, { provisioning_status: "dns_published", next_check_at: new Date().toISOString() }, db);
+
+        let verified = false;
+        if (opts.wait) {
+          const deadline = Date.now() + parseInt(opts.timeout, 10) * 1000;
+          process.stdout.write(chalk.dim("Waiting for SES verification"));
+          while (Date.now() < deadline) {
+            const status = await adapter.verifyDomain(domain);
+            if (status.dkim === "verified") { verified = true; break; }
+            process.stdout.write(chalk.dim("."));
+            await new Promise((r) => setTimeout(r, 15000));
+          }
+          process.stdout.write("\n");
+          if (verified) setDomainProvisioning(rec.id, { provisioning_status: "verified", next_check_at: null }, db);
+        }
+
         output(
-          { domain, dns },
-          chalk.green(`✓ ${domain}: SES identity created, ${dns.created} DNS records published to Cloudflare. Verify: emails domain verify ${domain} --provider ${opts.provider}`),
+          { domain, mail_from: mailFrom, dns, verified },
+          chalk.green(`✓ ${domain}: SES identity + MAIL FROM (${mailFrom ?? "n/a"}), ${dns.created} DNS records in Cloudflare${opts.wait ? (verified ? ", VERIFIED ✓" : ", verification still pending") : `. Verify: emails domain verify ${domain} --provider ${opts.provider}`}`),
         );
       } catch (e) { handleError(e); }
     });

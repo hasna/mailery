@@ -5,7 +5,7 @@ import {
   ListEmailIdentitiesCommand,
   SendEmailCommand,
   BatchGetMetricDataCommand,
-  type DkimSigningAttributes,
+  PutEmailIdentityMailFromAttributesCommand,
 } from "@aws-sdk/client-sesv2";
 import type { DnsRecord, DnsStatus, Provider, SendEmailOptions, Stats } from "../types/index.js";
 import { ProviderConfigError } from "../types/index.js";
@@ -126,23 +126,34 @@ export class SESAdapter implements ProviderAdapter {
   }
 
   async addDomain(domain: string): Promise<void> {
-    const signingAttrs: DkimSigningAttributes = {
-      DomainSigningSelector: "ses",
-      DomainSigningPrivateKey: "", // Will be set by SES automatically with EasyDKIM
-    };
-
     try {
+      // EasyDKIM: create the identity WITHOUT DkimSigningAttributes so SES
+      // generates and rotates the DKIM keys itself. (Passing an empty
+      // DomainSigningPrivateKey is rejected with a validation error.)
       await this.client.send(
-        new CreateEmailIdentityCommand({
-          EmailIdentity: domain,
-          DkimSigningAttributes: signingAttrs,
-        }),
+        new CreateEmailIdentityCommand({ EmailIdentity: domain }),
       );
     } catch (err: unknown) {
       // If identity already exists, that's fine
       if (err instanceof Error && err.name === "AlreadyExistsException") return;
       throw err;
     }
+  }
+
+  /**
+   * Set a custom MAIL FROM domain (improves SPF/DMARC alignment). Defaults to
+   * `mail.<domain>`. Requires the MAIL FROM MX + SPF records to be published.
+   */
+  async setMailFrom(domain: string, mailFromDomain?: string): Promise<string> {
+    const mailFrom = mailFromDomain ?? `mail.${domain}`;
+    await this.client.send(
+      new PutEmailIdentityMailFromAttributesCommand({
+        EmailIdentity: domain,
+        MailFromDomain: mailFrom,
+        BehaviorOnMxFailure: "USE_DEFAULT_VALUE",
+      }),
+    );
+    return mailFrom;
   }
 
   async listAddresses(): Promise<RemoteAddress[]> {

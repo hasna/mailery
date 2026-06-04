@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setLogLevel } from "../lib/logger.js";
+import { redactSecrets } from "../lib/redaction.js";
 
 import { registerProviderCommands } from "./commands/provider.js";
 import { registerDomainCommands } from "./commands/domain.js";
@@ -59,7 +60,7 @@ program
 function output(data: unknown, formatted: string): void {
   const opts = program.opts();
   if (opts.json) {
-    console.log(JSON.stringify(data, null, 2));
+    console.log(JSON.stringify(redactSecrets(data), null, 2));
   } else {
     console.log(formatted);
   }
@@ -82,13 +83,13 @@ registerSandboxCommands(program, output);
 registerMiscCommands(program, output);
 registerInboxCommands(program, output);
 registerRefreshCommand(program, output);
-  registerProvisionCommands(program, output);
-  registerOwnerCommands(program, output);
-  registerAliasCommands(program, output);
-  registerSendKeyCommands(program, output);
-  registerReplyCommand(program, output);
-  registerInteractiveCommand(program, output);
-  registerProfilesCommands(program, output);
+registerProvisionCommands(program, output);
+registerOwnerCommands(program, output);
+registerAliasCommands(program, output);
+registerSendKeyCommands(program, output);
+registerReplyCommand(program, output);
+registerInteractiveCommand(program, output);
+registerProfilesCommands(program, output);
 registerTriageCommands(program, output);
 registerAwsCommands(program, output);
 registerCloudCommands(program, output);

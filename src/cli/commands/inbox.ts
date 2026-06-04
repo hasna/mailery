@@ -13,11 +13,89 @@ import { getGmailSyncState, updateLastSynced } from "../../db/gmail-sync-state.j
 import { createProvider, listProviders } from "../../db/providers.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { confirmDestructiveAction, handleError } from "../utils.js";
+import { autoPull } from "../tui/autopull.js";
+import { findVerificationCode } from "../../lib/verification-code.js";
 
 const DEFAULT_GMAIL_ARCHIVE_BUCKET = "hasna-xyz-prod-emails";
 
+interface CodeOptions {
+  from?: string;
+  subject?: string;
+  limit?: string;
+  refresh?: boolean;
+  gmail?: boolean;
+  watch?: boolean;
+  timeout?: string;
+  interval?: string;
+}
+
 export function registerInboxCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const inboxCmd = program.command("inbox").description("Sync and browse inbound emails (Gmail, SMTP, S3)");
+
+  async function runCodeCommand(address: string, opts: CodeOptions): Promise<void> {
+    const normalized = address.trim().toLowerCase();
+    const limit = Math.max(1, parseInt(opts.limit ?? "50", 10) || 50);
+    const timeoutMs = Math.max(1, parseInt(opts.timeout ?? "120", 10) || 120) * 1000;
+    const intervalMs = Math.max(1, parseInt(opts.interval ?? "5", 10) || 5) * 1000;
+    const deadline = Date.now() + timeoutMs;
+
+    while (true) {
+      if (opts.refresh !== false) {
+        await autoPull({ s3: true, gmail: opts.gmail === true, limit: Math.max(limit, 1000) });
+      }
+
+      const local = listInboundEmails({ recipients: [normalized], limit }, getDatabase());
+      const archived = listInboundEmails({ recipients: [normalized], limit, archived: true }, getDatabase());
+      const byId = new Map([...local, ...archived].map((email) => [email.id, email]));
+      const match = findVerificationCode([...byId.values()], { from: opts.from, subject: opts.subject });
+
+      if (match) {
+        output({
+          code: match.code,
+          email_id: match.email.id,
+          from: match.email.from_address,
+          subject: match.email.subject,
+          received_at: match.email.received_at,
+          confidence: match.confidence,
+        }, match.code);
+        return;
+      }
+
+      if (!opts.watch || Date.now() >= deadline) {
+        output({ code: null, address: normalized }, chalk.dim(`No verification code found for ${normalized}.`));
+        process.exitCode = 1;
+        return;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
+
+  inboxCmd
+    .command("code <address>")
+    .description("Refresh inbound mail and print the latest verification code for an address")
+    .option("--from <text>", "Only consider messages whose From contains this text")
+    .option("--subject <text>", "Only consider messages whose subject contains this text")
+    .option("--limit <n>", "Messages to inspect per mailbox state", "50")
+    .option("--no-refresh", "Do not refresh inbound mail before searching")
+    .option("--gmail", "Also pull Gmail while refreshing")
+    .option("--watch", "Keep refreshing until a code arrives or timeout is reached")
+    .option("--timeout <sec>", "Watch timeout in seconds", "120")
+    .option("--interval <sec>", "Watch polling interval in seconds", "5")
+    .action(runCodeCommand);
+
+  program
+    .command("code <address>")
+    .description("Find the latest verification code for an inbound address (alias: emails inbox code)")
+    .option("--from <text>", "Only consider messages whose From contains this text")
+    .option("--subject <text>", "Only consider messages whose subject contains this text")
+    .option("--limit <n>", "Messages to inspect per mailbox state", "50")
+    .option("--no-refresh", "Do not refresh inbound mail before searching")
+    .option("--gmail", "Also pull Gmail while refreshing")
+    .option("--watch", "Keep refreshing until a code arrives or timeout is reached")
+    .option("--timeout <sec>", "Watch timeout in seconds", "120")
+    .option("--interval <sec>", "Watch polling interval in seconds", "5")
+    .action(runCodeCommand);
 
   // ─── SYNC ─────────────────────────────────────────────────────────────────
   inboxCmd
@@ -602,6 +680,42 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     });
 
   inboxCmd
+    .command("realtime-status")
+    .description("Show real-time inbound queue, bucket, and sync health")
+    .action(async () => {
+      try {
+        const { loadConfig, getInboundBuckets } = await import("../../lib/config.js");
+        const config = loadConfig();
+        const db = getDatabase();
+        const buckets = getInboundBuckets();
+        const lastReceived = db.query("SELECT MAX(received_at) AS last_received_at FROM inbound_emails").get() as { last_received_at: string | null } | null;
+        const data = {
+          queue_url: config["inbound_realtime_queue_url"] ?? null,
+          topic_arn: config["inbound_realtime_topic_arn"] ?? null,
+          buckets,
+          total_inbound_emails: getInboundCount(undefined, db),
+          unread_inbound_emails: getUnreadCount(undefined, db),
+          last_received_at: lastReceived?.last_received_at ?? null,
+          last_poll_at: config["inbound_realtime_last_poll_at"] ?? null,
+          last_error: config["inbound_realtime_last_error"] ?? null,
+        };
+        const lines = [chalk.bold("\nReal-time inbound status:")];
+        lines.push(`  Queue:       ${data.queue_url ? chalk.cyan(String(data.queue_url)) : chalk.yellow("not configured")}`);
+        lines.push(`  Topic:       ${data.topic_arn ? chalk.cyan(String(data.topic_arn)) : chalk.dim("not configured")}`);
+        lines.push(`  Buckets:     ${buckets.length > 0 ? chalk.green(String(buckets.length)) : chalk.yellow("0")}`);
+        for (const b of buckets) {
+          lines.push(`    - s3://${b.bucket} ${chalk.dim(b.region)}${b.providerId ? chalk.dim(` provider=${b.providerId.slice(0, 8)}`) : ""}`);
+        }
+        lines.push(`  Emails:      ${data.total_inbound_emails} total, ${data.unread_inbound_emails} unread`);
+        lines.push(`  Last mail:   ${data.last_received_at ? chalk.green(String(data.last_received_at)) : chalk.dim("never")}`);
+        lines.push(`  Last poll:   ${data.last_poll_at ? chalk.green(String(data.last_poll_at)) : chalk.dim("never")}`);
+        if (data.last_error) lines.push(`  Last error:  ${chalk.red(String(data.last_error))}`);
+        lines.push(chalk.dim("\n  Start watcher: emails inbox watch --all-buckets"));
+        output(data, lines.join("\n"));
+      } catch (e) { handleError(e); }
+    });
+
+  inboxCmd
     .command("watch")
     .description("Watch the SQS queue and auto-sync inbound mail in real-time (no manual sync-s3)")
     .option("--queue-url <url>", "SQS queue URL (defaults to config inbound_realtime_queue_url)")
@@ -611,9 +725,10 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--provider <id>", "Associate emails with this provider ID")
     .option("--profile <profile>", "AWS profile")
     .option("--once", "Poll a single time then exit (for testing)")
-    .action(async (opts: { queueUrl?: string; bucket?: string; prefix?: string; region?: string; provider?: string; profile?: string; once?: boolean }) => {
+    .option("--all-buckets", "When a notification arrives, sync every configured inbound S3 bucket")
+    .action(async (opts: { queueUrl?: string; bucket?: string; prefix?: string; region?: string; provider?: string; profile?: string; once?: boolean; allBuckets?: boolean }) => {
       try {
-        const { getInboundConfig, loadConfig } = await import("../../lib/config.js");
+        const { getInboundConfig, loadConfig, saveConfig } = await import("../../lib/config.js");
         const inbound = getInboundConfig();
         const config = loadConfig();
         const profile = opts.profile ?? inbound.profile;
@@ -629,7 +744,18 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const { watchInboundOnce } = await import("../../lib/inbound-realtime.js");
         const { syncS3Inbox } = await import("../../lib/s3-sync.js");
         const sqs = makeSqsAdapter({ queueUrl, region });
+        const rememberPoll = (patch: Record<string, unknown> = {}) => {
+          const latest = loadConfig();
+          latest["inbound_realtime_last_poll_at"] = new Date().toISOString();
+          for (const [key, value] of Object.entries(patch)) latest[key] = value;
+          saveConfig(latest);
+        };
         const sync = async () => {
+          if (opts.allBuckets) {
+            const r = await autoPull({ s3: true, gmail: false, limit: 1000 });
+            if (r.pulled > 0) console.log(chalk.green(`  ✓ ${r.pulled} new email(s) delivered across configured buckets`));
+            return { synced: r.pulled };
+          }
           const r = await syncS3Inbox({ bucket, prefix, region, providerId: opts.provider, limit: 100 });
           if (r.synced > 0) console.log(chalk.green(`  ✓ ${r.synced} new email(s) delivered`) + chalk.dim(` (${r.skipped} already stored)`));
           return { synced: r.synced };
@@ -637,6 +763,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
         if (opts.once) {
           const r = await watchInboundOnce(sqs, queueUrl, sync);
+          rememberPoll({ inbound_realtime_last_error: null, inbound_realtime_last_messages: r.messages });
           output(r, r.triggered ? chalk.green(`✓ Processed ${r.messages} notification(s)`) : chalk.dim("No new mail."));
           return;
         }
@@ -646,9 +773,12 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         // eslint-disable-next-line no-constant-condition
         while (true) {
           try {
-            await watchInboundOnce(sqs, queueUrl, sync);
+            const r = await watchInboundOnce(sqs, queueUrl, sync);
+            rememberPoll({ inbound_realtime_last_error: null, inbound_realtime_last_messages: r.messages });
           } catch (e) {
-            console.error(chalk.yellow(`  poll error: ${e instanceof Error ? e.message : String(e)}`));
+            const message = e instanceof Error ? e.message : String(e);
+            rememberPoll({ inbound_realtime_last_error: message });
+            console.error(chalk.yellow(`  poll error: ${message}`));
             await new Promise((r) => setTimeout(r, 3000));
           }
         }

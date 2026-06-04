@@ -36,6 +36,8 @@ const mockRun = mock(async (operationArgs: {
 mock.module("@hasna/connectors", () => ({ runConnectorOperation: mockRun }));
 
 const { syncGmailInbox } = await import("../../lib/gmail-sync.js");
+const { registerInboxCommands } = await import("./inbox.js");
+const { Command } = await import("commander");
 
 const TMP_HOME = join("/tmp", `emails-inbox-test-${process.pid}`);
 const origHome = process.env["HOME"];
@@ -74,6 +76,19 @@ function seedInboundEmails(providerId: string, count: number) {
     emails.push(email);
   }
   return emails;
+}
+
+async function runInboxCommand(args: string[]) {
+  const program = new Command();
+  program.exitOverride();
+  let data: unknown;
+  const out: string[] = [];
+  registerInboxCommands(program, (d, formatted) => {
+    data = d;
+    out.push(String(formatted ?? ""));
+  });
+  await program.parseAsync(["node", "emails", ...args]);
+  return { data, out: out.join("\n") };
 }
 
 beforeEach(() => {
@@ -250,6 +265,33 @@ describe("inbox search — local filter", () => {
     const all = listInboundEmails({ provider_id: providerId, limit: 100 });
     const results = all.filter(e => e.subject.toLowerCase().includes(q) || e.from_address.toLowerCase().includes(q));
     expect(results).toHaveLength(0);
+  });
+});
+
+describe("inbox code", () => {
+  it("prints the newest matching verification code only", async () => {
+    const { db, providerId } = setupDb();
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "openai-code",
+      in_reply_to_email_id: null,
+      from_address: '"ChatGPT" <noreply@tm.openai.com>',
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Your temporary ChatGPT verification code",
+      text_body: "Enter this temporary verification code to continue:\n\n492255",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const { out, data } = await runInboxCommand(["inbox", "code", "me@example.com", "--no-refresh", "--from", "openai"]);
+
+    expect(out).toBe("492255");
+    expect(data).toMatchObject({ code: "492255", confidence: "high" });
   });
 });
 

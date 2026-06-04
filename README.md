@@ -52,11 +52,13 @@ emails interactive --mailbox unread
 
 Keys — list: `↑↓`/`j k` move · `Enter` open · `]`/`[` or `1`–`5` switch folder ·
 `r` reply · `c` compose · `p` profiles · `s` star · `e` archive · `u` unread ·
-`/` search · `g` refresh now · `q` quit. Reader: `j/k` scroll · `J/K` next/prev ·
+`/` search · `g` refresh local view · `G` pull new mail now · `q` quit. Reader: `j/k` scroll · `J/K` next/prev ·
 `Esc` back — shows 📎 attachments with size/type. Composer writes **markdown**
 (rendered to HTML on send), `Enter` for blank/new lines · `Tab` next field ·
-`Ctrl-S` send · `Esc` cancel. `p` shows your profiles (accounts) + their
-domains/addresses. Folders: Inbox · Unread · Starred · Sent · Archived.
+editable From/To/Subject/Body · `Ctrl-S` send · `Esc` cancel. `p` shows your profiles (accounts) + their
+domains/addresses. `,` opens settings, including theme mode (`auto`/`light`/`dark`);
+auto detects common terminal background hints and falls back to light. Folders:
+Inbox · Unread · Starred · Sent · Archived.
 
 ## Command Structure
 

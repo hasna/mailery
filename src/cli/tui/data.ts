@@ -16,9 +16,11 @@ import { getEmail, createEmail } from "../../db/emails.js";
 import { getEmailContent, storeEmailContent } from "../../db/email-content.js";
 import { getThreadMessages } from "../../db/threads.js";
 import { listProviders } from "../../db/providers.js";
+import { listAddresses } from "../../db/addresses.js";
 import { sendWithFailover } from "../../lib/send.js";
 import { loadConfig, saveConfig } from "../../lib/config.js";
 import { marked } from "marked";
+import { normalizeThemeMode, type TuiThemeMode } from "./theme.js";
 
 export type Mailbox = "inbox" | "unread" | "starred" | "sent" | "archived";
 
@@ -102,38 +104,61 @@ const FOLDER_WHERE: Record<Exclude<Mailbox, "sent">, string> = {
  */
 export interface MailboxSource { providerId?: string; domain?: string }
 
+interface SqlClause { sql: string; params: string[] }
+
+function recipientSourceClause(src?: MailboxSource): SqlClause {
+  const params: string[] = [];
+  let sql = "";
+  if (src?.providerId) { sql += " AND provider_id = ?"; params.push(src.providerId); }
+  if (src?.domain) {
+    sql += " AND (json_valid(to_addresses) AND EXISTS (SELECT 1 FROM json_each(to_addresses) WHERE LOWER(value) LIKE ?))";
+    params.push(`%@${src.domain.toLowerCase()}`);
+  }
+  return { sql, params };
+}
+
+function senderSourceClause(src?: MailboxSource): SqlClause {
+  const params: string[] = [];
+  let sql = "";
+  if (src?.providerId) { sql += " AND provider_id = ?"; params.push(src.providerId); }
+  if (src?.domain) { sql += " AND LOWER(from_address) LIKE ?"; params.push(`%@${src.domain.toLowerCase()}`); }
+  return { sql, params };
+}
+
+function appSentSourceClause(src?: MailboxSource): SqlClause {
+  const params: string[] = [];
+  const where: string[] = [];
+  if (src?.providerId) { where.push("e.provider_id = ?"); params.push(src.providerId); }
+  if (src?.domain) { where.push("LOWER(e.from_address) LIKE ?"); params.push(`%@${src.domain.toLowerCase()}`); }
+  return { sql: where.length ? ` WHERE ${where.join(" AND ")}` : "", params };
+}
+
 export function listMailbox(mailbox: Mailbox, opts?: { limit?: number; search?: string; source?: MailboxSource }, db?: Database): TuiMessage[] {
   const d = db || getDatabase();
   const limit = Math.max(1, Math.trunc(opts?.limit ?? 200));
   let messages: TuiMessage[];
 
-  // Per-inbox source filter: a specific account (provider) or a domain.
   const src = opts?.source;
-  const srcParams: string[] = [];
-  let srcClause = "";
-  if (src?.providerId) { srcClause += " AND provider_id = ?"; srcParams.push(src.providerId); }
-  if (src?.domain) {
-    srcClause += " AND (json_valid(to_addresses) AND EXISTS (SELECT 1 FROM json_each(to_addresses) WHERE LOWER(value) LIKE ?))";
-    srcParams.push(`%@${src.domain.toLowerCase()}`);
-  }
+  const recipientSrc = recipientSourceClause(src);
 
   if (mailbox === "sent") {
-    const appClause = src?.providerId ? " WHERE e.provider_id = ?" : "";
+    const appSrc = appSentSourceClause(src);
+    const senderSrc = senderSourceClause(src);
     const appSent = (d.query(
       `SELECT e.id, e.from_address, e.to_addresses, e.subject, e.sent_at AS date, e.thread_id,
               e.attachment_count AS attachments, substr(c.text_body, 1, 140) AS snippet
-       FROM emails e LEFT JOIN email_content c ON c.email_id = e.id${appClause}
+       FROM emails e LEFT JOIN email_content c ON c.email_id = e.id${appSrc.sql}
        ORDER BY e.sent_at DESC LIMIT ?`,
-    ).all(...(src?.providerId ? [src.providerId] : []), limit) as LiteRow[]).map((r) => liteToMessage(r, "sent"));
+    ).all(...appSrc.params, limit) as LiteRow[]).map((r) => liteToMessage(r, "sent"));
     const gmailSent = (d.query(
-      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0${srcClause}
+      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0${senderSrc.sql}
        ORDER BY received_at DESC LIMIT ?`,
-    ).all(...srcParams, limit) as LiteRow[]).map((r) => liteToMessage(r, "inbound"));
+    ).all(...senderSrc.params, limit) as LiteRow[]).map((r) => liteToMessage(r, "inbound"));
     messages = [...appSent, ...gmailSent].sort((a, b) => b.date.localeCompare(a.date)).slice(0, limit);
   } else {
     const rows = d.query(
-      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE ${FOLDER_WHERE[mailbox]}${srcClause} ORDER BY received_at DESC LIMIT ?`,
-    ).all(...srcParams, limit) as LiteRow[];
+      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE ${FOLDER_WHERE[mailbox]}${recipientSrc.sql} ORDER BY received_at DESC LIMIT ?`,
+    ).all(...recipientSrc.params, limit) as LiteRow[];
     messages = rows.map((r) => liteToMessage(r, "inbound"));
   }
 
@@ -147,20 +172,27 @@ export function listMailbox(mailbox: Mailbox, opts?: { limit?: number; search?: 
 
 export interface MailboxCounts { inbox: number; unread: number; starred: number; sent: number; archived: number }
 
-function count(d: Database, sql: string): number {
-  const row = d.query(sql).get() as { c: number } | null;
+function count(d: Database, sql: string, params: string[] = []): number {
+  const row = d.query(sql).get(...params) as { c: number } | null;
   return row?.c ?? 0;
 }
 
 /** Folder counts via COUNT(*) over indexed columns — never materialize rows. */
-export function mailboxCounts(db?: Database): MailboxCounts {
-  const d = db || getDatabase();
+export function mailboxCounts(db?: Database): MailboxCounts;
+export function mailboxCounts(opts?: { source?: MailboxSource }, db?: Database): MailboxCounts;
+export function mailboxCounts(optsOrDb?: Database | { source?: MailboxSource }, maybeDb?: Database): MailboxCounts {
+  const isDb = typeof (optsOrDb as { query?: unknown } | undefined)?.query === "function";
+  const d = (isDb ? optsOrDb as Database : maybeDb) || getDatabase();
+  const opts = isDb ? undefined : optsOrDb as { source?: MailboxSource } | undefined;
+  const recipientSrc = recipientSourceClause(opts?.source);
+  const senderSrc = senderSourceClause(opts?.source);
+  const appSrc = appSentSourceClause(opts?.source);
   return {
-    inbox: count(d, `SELECT COUNT(*) AS c FROM inbound_emails WHERE ${FOLDER_WHERE.inbox}`),
-    unread: count(d, `SELECT COUNT(*) AS c FROM inbound_emails WHERE ${FOLDER_WHERE.unread}`),
-    starred: count(d, `SELECT COUNT(*) AS c FROM inbound_emails WHERE ${FOLDER_WHERE.starred}`),
-    sent: count(d, "SELECT COUNT(*) AS c FROM emails") + count(d, "SELECT COUNT(*) AS c FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0"),
-    archived: count(d, `SELECT COUNT(*) AS c FROM inbound_emails WHERE ${FOLDER_WHERE.archived}`),
+    inbox: count(d, `SELECT COUNT(*) AS c FROM inbound_emails WHERE ${FOLDER_WHERE.inbox}${recipientSrc.sql}`, recipientSrc.params),
+    unread: count(d, `SELECT COUNT(*) AS c FROM inbound_emails WHERE ${FOLDER_WHERE.unread}${recipientSrc.sql}`, recipientSrc.params),
+    starred: count(d, `SELECT COUNT(*) AS c FROM inbound_emails WHERE ${FOLDER_WHERE.starred}${recipientSrc.sql}`, recipientSrc.params),
+    sent: count(d, `SELECT COUNT(*) AS c FROM emails e${appSrc.sql}`, appSrc.params) + count(d, `SELECT COUNT(*) AS c FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0${senderSrc.sql}`, senderSrc.params),
+    archived: count(d, `SELECT COUNT(*) AS c FROM inbound_emails WHERE ${FOLDER_WHERE.archived}${recipientSrc.sql}`, recipientSrc.params),
   };
 }
 
@@ -249,6 +281,20 @@ export function replyDefaults(msg: TuiMessage): { from: string; to: string; subj
 
 export interface ComposeInput { from: string; to: string; subject: string; body: string; providerId?: string; markdown?: boolean }
 
+/** Pick the best configured sender for a new TUI compose. */
+export function defaultFromAddress(opts?: { source?: MailboxSource; fallback?: string }, db?: Database): string {
+  const d = db || getDatabase();
+  const all = listAddresses(opts?.source?.providerId, d).filter((a) => (a.status ?? "active") === "active");
+  const pick = (addresses: typeof all) => addresses.find((a) => a.verified)?.email ?? addresses[0]?.email ?? "";
+  const domain = opts?.source?.domain?.toLowerCase();
+  if (domain) {
+    const domainSender = pick(all.filter((a) => a.email.toLowerCase().endsWith(`@${domain}`)));
+    if (domainSender) return domainSender;
+    if (opts?.fallback) return opts.fallback;
+  }
+  return pick(all) || opts?.fallback || "";
+}
+
 /** Render markdown body to a simple, email-safe HTML document. */
 export function renderMarkdown(md: string): string {
   // marked is synchronous in default mode; wrap output in a minimal HTML shell.
@@ -306,7 +352,7 @@ export function listSources(db?: Database): InboxSource[] {
 
 // ── settings (persisted to config.json) ────────────────────────────────────────
 
-export interface TuiSettings { autoPull: boolean; gmailAutoPull: boolean; dimRead: boolean; defaultMailbox: Mailbox }
+export interface TuiSettings { autoPull: boolean; gmailAutoPull: boolean; dimRead: boolean; defaultMailbox: Mailbox; theme: TuiThemeMode }
 
 export function getSettings(): TuiSettings {
   const c = loadConfig();
@@ -315,12 +361,13 @@ export function getSettings(): TuiSettings {
     gmailAutoPull: c["tui_gmail_autopull"] !== false,
     dimRead: c["tui_dim_read"] === true, // default false = high contrast
     defaultMailbox: (c["default_mailbox"] as Mailbox) ?? "inbox",
+    theme: normalizeThemeMode(c["tui_theme"]),
   };
 }
 
 export function setSetting<K extends keyof TuiSettings>(key: K, value: TuiSettings[K]): void {
   const c = loadConfig();
-  const map: Record<keyof TuiSettings, string> = { autoPull: "tui_autopull", gmailAutoPull: "tui_gmail_autopull", dimRead: "tui_dim_read", defaultMailbox: "default_mailbox" };
+  const map: Record<keyof TuiSettings, string> = { autoPull: "tui_autopull", gmailAutoPull: "tui_gmail_autopull", dimRead: "tui_dim_read", defaultMailbox: "default_mailbox", theme: "tui_theme" };
   c[map[key]] = value as never;
   saveConfig(c);
 }

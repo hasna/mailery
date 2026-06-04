@@ -2,10 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { closeDatabase, resetDatabase, getDatabase } from "../../db/database.js";
 import { createProvider } from "../../db/providers.js";
 import { createDomain } from "../../db/domains.js";
+import { createAddress, markVerified } from "../../db/addresses.js";
 import { storeInboundEmail, setInboundRead, setInboundStarred, setInboundArchived } from "../../db/inbound.js";
 import {
   listMailbox, mailboxCounts, getMessageBody, toggleStar, toggleRead, archiveMessage,
   replyDefaults, sendComposed, listSources, getSettings, setSetting,
+  defaultFromAddress,
 } from "./data.js";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
@@ -103,7 +105,6 @@ describe("tui data — compose / reply", () => {
 });
 
 import { renderMarkdown, listProfiles } from "./data.js";
-import { createDomain } from "../../db/domains.js";
 
 describe("tui data — attachments + markdown + profiles", () => {
   it("surfaces attachment count + details", () => {
@@ -136,13 +137,30 @@ describe("tui data — attachments + markdown + profiles", () => {
   it("lists profiles with provider type + domains + addresses", () => {
     const db = getDatabase();
     createDomain(providerId, "acme.com", db);
-    const { createAddress } = require("../../db/addresses.js");
     createAddress({ provider_id: providerId, email: "ops@acme.com" }, db);
     const profiles = listProfiles();
     const p = profiles.find((x) => x.id === providerId)!;
     expect(p.provider).toBe("sandbox");
     expect(p.domains).toContain("acme.com");
     expect(p.addresses).toContain("ops@acme.com");
+  });
+
+  it("defaults compose From to the best configured sender for the active source", () => {
+    const db = getDatabase();
+    const other = createProvider({ name: "other", type: "sandbox", active: true }, db).id;
+    createAddress({ provider_id: other, email: "other@example.com" }, db);
+    const unverified = createAddress({ provider_id: providerId, email: "fallback@acme.com" }, db);
+    const verified = createAddress({ provider_id: providerId, email: "ops@acme.com" }, db);
+    markVerified(verified.id, db);
+
+    expect(defaultFromAddress({ source: { providerId } }, db)).toBe("ops@acme.com");
+    expect(defaultFromAddress({ source: { domain: "acme.com" } }, db)).toBe("ops@acme.com");
+    expect(defaultFromAddress({ source: { domain: "missing.com" }, fallback: "selected@inbox.com" }, db)).toBe("selected@inbox.com");
+
+    // If no verified address is available for the source provider, fall back to
+    // its newest active address rather than leaving compose unusable.
+    expect(defaultFromAddress({ source: { providerId: other } }, db)).toBe("other@example.com");
+    expect(unverified.email).toBe("fallback@acme.com");
   });
 });
 
@@ -211,6 +229,43 @@ describe("tui data — inbox sources (per-inbox switching)", () => {
     const only = listMailbox("inbox", { source: { domain: "elyratelier.com" } }).map((m) => m.subject);
     expect(only).toEqual(["to-elyra"]);
   });
+
+  it("computes counts for the active source", async () => {
+    const other = createProvider({ name: "other", type: "sandbox", active: true }).id;
+    const db = getDatabase();
+    storeInboundEmail({ provider_id: providerId, message_id: "<c1@x>", from_address: "a@x.com", to_addresses: ["ops@elyratelier.com"], cc_addresses: [], subject: "source-inbox", text_body: "b", html_body: null, attachments: [], headers: {}, raw_size: 1, received_at: new Date().toISOString() }, db);
+    storeInboundEmail({ provider_id: other, message_id: "<c2@x>", from_address: "a@x.com", to_addresses: ["ops@droolbowl.com"], cc_addresses: [], subject: "other-inbox", text_body: "b", html_body: null, attachments: [], headers: {}, raw_size: 1, received_at: new Date().toISOString() }, db);
+    await sendComposed({ from: "sender@elyratelier.com", to: "client@y.com", subject: "source-sent", body: "hi", providerId });
+    await sendComposed({ from: "sender@droolbowl.com", to: "client@y.com", subject: "other-sent", body: "hi", providerId: other });
+
+    expect(mailboxCounts({ source: { providerId } }).inbox).toBe(1);
+    expect(mailboxCounts({ source: { providerId } }).sent).toBe(1);
+    expect(mailboxCounts({ source: { domain: "elyratelier.com" } }).inbox).toBe(1);
+    expect(mailboxCounts({ source: { domain: "elyratelier.com" } }).sent).toBe(1);
+  });
+
+  it("filters Sent by sender domain for app-sent and Gmail SENT mail", async () => {
+    const db = getDatabase();
+    await sendComposed({ from: "me@elyratelier.com", to: "client@y.com", subject: "app elyra", body: "hi", providerId });
+    await sendComposed({ from: "me@droolbowl.com", to: "client@y.com", subject: "app other", body: "hi", providerId });
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<gs1@x>", from_address: "me@elyratelier.com", to_addresses: ["client@y.com"],
+      cc_addresses: [], subject: "gmail elyra", text_body: "b", html_body: null, attachments: [],
+      label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<gs2@x>", from_address: "me@droolbowl.com", to_addresses: ["client@y.com"],
+      cc_addresses: [], subject: "gmail other", text_body: "b", html_body: null, attachments: [],
+      label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
+    }, db);
+
+    const sent = listMailbox("sent", { source: { domain: "elyratelier.com" } }).map((m) => m.subject);
+    expect(sent).toContain("app elyra");
+    expect(sent).toContain("gmail elyra");
+    expect(sent).not.toContain("app other");
+    expect(sent).not.toContain("gmail other");
+    expect(mailboxCounts({ source: { domain: "elyratelier.com" } }).sent).toBe(2);
+  });
 });
 
 describe("tui data — settings (persisted to config)", () => {
@@ -225,15 +280,18 @@ describe("tui data — settings (persisted to config)", () => {
     expect(s.gmailAutoPull).toBe(true);
     expect(s.dimRead).toBe(false);
     expect(s.defaultMailbox).toBe("inbox");
+    expect(s.theme).toBe("auto");
   });
 
   it("round-trips a setting change", () => {
     setSetting("autoPull", false);
     setSetting("dimRead", true);
     setSetting("defaultMailbox", "starred");
+    setSetting("theme", "dark");
     const s = getSettings();
     expect(s.autoPull).toBe(false);
     expect(s.dimRead).toBe(true);
     expect(s.defaultMailbox).toBe("starred");
+    expect(s.theme).toBe("dark");
   });
 });

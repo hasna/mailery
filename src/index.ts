@@ -92,6 +92,23 @@ export {
 } from "./db/groups.js";
 
 export {
+  createOwner, getOwner, getOwnerByName, listOwners,
+  assignAddressOwner, transferAddressOwner, unassignAddressOwner,
+  getAddressOwnership, listAddressOwnershipEvents, getAddressOwnershipEvent,
+  listAddressesByOwner,
+} from "./db/owners.js";
+export type {
+  Owner, OwnerType, CreateOwnerInput, AddressOwnership,
+  AddressOwnershipAction, AddressOwnershipEvent,
+} from "./db/owners.js";
+
+export {
+  createSendKey, getSendKey, verifySendKey, listSendKeys,
+  revokeSendKey, canOwnerSendFrom, assertSendAuthorized,
+} from "./db/send-keys.js";
+export type { SendKey } from "./db/send-keys.js";
+
+export {
   createScheduledEmail, listScheduledEmails, getScheduledEmail,
   cancelScheduledEmail, getDueEmails, markSent, markFailed,
 } from "./db/scheduled.js";
@@ -137,6 +154,13 @@ export type { WebhookEvent } from "./lib/webhook.js";
 export { verifyEmailAddress, formatVerifyResult } from "./lib/email-verify.js";
 export { injectOpenPixel, injectClickTracking, prepareTrackedHtml } from "./lib/tracking.js";
 export { getFailoverProviderIds } from "./lib/config.js";
+export {
+  resolveAddressRef, enrichAddress, listEnrichedAddresses,
+  getAddressOwnershipDetail, setAddressOwnerByRef,
+  transferAddressOwnerByRef, unassignAddressOwnerByRef,
+  getAddressOwnershipHistoryByRef, suggestAddressLocalParts,
+} from "./lib/address-ownership.js";
+export type { EnrichedAddress, AddressOwnershipDetail } from "./lib/address-ownership.js";
 export {
   createSequence, getSequence, listSequences, updateSequence, deleteSequence,
   addStep, listSteps, removeStep,

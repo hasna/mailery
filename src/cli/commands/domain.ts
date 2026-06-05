@@ -48,11 +48,33 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("add <domain>")
     .description("Add a domain to a provider")
     .requiredOption("--provider <id>", "Provider ID")
-    .action(async (domain: string, opts: { provider: string }) => {
+    .option("--dry-run", "Resolve inputs and show the planned change without calling the provider or writing to the DB")
+    .action(async (domain: string, opts: { provider: string; dryRun?: boolean }) => {
       try {
         const providerId = resolveId("providers", opts.provider);
         const provider = getProvider(providerId);
         if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
+        const existing = getDomainByName(providerId, domain);
+
+        if (opts.dryRun) {
+          output({
+            dry_run: true,
+            domain,
+            provider_id: providerId,
+            existing,
+            would_create_domain: !existing,
+            would_call_provider: !existing,
+            cli_equivalent: `emails domain add ${domain} --provider ${opts.provider}`,
+          }, existing
+            ? chalk.dim(`Domain already exists locally: ${domain} (${existing.id.slice(0, 8)})`)
+            : chalk.dim(`Would add ${domain} to provider ${provider!.name} and register it locally.`));
+          return;
+        }
+
+        if (existing) {
+          output(existing, chalk.green(`✓ Domain already exists: ${domain} (${existing.id.slice(0, 8)})`));
+          return;
+        }
 
         const adapter = getAdapter(provider!);
         await adapter.addDomain(domain);

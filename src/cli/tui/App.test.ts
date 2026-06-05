@@ -285,6 +285,51 @@ describe("emails ui App", () => {
     expect(frame()).not.toContain("ops message");
   });
 
+  it("pages and changes sort order in Inbox", async () => {
+    for (let i = 0; i < 55; i++) {
+      seedMessage(`msg-${String(i).padStart(2, "0")}`, `2026-01-01T10:${String(i).padStart(2, "0")}:00.000Z`);
+    }
+    await renderApp({ initialMailbox: "inbox" }, { width: 132, height: 32 });
+
+    expect(frame()).toContain("page 1+");
+    expect(frame()).toContain("newest first");
+    expect(frame()).toContain("msg-54");
+
+    await type("n");
+
+    expect(frame()).toContain("page 2");
+    expect(frame()).toContain("msg-04");
+
+    await type("N");
+    await type("o");
+
+    expect(frame()).toContain("page 1+");
+    expect(frame()).toContain("oldest first");
+    expect(frame()).toContain("msg-00");
+  });
+
+  it("opens a searchable command palette and runs the selected action", async () => {
+    await renderApp({ initialMailbox: "inbox" });
+
+    await type(":");
+    expect(frame()).toContain("Command palette");
+    expect(frame()).toContain("Open Inbox");
+
+    await type("x");
+    await type("q");
+    expect(frame()).toContain("Command palette");
+    expect(frame()).toContain("> xq|");
+
+    await escape();
+    await type(":");
+    await type("prof");
+    expect(frame()).toContain("Profiles");
+
+    await enter();
+    expect(frame()).toContain("Configured accounts");
+    expect(frame()).toContain("sandbox");
+  });
+
   it("keeps the selected address stable when refresh reorders address choices", async () => {
     const sales = createAddress({ provider_id: providerId, email: "sales@example.com" });
     markVerified(sales.id);

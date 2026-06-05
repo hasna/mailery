@@ -6,6 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { getDatabase, resetDatabase, closeDatabase } from "./db/database.js";
 import { createProvider, getProvider } from "./db/providers.js";
 import { createEmail, getEmail, listEmails } from "./db/emails.js";
+import { createEvent } from "./db/events.js";
 import { createDomain, getDomainByName } from "./db/domains.js";
 import { createAddress } from "./db/addresses.js";
 import { SandboxAdapter } from "./providers/sandbox.js";
@@ -17,6 +18,9 @@ import { createWarmingSchedule, getWarmingSchedule } from "./db/warming.js";
 import { getTodayLimit, generateWarmingPlan } from "./lib/warming.js";
 import { storeInboundEmail, listReplies, getReplyCount } from "./db/inbound.js";
 import { sendWithFailover } from "./lib/send.js";
+import { getLocalStats } from "./lib/stats.js";
+import { getAnalytics } from "./lib/analytics.js";
+import { exportEmailsJson, exportEventsCsv } from "./lib/export.js";
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
@@ -157,5 +161,58 @@ describe("reply tracking flow", () => {
     expect(inbound.in_reply_to_email_id).toBe(eId);
     expect(getReplyCount(eId, db)).toBe(1);
     expect(listReplies(eId, db).length).toBe(1);
+  });
+});
+
+describe("documented agent workflow smoke", () => {
+  it("covers setup, sandbox capture, inbound browsing, analytics, stats, and exports", async () => {
+    const db = getDatabase();
+    const provider = createProvider({ name: "dev", type: "sandbox" }, db);
+    const domain = createDomain(provider.id, "example.com", db);
+    const address = createAddress({ provider_id: provider.id, email: "hello@example.com" }, db);
+
+    const sent = await sendWithFailover(provider.id, {
+      from: address.email,
+      to: "user@example.net",
+      subject: "Workflow smoke",
+      text: "hello",
+    }, db);
+    expect(sent.providerId).toBe(provider.id);
+    expect(listSandboxEmails(provider.id, 10, db)).toHaveLength(1);
+
+    const email = createEmail(provider.id, {
+      from: address.email,
+      to: "user@example.net",
+      subject: "Workflow smoke",
+      text: "hello",
+    }, sent.messageId, db);
+    createEvent({
+      email_id: email.id,
+      provider_id: provider.id,
+      type: "delivered",
+      recipient: "user@example.net",
+      occurred_at: new Date().toISOString(),
+    }, db);
+    storeInboundEmail({
+      provider_id: provider.id,
+      message_id: "<workflow-inbound@example.net>",
+      from_address: "user@example.net",
+      to_addresses: [address.email],
+      cc_addresses: [],
+      subject: "Re: Workflow smoke",
+      text_body: "thanks",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 20,
+      received_at: new Date().toISOString(),
+    }, db);
+
+    expect(getProvider(provider.id, db)?.name).toBe("dev");
+    expect(getDomainByName(provider.id, domain.domain, db)?.id).toBe(domain.id);
+    expect(getLocalStats(provider.id, "30d", db).sent).toBeGreaterThan(0);
+    expect(getAnalytics(provider.id, "30d", db).dailyVolume.length).toBeGreaterThan(0);
+    expect(exportEmailsJson({ provider_id: provider.id }, db)).toContain("Workflow smoke");
+    expect(exportEventsCsv({ provider_id: provider.id }, db)).toContain("delivered");
   });
 });

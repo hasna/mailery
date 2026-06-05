@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createProvider } from "../../db/providers.js";
-import { createAddress } from "../../db/addresses.js";
+import { createAddress, listAddresses } from "../../db/addresses.js";
 import { createOwner } from "../../db/owners.js";
+import { getAddressProvisioning } from "../../db/provisioning.js";
 import { registerAddressCommands } from "./address.js";
 
 async function runAddressCommand(args: string[]) {
@@ -94,6 +95,40 @@ describe("address ownership commands", () => {
         { action: "transfer", reason: "handoff", actor: "test" },
         { action: "assign" },
       ],
+    });
+  });
+});
+
+describe("address provision command", () => {
+  it("supports dry-run without mutating address or provisioning state", async () => {
+    const provider = createProvider({ name: "sandbox", type: "sandbox" });
+
+    const result = await runAddressCommand(["address", "provision", "dry@example.com", "--provider", provider.id, "--dry-run"]);
+
+    expect(result.data).toMatchObject({
+      dry_run: true,
+      email: "dry@example.com",
+      provider_id: provider.id,
+      existing: false,
+      would_create_address: true,
+      would_update_provisioning: true,
+    });
+    expect(listAddresses(undefined, getDatabase())).toHaveLength(0);
+  });
+
+  it("is idempotent for repeated local address provisioning", async () => {
+    const provider = createProvider({ name: "sandbox", type: "sandbox" });
+
+    const first = await runAddressCommand(["address", "provision", "ops@example.com", "--provider", provider.id]);
+    const second = await runAddressCommand(["address", "provision", "ops@example.com", "--provider", provider.id]);
+
+    expect(first.data).toMatchObject({ email: "ops@example.com", created: true });
+    expect(second.data).toMatchObject({ email: "ops@example.com", created: false });
+    const addresses = listAddresses(undefined, getDatabase());
+    expect(addresses).toHaveLength(1);
+    expect(getAddressProvisioning(addresses[0]!.id, getDatabase())).toMatchObject({
+      provisioning_status: "requested",
+      receive_strategy: "ses-s3",
     });
   });
 });

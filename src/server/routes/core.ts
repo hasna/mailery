@@ -92,7 +92,7 @@ if (providerAuthMatch && method === "POST") {
       oauth_token_expiry: tokens.expiry,
     });
 
-    return json({ ok: true, provider: updated });
+    return json({ ok: true, provider: sanitizeProvider(updated as unknown as Record<string, unknown>) });
   } catch (e) { return internalError(e); }
 }
 

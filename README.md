@@ -166,7 +166,30 @@ curl -H "Authorization: Bearer $ESK" -X POST localhost:3900/api/v1/send -d '{"fr
 curl -H "Authorization: Bearer $ESK" localhost:3900/api/v1/inbox          # mail to your addresses
 ```
 
-## Inbound Email (AWS SES → S3)
+## Library API
+
+Import the stable local API from `@hasna/emails`. The public entrypoint covers
+provider/domain/address CRUD, sending, inbound storage and listing, templates,
+contacts and suppression, sequences, exports, ownership helpers, and scoped send
+keys.
+
+```ts
+import {
+  sendWithFailover,
+  createProvider,
+  createAddress,
+  storeInboundEmail,
+  createTemplate,
+  suppressContact,
+  createSequence,
+  exportEmailsJson,
+  createOwner,
+  setAddressOwnerByRef,
+  createSendKey,
+} from "@hasna/emails";
+```
+
+## Inbound Email (AWS SES -> S3)
 
 ```bash
 # Set up S3 bucket + SES receipt rules

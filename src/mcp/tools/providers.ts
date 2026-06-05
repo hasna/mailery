@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createProvider, listProviders, deleteProvider, getProvider, updateProvider } from "../../db/providers.js";
 import { getAdapter } from "../../providers/index.js";
+import { redactSecrets } from "../../lib/redaction.js";
 import { formatError, resolveId, ProviderNotFoundError } from "../helpers.js";
 
 export function registerProviderTools(server: McpServer): void {
@@ -14,7 +15,7 @@ export function registerProviderTools(server: McpServer): void {
   async () => {
     try {
       const providers = listProviders();
-      return { content: [{ type: "text", text: JSON.stringify(providers, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(redactSecrets(providers), null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -63,7 +64,7 @@ export function registerProviderTools(server: McpServer): void {
         }
       }
 
-      return { content: [{ type: "text", text: JSON.stringify(provider, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(redactSecrets(provider), null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -91,7 +92,7 @@ export function registerProviderTools(server: McpServer): void {
       const resolvedId = resolveId("providers", input.id);
       const { id: _, ...updates } = input;
       const updated = updateProvider(resolvedId, updates);
-      return { content: [{ type: "text", text: JSON.stringify(updated, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(redactSecrets(updated), null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -128,7 +129,7 @@ export function registerProviderTools(server: McpServer): void {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ success: true, provider: updated }, null, 2),
+            text: JSON.stringify(redactSecrets({ success: true, provider: updated }), null, 2),
           },
         ],
       };

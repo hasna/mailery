@@ -16,9 +16,16 @@ import { getEmail, createEmail } from "../../db/emails.js";
 import { getEmailContent, storeEmailContent } from "../../db/email-content.js";
 import { getThreadMessages } from "../../db/threads.js";
 import { listProviders } from "../../db/providers.js";
+import { listDomains } from "../../db/domains.js";
 import { listAddresses } from "../../db/addresses.js";
+import { listAliases } from "../../db/aliases.js";
+import { listSendKeys } from "../../db/send-keys.js";
+import { getAddressProvisioning, getDomainProvisioning } from "../../db/provisioning.js";
 import { sendWithFailover } from "../../lib/send.js";
+import { countSendsToday } from "../../db/address-lifecycle.js";
 import { loadConfig, saveConfig } from "../../lib/config.js";
+import { assessDomainReadiness, type DomainReadiness } from "../../lib/domain-readiness.js";
+import { listEnrichedAddresses } from "../../lib/address-ownership.js";
 import { marked } from "marked";
 import { normalizeThemeMode, type TuiThemeMode } from "./theme.js";
 
@@ -149,9 +156,20 @@ function appSentSourceClause(src?: MailboxSource): SqlClause {
   return { sql: where.length ? ` WHERE ${where.join(" AND ")}` : "", params };
 }
 
-export function listMailbox(mailbox: Mailbox, opts?: { limit?: number; search?: string; source?: MailboxSource }, db?: Database): TuiMessage[] {
+export interface MailboxListOptions {
+  limit?: number;
+  offset?: number;
+  search?: string;
+  source?: MailboxSource;
+  sort?: "newest" | "oldest";
+}
+
+export function listMailbox(mailbox: Mailbox, opts?: MailboxListOptions, db?: Database): TuiMessage[] {
   const d = db || getDatabase();
   const limit = Math.max(1, Math.trunc(opts?.limit ?? 200));
+  const offset = Math.max(0, Math.trunc(opts?.offset ?? 0));
+  const fetchLimit = limit + offset;
+  const order = opts?.sort === "oldest" ? "ASC" : "DESC";
   let messages: TuiMessage[];
 
   const src = opts?.source;
@@ -164,17 +182,17 @@ export function listMailbox(mailbox: Mailbox, opts?: { limit?: number; search?: 
       `SELECT e.id, e.from_address, e.to_addresses, e.subject, e.sent_at AS date, e.thread_id,
               e.attachment_count AS attachments, substr(c.text_body, 1, 140) AS snippet
        FROM emails e LEFT JOIN email_content c ON c.email_id = e.id${appSrc.sql}
-       ORDER BY e.sent_at DESC LIMIT ?`,
-    ).all(...appSrc.params, limit) as LiteRow[]).map((r) => liteToMessage(r, "sent"));
+       ORDER BY e.sent_at ${order} LIMIT ?`,
+    ).all(...appSrc.params, fetchLimit) as LiteRow[]).map((r) => liteToMessage(r, "sent"));
     const gmailSent = (d.query(
       `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE is_sent = 1 AND is_archived = 0${senderSrc.sql}
-       ORDER BY received_at DESC LIMIT ?`,
-    ).all(...senderSrc.params, limit) as LiteRow[]).map((r) => liteToMessage(r, "inbound"));
-    messages = [...appSent, ...gmailSent].sort((a, b) => b.date.localeCompare(a.date)).slice(0, limit);
+       ORDER BY received_at ${order} LIMIT ?`,
+    ).all(...senderSrc.params, fetchLimit) as LiteRow[]).map((r) => liteToMessage(r, "inbound"));
+    messages = [...appSent, ...gmailSent].sort((a, b) => order === "DESC" ? b.date.localeCompare(a.date) : a.date.localeCompare(b.date));
   } else {
     const rows = d.query(
-      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE ${FOLDER_WHERE[mailbox]}${recipientSrc.sql} ORDER BY received_at DESC LIMIT ?`,
-    ).all(...recipientSrc.params, limit) as LiteRow[];
+      `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE ${FOLDER_WHERE[mailbox]}${recipientSrc.sql} ORDER BY received_at ${order} LIMIT ?`,
+    ).all(...recipientSrc.params, fetchLimit) as LiteRow[];
     messages = rows.map((r) => liteToMessage(r, "inbound"));
   }
 
@@ -183,7 +201,7 @@ export function listMailbox(mailbox: Mailbox, opts?: { limit?: number; search?: 
     messages = messages.filter((m) =>
       m.subject.toLowerCase().includes(q) || m.from.toLowerCase().includes(q) || m.snippet.toLowerCase().includes(q));
   }
-  return messages;
+  return messages.slice(offset, offset + limit);
 }
 
 export interface MailboxCounts { inbox: number; unread: number; starred: number; sent: number; archived: number }
@@ -360,6 +378,36 @@ export interface ProfileInfo {
   active: boolean;
   domains: string[];
   addresses: string[];
+  domain_details: ProfileDomainInfo[];
+  address_details: ProfileAddressInfo[];
+  send_keys: ProfileSendKeyInfo[];
+}
+
+export interface ProfileDomainInfo {
+  domain: string;
+  readiness: DomainReadiness;
+  provisioning_status: string;
+}
+
+export interface ProfileAddressInfo {
+  email: string;
+  verified: boolean;
+  status: string;
+  owner: string | null;
+  administrator: string | null;
+  receive_status: string;
+  daily_quota: number | null;
+  sent_today: number;
+  aliases: string[];
+  send_keys: ProfileSendKeyInfo[];
+}
+
+export interface ProfileSendKeyInfo {
+  id: string;
+  owner: string | null;
+  label: string | null;
+  prefix: string;
+  active: boolean;
 }
 
 // ── inbox address choices ──────────────────────────────────────────────────────
@@ -498,12 +546,71 @@ export function setSetting<K extends keyof TuiSettings>(key: K, value: TuiSettin
  */
 export function listProfiles(db?: Database): ProfileInfo[] {
   const d = db || getDatabase();
-  return listProviders(d).map((p) => ({
-    id: p.id,
-    name: p.name,
-    provider: p.type,
-    active: !!p.active,
-    domains: (d.query("SELECT domain FROM domains WHERE provider_id = ? ORDER BY domain").all(p.id) as { domain: string }[]).map((r) => r.domain),
-    addresses: (d.query("SELECT email FROM addresses WHERE provider_id = ? ORDER BY email").all(p.id) as { email: string }[]).map((r) => r.email),
-  }));
+  const aliases = listAliases(undefined, d);
+  const keys = listSendKeys(undefined, d);
+  const ownerNames = new Map((d.query("SELECT id, name FROM owners").all() as { id: string; name: string }[]).map((owner) => [owner.id, owner.name]));
+
+  return listProviders(d).map((p) => {
+    const rawDomains = listDomains(p.id, d);
+    const enrichedAddresses = listEnrichedAddresses(p.id, d);
+    const domain_details = rawDomains.map((domain) => {
+      const ready_addresses = enrichedAddresses.filter((address) => {
+        const provisioning = getAddressProvisioning(address.id, d);
+        return provisioning?.domain_id === domain.id && provisioning.provisioning_status === "ready";
+      }).length;
+      const provisioning = getDomainProvisioning(domain.id, d);
+      return {
+        domain: domain.domain,
+        readiness: assessDomainReadiness(domain, provisioning, { ready_addresses }),
+        provisioning_status: provisioning?.provisioning_status ?? "none",
+      };
+    });
+    const address_details = enrichedAddresses
+      .sort((a, b) => a.email.localeCompare(b.email))
+      .map((address) => {
+        const receive = getAddressProvisioning(address.id, d);
+        const ownerIds = [address.owner?.id, address.administrator?.id].filter((id): id is string => !!id);
+        const addressKeys = keys.filter((key) => ownerIds.includes(key.owner_id)).map((key) => ({
+          id: key.id,
+          owner: ownerNames.get(key.owner_id) ?? null,
+          label: key.label,
+          prefix: key.prefix,
+          active: !key.revoked_at,
+        }));
+        return {
+          email: address.email,
+          verified: !!address.verified,
+          status: address.status ?? "active",
+          owner: address.owner?.name ?? null,
+          administrator: address.administrator?.name ?? null,
+          receive_status: receive?.provisioning_status ?? "none",
+          daily_quota: address.daily_quota ?? null,
+          sent_today: countSendsToday(address.email, d),
+          aliases: aliases
+            .filter((alias) => alias.target_address === address.email.toLowerCase())
+            .map((alias) => alias.local_part === "*" ? `*@${alias.domain}` : `${alias.local_part}@${alias.domain}`),
+          send_keys: addressKeys,
+        };
+      });
+    const send_keys = keys
+      .filter((key) => address_details.some((address) => address.send_keys.some((addressKey) => addressKey.id === key.id)))
+      .map((key) => ({
+        id: key.id,
+        owner: ownerNames.get(key.owner_id) ?? null,
+        label: key.label,
+        prefix: key.prefix,
+        active: !key.revoked_at,
+      }));
+    return {
+      id: p.id,
+      name: p.name,
+      provider: p.type,
+      active: !!p.active,
+      domains: domain_details.map((domain) => domain.domain),
+      addresses: address_details.map((address) => address.email),
+      domain_details,
+      address_details,
+      send_keys,
+    };
+  });
 }

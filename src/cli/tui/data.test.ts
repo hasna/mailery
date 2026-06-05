@@ -3,6 +3,11 @@ import { closeDatabase, resetDatabase, getDatabase } from "../../db/database.js"
 import { createProvider } from "../../db/providers.js";
 import { createDomain } from "../../db/domains.js";
 import { createAddress, markVerified } from "../../db/addresses.js";
+import { setAddressQuota } from "../../db/address-lifecycle.js";
+import { createAlias } from "../../db/aliases.js";
+import { createOwner, assignAddressOwner } from "../../db/owners.js";
+import { createSendKey } from "../../db/send-keys.js";
+import { setAddressProvisioning, setDomainProvisioning } from "../../db/provisioning.js";
 import { storeInboundEmail, setInboundRead, setInboundStarred, setInboundArchived } from "../../db/inbound.js";
 import {
   listMailbox, mailboxCounts, getMessageBody, toggleStar, toggleRead, archiveMessage,
@@ -60,6 +65,20 @@ describe("tui data — mailboxes", () => {
     seed("invoice report");
     seed("lunch plans");
     expect(listMailbox("inbox", { search: "invoice" }).map((m) => m.subject)).toEqual(["invoice report"]);
+  });
+
+  it("sorts and paginates mailbox results", () => {
+    seed("oldest", { to: ["me@x.com"] });
+    const db = getDatabase();
+    db.run("UPDATE inbound_emails SET received_at = ? WHERE subject = ?", ["2026-01-01T10:00:00.000Z", "oldest"]);
+    seed("middle");
+    db.run("UPDATE inbound_emails SET received_at = ? WHERE subject = ?", ["2026-01-02T10:00:00.000Z", "middle"]);
+    seed("newest");
+    db.run("UPDATE inbound_emails SET received_at = ? WHERE subject = ?", ["2026-01-03T10:00:00.000Z", "newest"]);
+
+    expect(listMailbox("inbox", { limit: 2 }).map((m) => m.subject)).toEqual(["newest", "middle"]);
+    expect(listMailbox("inbox", { limit: 1, offset: 1 }).map((m) => m.subject)).toEqual(["middle"]);
+    expect(listMailbox("inbox", { sort: "oldest" }).map((m) => m.subject)).toEqual(["oldest", "middle", "newest"]);
   });
 });
 
@@ -136,13 +155,36 @@ describe("tui data — attachments + markdown + profiles", () => {
 
   it("lists profiles with provider type + domains + addresses", () => {
     const db = getDatabase();
-    createDomain(providerId, "acme.com", db);
-    createAddress({ provider_id: providerId, email: "ops@acme.com" }, db);
+    const domain = createDomain(providerId, "acme.com", db);
+    const address = createAddress({ provider_id: providerId, email: "ops@acme.com" }, db);
+    markVerified(address.id, db);
+    setAddressQuota(address.id, 25, db);
+    setDomainProvisioning(domain.id, { provisioning_status: "ready" }, db);
+    setAddressProvisioning(address.id, { domain_id: domain.id, provisioning_status: "ready", receive_strategy: "ses-s3" }, db);
+    const owner = createOwner({ type: "agent", name: "ops-agent" }, db);
+    assignAddressOwner(address.id, owner.id, undefined, db);
+    createAlias("support@acme.com", "ops@acme.com", db);
+    createSendKey(owner.id, "ops-key", db);
+
     const profiles = listProfiles();
     const p = profiles.find((x) => x.id === providerId)!;
     expect(p.provider).toBe("sandbox");
     expect(p.domains).toContain("acme.com");
     expect(p.addresses).toContain("ops@acme.com");
+    expect(p.domain_details[0]).toMatchObject({
+      domain: "acme.com",
+      provisioning_status: "ready",
+      readiness: { receive_ready: true },
+    });
+    expect(p.address_details[0]).toMatchObject({
+      email: "ops@acme.com",
+      verified: true,
+      owner: "ops-agent",
+      receive_status: "ready",
+      daily_quota: 25,
+      aliases: ["support@acme.com"],
+    });
+    expect(p.address_details[0]!.send_keys[0]).toMatchObject({ owner: "ops-agent", label: "ops-key", active: true });
   });
 
   it("defaults compose From to the best configured sender for the active source", () => {

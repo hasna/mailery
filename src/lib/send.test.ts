@@ -5,7 +5,9 @@ import { createAddress } from "../db/addresses.js";
 import { suspendAddress } from "../db/address-lifecycle.js";
 import { createOwner, assignAddressOwner } from "../db/owners.js";
 import { createSendKey } from "../db/send-keys.js";
-import { sendWithFailover } from "./send.js";
+import { createWarmingSchedule } from "../db/warming.js";
+import { createEmail } from "../db/emails.js";
+import { MAX_ATTACHMENT_COUNT, MAX_ATTACHMENT_SIZE_BYTES, sendWithFailover } from "./send.js";
 
 let providerId: string;
 beforeEach(() => {
@@ -72,5 +74,67 @@ describe("sendWithFailover — scoped-auth guard", () => {
     createAddress({ provider_id: providerId, email: "any@x.com" });
     const r = await sendWithFailover(providerId, { from: "any@x.com", to: "y@x.com", subject: "hi", text: "yo" });
     expect(r.messageId).toBeTruthy();
+  });
+});
+
+describe("sendWithFailover — shared send safety guards", () => {
+  it("blocks too many attachments before touching a provider", async () => {
+    await expect(
+      sendWithFailover(providerId, {
+        from: "any@x.com",
+        to: "y@x.com",
+        subject: "hi",
+        text: "yo",
+        attachments: Array.from({ length: MAX_ATTACHMENT_COUNT + 1 }, (_, index) => ({
+          filename: `file-${index}.txt`,
+          content: Buffer.from("small").toString("base64"),
+          content_type: "text/plain",
+        })),
+      }),
+    ).rejects.toThrow(/too many attachments/i);
+  });
+
+  it("blocks a single attachment larger than 25MB", async () => {
+    await expect(
+      sendWithFailover(providerId, {
+        from: "any@x.com",
+        to: "y@x.com",
+        subject: "hi",
+        text: "yo",
+        attachments: [{
+          filename: "large.bin",
+          content: Buffer.alloc(MAX_ATTACHMENT_SIZE_BYTES + 1).toString("base64"),
+          content_type: "application/octet-stream",
+        }],
+      }),
+    ).rejects.toThrow(/too large/i);
+  });
+
+  it("blocks sends when an active warming schedule is at today's limit", async () => {
+    createWarmingSchedule({ domain: "warm.test", target_daily_volume: 50 });
+    for (let i = 0; i < 50; i++) {
+      createEmail(providerId, { from: "sender@warm.test", to: `r${i}@x.com`, subject: "sent", text: "body" }, `msg-${i}`);
+    }
+
+    await expect(
+      sendWithFailover(providerId, { from: "sender@warm.test", to: "next@x.com", subject: "hi", text: "yo" }),
+    ).rejects.toThrow(/warming limit reached/i);
+  });
+
+  it("allows trusted local callers to bypass warming limits explicitly", async () => {
+    createWarmingSchedule({ domain: "warm.test", target_daily_volume: 50 });
+    for (let i = 0; i < 50; i++) {
+      createEmail(providerId, { from: "sender@warm.test", to: `r${i}@x.com`, subject: "sent", text: "body" }, `msg-${i}`);
+    }
+
+    const result = await sendWithFailover(providerId, {
+      from: "sender@warm.test",
+      to: "next@x.com",
+      subject: "hi",
+      text: "yo",
+      bypass_warming: true,
+    });
+
+    expect(result.messageId).toBeTruthy();
   });
 });

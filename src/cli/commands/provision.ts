@@ -48,26 +48,50 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .option("--forward-to <email>", "Forward target (for cf-routing)")
     .option("--owner <name|id>", "Owner (human or agent). Human owners require --administrator.")
     .option("--administrator <name|id>", "Administering agent (required for human owners; defaults to owner for agents)")
+    .option("--dry-run", "Resolve inputs and show the planned change without writing address, provisioning, or ownership state")
     .option("--wait", "Advance provisioning now and wait until the address is ready to receive")
     .option("--timeout <sec>", "Max seconds to wait when --wait is used", "120")
     .option("--interval <sec>", "Seconds between readiness checks when --wait is used", "5")
     .option("--bucket <name>", "Inbound S3 bucket for receive validation (defaults to config inbound_s3_bucket)")
-    .action(async (email: string, opts: { provider: string; domain?: string; receive: string; forwardTo?: string; owner?: string; administrator?: string; wait?: boolean; timeout: string; interval: string; bucket?: string }) => {
+    .action(async (email: string, opts: { provider: string; domain?: string; receive: string; forwardTo?: string; owner?: string; administrator?: string; dryRun?: boolean; wait?: boolean; timeout: string; interval: string; bucket?: string }) => {
       try {
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
         const provider = getProvider(providerId);
         if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
-        const addr = getAddressByEmail(providerId, email, db) ?? createAddress({ provider_id: providerId, email }, db);
+        const existing = getAddressByEmail(providerId, email, db);
         const domainName = email.split("@")[1];
         const domainId = opts.domain ? resolveId("domains", opts.domain) : (domainName ? getDomainByName(providerId, domainName, db)?.id ?? null : null);
-        setAddressProvisioning(addr.id, {
+        const plannedProvisioning = {
           domain_id: domainId,
           receive_strategy: opts.receive as ReceiveStrategy,
           forward_to: opts.forwardTo ?? null,
-          provisioning_status: "requested",
+          provisioning_status: "requested" as const,
           next_check_at: new Date().toISOString(),
-        }, db);
+        };
+        if (opts.dryRun) {
+          output({
+            dry_run: true,
+            id: existing?.id ?? null,
+            email,
+            provider_id: providerId,
+            domain_id: domainId,
+            receive: opts.receive,
+            existing: !!existing,
+            would_create_address: !existing,
+            would_update_provisioning: true,
+            would_assign_owner: !!opts.owner,
+            current_provisioning: existing ? getAddressProvisioning(existing.id, db) : null,
+            planned_provisioning: plannedProvisioning,
+            cli_equivalent: `emails provision address ${email} --provider ${opts.provider}${opts.owner ? ` --owner ${opts.owner}` : ""}${opts.wait ? " --wait" : ""} --json`,
+          }, existing
+            ? chalk.dim(`Would update provisioning for existing address ${email} (${existing.id.slice(0, 8)}).`)
+            : chalk.dim(`Would create ${email} and request ${opts.receive} receive provisioning.`));
+          return;
+        }
+
+        const addr = existing ?? createAddress({ provider_id: providerId, email }, db);
+        setAddressProvisioning(addr.id, plannedProvisioning, db);
         let ownerNote = "";
         if (opts.owner) {
           const { getOwnerByName, getOwner, assignAddressOwner } = await import("../../db/owners.js");
@@ -116,7 +140,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
         const readyText = provisioning?.provisioning_status === "ready"
           ? chalk.green(`✓ address ${email} ready to receive (receive=${opts.receive})${ownerNote}`)
           : chalk.green(`✓ address ${email} requested (receive=${opts.receive})${ownerNote}`) + chalk.dim(`\n  Finish now: emails provision address ${email} --provider ${opts.provider} --wait`);
-        output({ id: addr.id, email, receive: opts.receive, provisioning }, readyText);
+        output({ id: addr.id, email, receive: opts.receive, created: !existing, provisioning }, readyText);
       } catch (e) { handleError(e); }
     });
 
@@ -128,15 +152,39 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .option("--send <provider>", "Send provider", "ses")
     .option("--add-mx", "Also publish inbound MX (ses-s3 receive)")
     .option("--mail-from <subdomain>", "Custom MAIL FROM subdomain (default mail.<domain>)")
+    .option("--dry-run", "Resolve inputs and show the planned change without calling providers or writing to the DB")
     .option("--wait", "Poll SES until the domain is verified for sending")
     .option("--timeout <sec>", "Max seconds to wait for verification", "600")
-    .action(async (domain: string, opts: { provider: string; send: string; addMx?: boolean; mailFrom?: string; wait?: boolean; timeout: string }) => {
+    .action(async (domain: string, opts: { provider: string; send: string; addMx?: boolean; mailFrom?: string; dryRun?: boolean; wait?: boolean; timeout: string }) => {
       try {
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
         const provider = getProvider(providerId);
         if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
-        const rec = getDomainByName(providerId, domain, db) ?? createDomain(providerId, domain, db);
+        const existing = getDomainByName(providerId, domain, db);
+        if (opts.dryRun) {
+          output({
+            dry_run: true,
+            domain,
+            provider_id: providerId,
+            existing,
+            would_create_domain: !existing,
+            would_call_provider: true,
+            planned_provisioning: {
+              provisioning_status: "ses_identity_created",
+              send_provider: opts.send,
+              dns_provider: "cloudflare",
+              mail_from_domain: opts.mailFrom ?? `mail.${domain}`,
+              add_mx: !!opts.addMx,
+            },
+            cli_equivalent: `emails provision domain ${domain} --provider ${opts.provider}${opts.addMx ? " --add-mx" : ""}${opts.wait ? " --wait" : ""} --json`,
+          }, existing
+            ? chalk.dim(`Would provision existing domain ${domain} (${existing.id.slice(0, 8)}).`)
+            : chalk.dim(`Would register ${domain} locally, create SES identity, publish DNS, and${opts.wait ? "" : " not"} wait for verification.`));
+          return;
+        }
+
+        const rec = existing ?? createDomain(providerId, domain, db);
         setDomainProvisioning(rec.id, { provisioning_status: "ses_identity_created", send_provider: opts.send, dns_provider: "cloudflare" }, db);
 
         const adapter = getAdapter(provider!);

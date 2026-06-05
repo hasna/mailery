@@ -34,7 +34,7 @@ import { nextThemeMode, resolveTheme, type ResolvedTuiThemeName, type TuiTheme }
 import { startEventLoopWatchdog } from "./watchdog.js";
 import { getEmailSystemStatus, type EmailSystemStatus } from "../../lib/agent-context.js";
 
-type View = "home" | "list" | "addressPicker" | "reader" | "compose" | "profiles" | "settings";
+type View = "home" | "list" | "addressPicker" | "reader" | "compose" | "profiles" | "settings" | "commands";
 type ComposeField = "from" | "to" | "subject" | "body";
 
 interface ComposeState {
@@ -56,6 +56,7 @@ interface LoadedMailbox {
   messages: TuiMessage[];
   counts: MailboxCounts;
   hasAnyMail: boolean;
+  hasMore: boolean;
 }
 
 interface Model extends LoadedMailbox {
@@ -63,6 +64,11 @@ interface Model extends LoadedMailbox {
   addressIdx: number;
   homeIdx: number;
   addressPickerIdx: number;
+  commandIdx: number;
+  commandSearch: string;
+  commandReturnTo: View;
+  page: number;
+  sort: "newest" | "oldest";
   selectedId: string | null;
   view: View;
   searchActive: boolean;
@@ -82,10 +88,18 @@ type Action =
   | { type: "setMailbox"; mailbox: Mailbox }
   | { type: "cycleMailbox"; delta: number }
   | { type: "setAddress"; index: number }
+  | { type: "cycleSort" }
+  | { type: "pageOffset"; delta: number }
   | { type: "syncAddressIndex"; index: number }
   | { type: "clampAddresses"; count: number }
   | { type: "selectHomeOffset"; delta: number }
   | { type: "selectAddressPickerOffset"; delta: number; count: number }
+  | { type: "openCommandPalette"; returnTo: View }
+  | { type: "closeCommandPalette" }
+  | { type: "selectCommandOffset"; delta: number; count: number }
+  | { type: "commandAppend"; text: string }
+  | { type: "commandBackspace" }
+  | { type: "commandClear" }
   | { type: "openAddressPicker" }
   | { type: "selectOffset"; delta: number }
   | { type: "view"; view: View }
@@ -133,20 +147,55 @@ const GMAIL_PULL_MS = 120000;
 const AUTOPULL_START_DELAY_MS = 15000;
 const USER_IDLE_MS = 1500;
 const STATUS_MS = 5000;
+const MAILBOX_PAGE_SIZE = 50;
 const HOME_ITEMS = ["Inbox", "Compose", "Profiles", "Settings"] as const;
 const COMPOSE_FIELDS: ComposeField[] = ["from", "to", "subject", "body"];
+type PaletteAction = "inbox" | "compose" | "profiles" | "settings" | "address" | "refresh" | "pull" | "search" | "unread" | "sent" | "archived";
+const COMMAND_ITEMS: Array<{ title: string; detail: string; action: PaletteAction }> = [
+  { title: "Open Inbox", detail: "Show received mail", action: "inbox" },
+  { title: "Compose", detail: "Start a new message", action: "compose" },
+  { title: "Profiles", detail: "Provider, domain, owner, alias, and key details", action: "profiles" },
+  { title: "Settings", detail: "Theme, defaults, and pull controls", action: "settings" },
+  { title: "Choose Address", detail: "Switch the inbox to a specific email address", action: "address" },
+  { title: "Refresh", detail: "Reload local mail and address choices", action: "refresh" },
+  { title: "Pull Now", detail: "Run configured inbox pull once", action: "pull" },
+  { title: "Search Mail", detail: "Filter the current mailbox", action: "search" },
+  { title: "Unread", detail: "Open unread messages", action: "unread" },
+  { title: "Sent", detail: "Open sent mail", action: "sent" },
+  { title: "Archived", detail: "Open archived mail", action: "archived" },
+];
+
+function filteredCommands(search: string): typeof COMMAND_ITEMS {
+  const q = search.trim().toLowerCase();
+  if (!q) return COMMAND_ITEMS;
+  return COMMAND_ITEMS.filter((item) => `${item.title} ${item.detail} ${item.action}`.toLowerCase().includes(q));
+}
 
 function choiceToFilter(choice: InboxAddressChoice | undefined): { address?: string } | undefined {
   return choice?.address ? { address: choice.address } : undefined;
 }
 
-function loadMailbox(mailbox: Mailbox, search: string, choice: InboxAddressChoice | undefined): LoadedMailbox {
+function loadMailbox(
+  mailbox: Mailbox,
+  search: string,
+  choice: InboxAddressChoice | undefined,
+  page = 0,
+  sort: Model["sort"] = "newest",
+): LoadedMailbox {
   const filter = choiceToFilter(choice);
-  const messages = listMailbox(mailbox, { search: search || undefined, source: filter });
+  const offset = Math.max(0, page) * MAILBOX_PAGE_SIZE;
+  const fetched = listMailbox(mailbox, {
+    limit: MAILBOX_PAGE_SIZE + 1,
+    offset,
+    search: search || undefined,
+    source: filter,
+    sort,
+  });
+  const messages = fetched.slice(0, MAILBOX_PAGE_SIZE);
   const counts = mailboxCounts(filter ? { source: filter } : undefined);
   const allCounts = filter ? mailboxCounts() : counts;
   const hasAnyMail = Object.values(allCounts).some((n) => n > 0);
-  return { messages, counts, hasAnyMail };
+  return { messages, counts, hasAnyMail, hasMore: fetched.length > MAILBOX_PAGE_SIZE };
 }
 
 function selectedIndex(messages: TuiMessage[], selectedId: string | null): number {
@@ -183,14 +232,21 @@ function reducer(state: Model, action: Action): Model {
     case "clearStatus":
       return state.status.text === action.text ? { ...state, status: { text: "", tone: "info" } } : state;
     case "setMailbox":
-      return { ...state, mailbox: action.mailbox, selectedId: null, view: "list", readerScroll: 0 };
+      return { ...state, mailbox: action.mailbox, page: 0, selectedId: null, view: "list", readerScroll: 0 };
     case "cycleMailbox": {
       const i = MAILBOXES.indexOf(state.mailbox);
       const mailbox = MAILBOXES[(i + action.delta + MAILBOXES.length) % MAILBOXES.length]!;
-      return { ...state, mailbox, selectedId: null, view: "list", readerScroll: 0 };
+      return { ...state, mailbox, page: 0, selectedId: null, view: "list", readerScroll: 0 };
     }
     case "setAddress":
-      return { ...state, addressIdx: action.index, selectedId: null, view: "list", readerScroll: 0 };
+      return { ...state, addressIdx: action.index, page: 0, selectedId: null, view: "list", readerScroll: 0 };
+    case "cycleSort":
+      return { ...state, sort: state.sort === "newest" ? "oldest" : "newest", page: 0, selectedId: null, view: "list", readerScroll: 0 };
+    case "pageOffset": {
+      if (action.delta > 0 && !state.hasMore) return state;
+      if (action.delta < 0 && state.page === 0) return state;
+      return { ...state, page: Math.max(0, state.page + action.delta), selectedId: null, view: "list", readerScroll: 0 };
+    }
     case "syncAddressIndex":
       return { ...state, addressIdx: action.index, addressPickerIdx: Math.min(state.addressPickerIdx, action.index) };
     case "clampAddresses": {
@@ -209,6 +265,20 @@ function reducer(state: Model, action: Action): Model {
       const next = Math.min(Math.max(0, action.count - 1), Math.max(0, state.addressPickerIdx + action.delta));
       return { ...state, addressPickerIdx: next };
     }
+    case "openCommandPalette":
+      return { ...state, view: "commands", commandReturnTo: action.returnTo, commandIdx: 0, commandSearch: "" };
+    case "closeCommandPalette":
+      return { ...state, view: state.commandReturnTo };
+    case "selectCommandOffset": {
+      const next = Math.min(Math.max(0, action.count - 1), Math.max(0, state.commandIdx + action.delta));
+      return { ...state, commandIdx: next };
+    }
+    case "commandAppend":
+      return { ...state, commandSearch: state.commandSearch + action.text, commandIdx: 0 };
+    case "commandBackspace":
+      return { ...state, commandSearch: state.commandSearch.slice(0, -1), commandIdx: 0 };
+    case "commandClear":
+      return { ...state, commandSearch: "", commandIdx: 0 };
     case "openAddressPicker":
       return { ...state, addressPickerIdx: state.addressIdx, view: "addressPicker" };
     case "selectOffset":
@@ -224,11 +294,11 @@ function reducer(state: Model, action: Action): Model {
     case "searchStop":
       return { ...state, searchActive: false };
     case "searchClear":
-      return { ...state, search: "", searchActive: false, selectedId: null };
+      return { ...state, search: "", page: 0, searchActive: false, selectedId: null };
     case "searchAppend":
-      return { ...state, search: state.search + action.text, selectedId: null };
+      return { ...state, search: state.search + action.text, page: 0, selectedId: null };
     case "searchBackspace":
-      return { ...state, search: state.search.slice(0, -1), selectedId: null };
+      return { ...state, search: state.search.slice(0, -1), page: 0, selectedId: null };
     case "composeStart":
       return { ...state, view: "compose", compose: action.compose };
     case "composeCancel":
@@ -323,6 +393,11 @@ export function App({ initialMailbox }: AppProps) {
       addressIdx,
       homeIdx: 0,
       addressPickerIdx: addressIdx,
+      commandIdx: 0,
+      commandSearch: "",
+      commandReturnTo: initialMailbox ? "list" : "home",
+      page: 0,
+      sort: "newest",
       selectedId: loaded.messages[0]?.id ?? null,
       view: initialMailbox ? "list" : "home",
       searchActive: false,
@@ -368,8 +443,8 @@ export function App({ initialMailbox }: AppProps) {
       ALL_ADDRESSES;
     const nextIndex = Math.max(0, normalized.findIndex((a) => a.id === nextAddress.id));
     if (nextIndex !== state.addressIdx) dispatch({ type: "syncAddressIndex", index: nextIndex });
-    dispatch({ type: "hydrate", loaded: loadMailbox(state.mailbox, state.search, nextAddress), preserveSelection });
-  }, [address.id, addresses, state.addressIdx, state.mailbox, state.search]);
+    dispatch({ type: "hydrate", loaded: loadMailbox(state.mailbox, state.search, nextAddress, state.page, state.sort), preserveSelection });
+  }, [address.id, addresses, state.addressIdx, state.mailbox, state.page, state.search, state.sort]);
 
   useEffect(() => {
     dispatch({ type: "clampAddresses", count: addresses.length });
@@ -377,7 +452,7 @@ export function App({ initialMailbox }: AppProps) {
 
   useEffect(() => {
     reload(false);
-  }, [state.mailbox, state.search, addressKey, reload]);
+  }, [state.mailbox, state.page, state.search, state.sort, addressKey, reload]);
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -589,6 +664,29 @@ export function App({ initialMailbox }: AppProps) {
     }
   }, [startCompose, state.homeIdx]);
 
+  const executePaletteAction = useCallback((action: PaletteAction) => {
+    if (action === "inbox") dispatch({ type: "view", view: "list" });
+    else if (action === "compose") startCompose();
+    else if (action === "profiles") dispatch({ type: "view", view: "profiles" });
+    else if (action === "settings") dispatch({ type: "view", view: "settings" });
+    else if (action === "address") dispatch({ type: "openAddressPicker" });
+    else if (action === "refresh") {
+      reload(true, { refreshAddresses: true });
+      flash(`refreshed ${address.label}`, "ok");
+    } else if (action === "pull") {
+      runPullNow();
+    } else if (action === "search") {
+      dispatch({ type: "view", view: "list" });
+      dispatch({ type: "searchStart" });
+    } else if (action === "unread") {
+      dispatch({ type: "setMailbox", mailbox: "unread" });
+    } else if (action === "sent") {
+      dispatch({ type: "setMailbox", mailbox: "sent" });
+    } else if (action === "archived") {
+      dispatch({ type: "setMailbox", mailbox: "archived" });
+    }
+  }, [address.label, flash, reload, runPullNow, startCompose]);
+
   useKeyboard((event) => {
     const input = printableInput(event);
     const key = keyFlags(event);
@@ -605,6 +703,27 @@ export function App({ initialMailbox }: AppProps) {
 
     if (state.searchActive) {
       handleSearchInput(input, key, dispatch);
+      return;
+    }
+
+    if (state.view === "commands") {
+      const commands = filteredCommands(state.commandSearch);
+      if (key.escape || (!state.commandSearch && (input === "q" || input === "b"))) { dispatch({ type: "closeCommandPalette" }); return; }
+      if (key.upArrow || input === "k") dispatch({ type: "selectCommandOffset", delta: -1, count: commands.length });
+      else if (key.downArrow || input === "j") dispatch({ type: "selectCommandOffset", delta: 1, count: commands.length });
+      else if (key.return) {
+        const command = commands[Math.min(state.commandIdx, Math.max(0, commands.length - 1))];
+        if (command) executePaletteAction(command.action);
+      } else if (key.backspace || key.delete) {
+        dispatch({ type: "commandBackspace" });
+      } else if (input && !key.ctrl) {
+        dispatch({ type: "commandAppend", text: input });
+      }
+      return;
+    }
+
+    if ((event.ctrl && input === "k") || input === ":") {
+      dispatch({ type: "openCommandPalette", returnTo: state.view });
       return;
     }
 
@@ -690,6 +809,9 @@ export function App({ initialMailbox }: AppProps) {
     else if (key.return || key.rightArrow || input === "l") openSelected();
     else if (key.tab || input === "]") dispatch({ type: "cycleMailbox", delta: 1 });
     else if (input === "[") dispatch({ type: "cycleMailbox", delta: -1 });
+    else if (input === "o") dispatch({ type: "cycleSort" });
+    else if (input === "n" || input === ">") dispatch({ type: "pageOffset", delta: 1 });
+    else if (input === "N" || input === "<") dispatch({ type: "pageOffset", delta: -1 });
     else if (input >= "1" && input <= "5") dispatch({ type: "setMailbox", mailbox: MAILBOXES[Number(input) - 1]! });
     else if (input === "s") mutateSelected("star");
     else if (input === "e") mutateSelected("archive");
@@ -904,6 +1026,7 @@ function renderContent(args: RenderContentArgs): FrameLine[] {
   if (state.view === "compose" && state.compose) return renderCompose({ compose: state.compose, width: args.width, height: args.height, theme: args.theme });
   if (state.view === "settings") return renderSettings({ settings: state.settings, addresses: args.addresses, width: args.width, theme: args.theme });
   if (state.view === "profiles") return renderProfiles({ width: args.width, height: args.height, theme: args.theme });
+  if (state.view === "commands") return renderCommandPalette({ state, width: args.width, height: args.height, theme: args.theme });
   if (state.view === "addressPicker") return renderAddressPicker(args);
   if (state.view === "reader") return renderReader({ body: args.readerBody, conversation: args.conversation, scroll: state.readerScroll, width: args.width, height: args.height, theme: args.theme });
   return renderList(args);
@@ -920,6 +1043,7 @@ function workspaceTitle(state: Model, address: InboxAddressChoice): string {
   if (state.view === "reader") return "Message reader";
   if (state.view === "compose") return state.compose?.replyTo ? "Reply" : "Compose";
   if (state.view === "profiles") return "Profiles";
+  if (state.view === "commands") return "Command palette";
   return "Settings";
 }
 
@@ -927,13 +1051,16 @@ function workspaceSubtitle({ state, address, width }: RenderContentArgs): string
   if (state.view === "home") return truncate("Home · Inbox · Compose · Profiles · Settings", width);
   if (state.view === "list") {
     const shown = `${state.messages.length} shown`;
+    const page = `page ${state.page + 1}${state.hasMore ? "+" : ""}`;
+    const sort = state.sort === "newest" ? "newest first" : "oldest first";
     const counts = `${state.counts.inbox} inbox · ${state.counts.unread} unread · ${state.counts.sent} sent`;
     const action = address.address ? "a changes address" : "a chooses address";
-    return truncate(`${shown} · ${counts} · ${action}`, width);
+    return truncate(`${shown} · ${page} · ${sort} · ${counts} · ${action}`, width);
   }
   if (state.view === "compose") return truncate("Editable From, To, Subject, and markdown Body · Ctrl-S sends", width);
   if (state.view === "settings") return truncate("Theme, defaults, and background pull controls", width);
   if (state.view === "profiles") return truncate("Configured accounts with their domains and addresses", width);
+  if (state.view === "commands") return truncate("Type to filter actions · Enter runs · Esc closes", width);
   if (state.view === "addressPicker") return truncate("Choose All addresses or one exact inbox address", width);
   return truncate("b returns to Inbox · r replies · s stars · e archives", width);
 }
@@ -970,6 +1097,7 @@ function renderSidebar({ state, address, width, height, theme }: {
   nav("Compose", state.view === "compose", "2");
   nav("Profiles", state.view === "profiles", "3");
   nav("Settings", state.view === "settings", "4");
+  nav("Commands", state.view === "commands", ":");
   rows.push(line(" ", theme, { bg: theme.sidebarBg }));
   section("Folders");
   for (const [i, mailbox] of MAILBOXES.entries()) {
@@ -985,6 +1113,9 @@ function renderSidebar({ state, address, width, height, theme }: {
   rows.push(line(" ", theme, { bg: theme.sidebarBg }));
   section("Actions");
   rows.push(line("a  choose address", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
+  rows.push(line(":  commands", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
+  rows.push(line("o  sort order", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
+  rows.push(line("n/N page", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
   rows.push(line("c  compose", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
   rows.push(line("g  refresh", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
   rows.push(line("G  pull now", theme, { fg: theme.sidebarFg, bg: theme.sidebarBg }));
@@ -1066,6 +1197,38 @@ function renderMetricGrid(items: Array<[string, number, string]>, width: number,
 function metricCell([labelText, count, detail]: [string, number, string], width: number): string {
   const value = String(count).padStart(4);
   return truncate(`${labelText.padEnd(9)} ${value}  ${detail}`, width);
+}
+
+function renderCommandPalette({ state, width, height, theme }: {
+  state: Model;
+  width: number;
+  height: number;
+  theme: TuiTheme;
+}): FrameLine[] {
+  const commands = filteredCommands(state.commandSearch);
+  const rows: FrameLine[] = [
+    line(`> ${state.commandSearch}|`, theme, { fg: theme.warning, bold: true }),
+    line(" ", theme),
+  ];
+  if (commands.length === 0) {
+    rows.push(line("No matching actions.", theme, { fg: theme.muted }));
+    return rows;
+  }
+  const rowH = Math.max(1, height - rows.length);
+  const activeIdx = Math.min(state.commandIdx, commands.length - 1);
+  const start = Math.max(0, Math.min(activeIdx - Math.floor(rowH / 2), Math.max(0, commands.length - rowH)));
+  const titleW = Math.min(24, Math.max(12, Math.floor(width * 0.32)));
+  for (const [offset, command] of commands.slice(start, start + rowH).entries()) {
+    const index = start + offset;
+    const active = index === activeIdx;
+    const text = `${active ? ">" : " "} ${truncate(command.title, titleW).padEnd(titleW)} ${truncate(command.detail, Math.max(8, width - titleW - 4))}`;
+    rows.push(line(text, theme, {
+      fg: active ? theme.selectedFg : theme.primary,
+      bg: active ? theme.selectedBg : undefined,
+      bold: active,
+    }));
+  }
+  return rows;
 }
 
 function renderAddressPicker({ addresses, state, width, height, theme }: {
@@ -1246,8 +1409,26 @@ function renderProfiles({ width, height, theme }: { width: number; height: numbe
     rows.push(line(provider.toUpperCase(), theme, { fg: theme.accent, bold: true }));
     for (const p of list) {
       rows.push(line(`  ${p.name}${p.active ? "" : " (inactive)"}`, theme, { fg: theme.primary, bold: p.active }));
-      if (p.domains.length) rows.push(line(`    domains:   ${truncate(p.domains.join(", "), width - 14)}`, theme, { fg: theme.secondary }));
-      if (p.addresses.length) rows.push(line(`    addresses: ${truncate(p.addresses.join(", "), width - 14)} (${p.addresses.length})`, theme, { fg: theme.secondary }));
+      if (p.domain_details.length) {
+        const summary = p.domain_details.map((domain) => {
+          const state = domain.readiness.state.replace(/^ready_to_/, "").replace(/_/g, " ");
+          return `${domain.domain} ${state}`;
+        }).join(", ");
+        rows.push(line(`    domains:   ${truncate(summary, width - 14)}`, theme, { fg: theme.secondary }));
+      }
+      for (const address of p.address_details.slice(0, Math.max(1, Math.min(6, height - rows.length - 2)))) {
+        const owner = address.owner ? ` owner:${address.owner}` : " owner:none";
+        const admin = address.administrator && address.administrator !== address.owner ? ` admin:${address.administrator}` : "";
+        const receive = ` recv:${address.receive_status}`;
+        const verified = address.verified ? " verified" : " unverified";
+        const quota = address.daily_quota !== null ? ` quota:${address.sent_today}/${address.daily_quota}` : "";
+        rows.push(line(`    ${truncate(address.email, Math.max(12, width - 56))}${verified}${receive}${owner}${admin}${quota}`, theme, { fg: theme.secondary }));
+        const extras: string[] = [];
+        if (address.aliases.length) extras.push(`aliases ${address.aliases.slice(0, 3).join(", ")}`);
+        if (address.send_keys.length) extras.push(`keys ${address.send_keys.filter((key) => key.active).length}/${address.send_keys.length}`);
+        if (extras.length) rows.push(line(`      ${truncate(extras.join(" · "), width - 8)}`, theme, { fg: theme.muted }));
+      }
+      if (p.address_details.length > 6) rows.push(line(`    ${p.address_details.length - 6} more address${p.address_details.length - 6 === 1 ? "" : "es"}`, theme, { fg: theme.muted }));
       if (!p.domains.length && !p.addresses.length) rows.push(line("    (no domains/addresses)", theme, { fg: theme.muted }));
     }
   }
@@ -1320,11 +1501,12 @@ function footerLine(view: View, searching: boolean, theme: TuiTheme): FrameLine 
   const hint = searching ? "type to filter - Enter apply - Esc clear"
     : view === "home" ? "up/down choose - Enter open - q quit"
     : view === "addressPicker" ? "up/down choose address - Enter apply - b back"
+    : view === "commands" ? "type filter - up/down choose - Enter run - Esc close"
     : view === "compose" ? "Tab field - edit From/To/Subject/Body - Ctrl-S send - Esc cancel"
     : view === "profiles" ? "profiles - b back"
     : view === "settings" ? "1-7 change setting - b back"
     : view === "reader" ? "j/k scroll - J/K next/prev - r reply - s star - e archive - b back"
-    : "up/down move - Enter open - ]/[ folders - a address - c compose - p profiles - , settings - / search - g refresh - G pull - b home";
+    : "up/down move - Enter open - o sort - n/N page - : commands - ]/[ folders - a address - c compose - / search - g refresh - G pull - b home";
   return line(` ${hint}`, theme, { fg: theme.muted, bg: theme.background });
 }
 

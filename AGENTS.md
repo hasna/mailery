@@ -11,16 +11,19 @@ This file guides AI coding agents working with `@hasna/emails` — an email mana
 - **Manage** domains, addresses, templates, contacts, sequences
 - **Serve** a local dashboard and REST API
 
-All data is stored in `~/.emails/emails.db` (SQLite). No cloud required.
+All local data is stored in `~/.hasna/emails/emails.db` by default. Existing
+`~/.emails` data is migrated forward automatically. Use `HASNA_EMAILS_DB_PATH`
+or `EMAILS_DB_PATH` for isolated tests and smoke runs.
 
 ## MCP Setup (Recommended for AI Agents)
 
 Install the MCP server into Claude Code:
 ```bash
 emails mcp --claude
+emails mcp --claude --dry-run   # show the exact install command without mutating config
 ```
 
-This gives you 59 MCP tools covering everything in the CLI.
+This gives you 100+ MCP tools plus orientation resources for agents.
 
 ## Key MCP Tools for Common Tasks
 
@@ -80,6 +83,9 @@ list_enrollments(sequence_id?)
 ```
 list_inbound_emails(limit?, provider_id?)
 get_inbound_email(id)
+prepare_inbox(email, provider_id?, create_missing?)
+wait_for_code(email, timeout_seconds?)
+list_usable_from_addresses(send?, receive?)
 ```
 
 ### Analytics & diagnostics
@@ -100,6 +106,15 @@ clear_sandbox_emails()                    → wipe sandbox
 ```
 export_emails(format?, provider_id?, since?)  → CSV or JSON
 export_events(format?, provider_id?, since?)  → CSV or JSON
+```
+
+### Agent orientation resources
+```
+emails://agent/context     → redacted operating context and next commands
+emails://status            → provider/inbox/source health snapshot
+emails://domains           → domain readiness and provisioning context
+emails://addresses         → enriched address, owner, and receive state
+emails://recent-errors     → latest provisioning/source errors
 ```
 
 ## Workflows
@@ -125,7 +140,7 @@ export_events(format?, provider_id?, since?)  → CSV or JSON
 2. add_sequence_step(sequence_id, step_number=1, delay_hours=0, template_name="welcome")
 3. add_sequence_step(sequence_id, step_number=2, delay_hours=72, template_name="followup")
 4. enroll_contact(sequence_id, contact_email="user@example.com")
-# Run `emails scheduler start` to process due steps
+# Run `emails scheduler start` or the daemon/reconciler flow to process due steps
 ```
 
 ### Dev/test (never send real emails)
@@ -137,7 +152,7 @@ export_events(format?, provider_id?, since?)  → CSV or JSON
 
 ## Important Constraints
 
-1. **DB location**: Always `~/.emails/emails.db`. Use `EMAILS_DB_PATH` env var for testing.
+1. **DB location**: Default is `~/.hasna/emails/emails.db`; old `~/.emails` data is auto-migrated. Use `HASNA_EMAILS_DB_PATH` or `EMAILS_DB_PATH` for testing.
 2. **Provider credentials**: Never expose credentials in code — they're stored in the local DB. When listing providers, credentials are automatically redacted (`"***"`).
 3. **Domain warming**: If a warming schedule is active for a domain, `send_email` will block at the daily limit. Use `get_warming_status(domain)` first.
 4. **Suppression**: Always check `list_contacts(suppressed=true)` before bulk sends.
@@ -155,22 +170,23 @@ bun run dev:mcp      # run MCP server in dev mode
 bun run dev:serve    # run HTTP server in dev mode
 ```
 
-## Project Structure (post-refactor v0.4.9+)
+## Project Structure
 
 ```
 src/
 ├── cli/
 │   ├── index.tsx              # thin orchestrator (~65 lines)
 │   ├── utils.ts               # shared helpers
+│   ├── tui/                   # OpenTUI emails ui dashboard
 │   └── commands/              # modular command files
 │       ├── send.ts            # send, log, search, show, replies, conversation
 │       ├── provider.ts        # provider CRUD
 │       ├── domain.ts          # domain + warming commands
 │       ├── sequences.ts       # drip campaigns
 │       ├── inbound.ts         # SMTP + inbound email management
-│       └── ...                # (14 files total)
+│       └── ...                # provider/domain/inbox/address/provision/etc.
 ├── db/                        # SQLite CRUD modules
-│   ├── database.ts            # migrations + schema (14 migrations)
+│   ├── database.ts            # migrations + schema + legacy path migration
 │   ├── emails.ts, providers.ts, domains.ts, ...
 │   ├── sequences.ts, warming.ts, inbound.ts, sandbox.ts
 │   └── *.test.ts
@@ -181,11 +197,13 @@ src/
 │   ├── tracking.ts            # open/click pixel injection
 │   ├── inbound.ts             # MIME parsing + SMTP server
 │   ├── email-verify.ts        # MX + SMTP probe verification
+│   ├── address-ownership.ts   # owner/admin address tenancy helpers
+│   ├── agent-context.ts       # redacted agent orientation snapshots
 │   └── ...
 ├── providers/                 # provider adapters
 │   ├── resend.ts, ses.ts, gmail.ts, sandbox.ts
 │   └── interface.ts           # ProviderAdapter interface
-├── mcp/index.ts               # MCP server (59 tools)
+├── mcp/                       # MCP server, modular tools, and resources
 ├── server/serve.ts            # HTTP server + REST API
 └── index.ts                   # library exports
 ```

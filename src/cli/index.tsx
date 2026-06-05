@@ -35,6 +35,7 @@ import { registerAwsCommands } from "./commands/aws.js";
 import { registerCloudCommands } from "./commands/cloud.js";
 import { registerStatusCommands } from "./commands/status.js";
 import { registerDaemonCommands } from "./commands/daemon.js";
+import { configureCliRuntime } from "./utils.js";
 
 function getPackageVersion(): string {
   try {
@@ -56,6 +57,7 @@ program
   .option("-v, --verbose", "Show debug info")
   .hook("preAction", () => {
     const opts = program.opts();
+    configureCliRuntime({ json: !!opts.json });
     setLogLevel(!!opts.quiet, !!opts.verbose);
   });
 

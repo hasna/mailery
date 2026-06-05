@@ -1,11 +1,49 @@
 import chalk from "chalk";
 import { createInterface } from "node:readline/promises";
 import { getDatabase, resolvePartialId } from "../db/database.js";
+import { redactSecrets } from "../lib/redaction.js";
 
 const ID_ERROR_SUGGESTION_LIMIT = 5;
+let jsonOutput = false;
+
+export function configureCliRuntime(opts: { json?: boolean }): void {
+  jsonOutput = !!opts.json;
+}
+
+function errorCode(message: string): string {
+  if (/could not resolve id|not found/i.test(message)) return "not_found";
+  if (/requires|missing|required/i.test(message)) return "missing_required_input";
+  if (/invalid|must be/i.test(message)) return "invalid_input";
+  if (/credential|oauth|auth/i.test(message)) return "auth_error";
+  if (/non-interactive|--yes|cancelled/i.test(message)) return "confirmation_required";
+  return "error";
+}
+
+function fixCommands(message: string): string[] {
+  const lower = message.toLowerCase();
+  if (lower.includes("provider")) return ["emails provider list --json", "emails provider add --help"];
+  if (lower.includes("domain")) return ["emails domain list --json", "emails domain add --help"];
+  if (lower.includes("address")) return ["emails address list --json", "emails address provision --help"];
+  if (lower.includes("template")) return ["emails template list --json", "emails template add --help"];
+  if (lower.includes("sequence")) return ["emails sequence list --json", "emails sequence --help"];
+  if (lower.includes("inbound") || lower.includes("inbox")) return ["emails inbox sync-status --json", "emails doctor delivery <address> --json"];
+  if (lower.includes("--yes") || lower.includes("destructive")) return ["Re-run the same command with --yes after confirming the target ID"];
+  return ["emails status --json", "emails doctor --json"];
+}
 
 export function handleError(e: unknown): never {
-  console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+  const message = e instanceof Error ? e.message : String(e);
+  if (jsonOutput) {
+    console.error(JSON.stringify(redactSecrets({
+      error: {
+        message,
+        code: errorCode(message),
+        fix_commands: fixCommands(message),
+      },
+    }), null, 2));
+  } else {
+    console.error(chalk.red(message));
+  }
   process.exit(1);
 }
 
@@ -17,8 +55,7 @@ export function resolveId(table: string, partialId: string): string {
     const suggestionText = suggestions.length > 0
       ? `\nSimilar IDs in ${table}: ${suggestions.join(", ")}`
       : "";
-    console.error(chalk.red(`Could not resolve ID '${partialId}' in table '${table}'.${suggestionText}`));
-    process.exit(1);
+    handleError(new Error(`Could not resolve ID '${partialId}' in table '${table}'.${suggestionText}`));
   }
   return id;
 }

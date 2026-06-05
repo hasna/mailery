@@ -145,6 +145,7 @@ export interface SendEmailOptions {
   unsubscribe_url?: string;  // Auto-injects List-Unsubscribe + List-Unsubscribe-Post headers (RFC 8058)
   idempotency_key?: string;  // If provided and already sent, returns existing email instead of re-sending
   auth_token?: string;       // Scoped send key (esk_…); restricts sending to addresses the key's owner owns/administers
+  bypass_warming?: boolean;  // Trusted local override for active domain warming limits
 }
 
 // Email log

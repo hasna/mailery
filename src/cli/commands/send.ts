@@ -248,6 +248,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           headers: threadingHeaders,
           unsubscribe_url: (opts as Record<string, unknown>).unsubscribeUrl as string | undefined,
           idempotency_key: (opts as Record<string, unknown>).idempotencyKey as string | undefined,
+          bypass_warming: !!opts.force,
         };
 
         // Dry run — show what would be sent without actually sending

@@ -1,11 +1,12 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { getClaudeMcpInstallCommand, getClaudeMcpRemoveCommand, getCodexMcpConfig, getGeminiMcpConfig } from "../../lib/mcp-install.js";
 import { handleError } from "../utils.js";
 
-export function registerServeCommands(program: Command, _output: (data: unknown, formatted: string) => void): void {
+export function registerServeCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   // ─── SERVE ────────────────────────────────────────────────────────────────────
   program
     .command("serve")
@@ -46,10 +47,16 @@ export function registerServeCommands(program: Command, _output: (data: unknown,
     .option("--codex", "Show Codex config snippet")
     .option("--gemini", "Show Gemini config snippet")
     .option("--uninstall", "Uninstall from Claude Code")
-    .action((opts: { claude?: boolean; codex?: boolean; gemini?: boolean; uninstall?: boolean }) => {
+    .option("--dry-run", "Print the installation command/config without modifying local agent configuration")
+    .action((opts: { claude?: boolean; codex?: boolean; gemini?: boolean; uninstall?: boolean; dryRun?: boolean }) => {
       if (opts.uninstall) {
+        const remove = getClaudeMcpRemoveCommand();
+        if (opts.dryRun) {
+          output({ target: "claude", action: "remove", ...remove }, remove.shell);
+          return;
+        }
         try {
-          execSync("claude mcp remove emails", { stdio: "inherit" });
+          execFileSync(remove.command, remove.args, { stdio: "inherit" });
           console.log(chalk.green("✓ Uninstalled from Claude Code"));
         } catch (e) {
           handleError(e);
@@ -58,10 +65,13 @@ export function registerServeCommands(program: Command, _output: (data: unknown,
       }
 
       if (opts.claude) {
+        const install = getClaudeMcpInstallCommand();
+        if (opts.dryRun) {
+          output({ target: "claude", action: "install", ...install }, install.shell);
+          return;
+        }
         try {
-          execSync("claude mcp add --transport stdio --scope user emails -- emails-mcp", {
-            stdio: "inherit",
-          });
+          execFileSync(install.command, install.args, { stdio: "inherit" });
           console.log(chalk.green("✓ Installed into Claude Code"));
         } catch (e) {
           handleError(e);
@@ -71,15 +81,13 @@ export function registerServeCommands(program: Command, _output: (data: unknown,
 
       if (opts.codex) {
         console.log(`\nAdd to ~/.codex/config.toml:\n`);
-        console.log(`[mcp_servers.emails]`);
-        console.log(`command = "emails-mcp"`);
-        console.log(`args = []\n`);
+        console.log(getCodexMcpConfig());
         return;
       }
 
       if (opts.gemini) {
         console.log(`\nAdd to ~/.gemini/settings.json under mcpServers:\n`);
-        console.log(JSON.stringify({ emails: { command: "emails-mcp", args: [] } }, null, 2));
+        console.log(JSON.stringify(getGeminiMcpConfig().mcpServers, null, 2));
         console.log();
         return;
       }
@@ -101,12 +109,13 @@ export function registerServeCommands(program: Command, _output: (data: unknown,
       const HOME = process.env["HOME"] || process.env["USERPROFILE"] || "~";
 
       if (doAll || opts.claude) {
+        const remove = getClaudeMcpRemoveCommand();
         try {
-          execSync("claude mcp remove emails", { stdio: "pipe" });
+          execFileSync(remove.command, remove.args, { stdio: "pipe" });
           console.log(chalk.green("✓ Removed from Claude Code"));
         } catch {
           console.log(chalk.yellow("⚠ Could not auto-remove from Claude Code. Run manually:"));
-          console.log(chalk.dim("  claude mcp remove emails"));
+          console.log(chalk.dim(`  ${remove.shell}`));
         }
       }
 

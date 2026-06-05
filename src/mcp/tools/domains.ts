@@ -210,6 +210,70 @@ export function registerDomainTools(server: McpServer): void {
   );
 
   server.tool(
+  "list_usable_from_addresses",
+  "List configured From addresses with send/receive readiness, owner/admin context, and blockers.",
+  {
+    provider_id: z.string().optional().describe("Filter by provider ID"),
+    owner_id: z.string().optional().describe("Only addresses owned or administered by this owner"),
+    send: z.boolean().optional().describe("Only return send-ready addresses"),
+    receive: z.boolean().optional().describe("Only return receive-ready addresses"),
+    include_unverified: z.boolean().optional().describe("Include addresses that are not verified for sending"),
+  },
+  async ({ provider_id, owner_id, send, receive, include_unverified }) => {
+    try {
+      const resolvedProviderId = provider_id ? resolveId("providers", provider_id) : undefined;
+      const domains = listDomains(resolvedProviderId);
+      const addresses = listEnrichedAddresses(resolvedProviderId)
+        .filter((address) => !owner_id || address.owner_id === owner_id || address.administrator_id === owner_id)
+        .map((address) => {
+          const domainName = address.email.split("@")[1]?.toLowerCase() ?? "";
+          const domain = domains.find((candidate) => candidate.provider_id === address.provider_id && candidate.domain.toLowerCase() === domainName) ?? null;
+          const addressProvisioning = getAddressProvisioning(address.id);
+          const readyAddresses = domain
+            ? listAddresses(domain.provider_id).filter((candidate) => {
+                const provisioning = getAddressProvisioning(candidate.id);
+                return provisioning?.domain_id === domain.id && provisioning.provisioning_status === "ready";
+              }).length
+            : 0;
+          const domainReadiness = domain
+            ? assessDomainReadiness(domain, getDomainProvisioning(domain.id), { ready_addresses: readyAddresses })
+            : null;
+          const sendReady = address.status !== "suspended" && (address.verified || domainReadiness?.send_ready === true);
+          const receiveReady = addressProvisioning?.provisioning_status === "ready" || domainReadiness?.receive_ready === true;
+          const blockers = [
+            address.status === "suspended" ? "address suspended" : null,
+            !include_unverified && !address.verified && domainReadiness?.send_ready !== true ? "address/domain not send-verified" : null,
+            receive && !receiveReady ? "address/domain not receive-ready" : null,
+          ].filter(Boolean) as string[];
+          return {
+            ...address,
+            domain,
+            provisioning: addressProvisioning,
+            readiness: {
+              send_ready: sendReady,
+              receive_ready: receiveReady,
+              domain: domainReadiness,
+              blockers,
+            },
+          };
+        })
+        .filter((address) => {
+          if (!include_unverified && !address.readiness.send_ready) return false;
+          if (send && !address.readiness.send_ready) return false;
+          if (receive && !address.readiness.receive_ready) return false;
+          return true;
+        });
+      return { content: [{ type: "text", text: JSON.stringify({
+        addresses,
+        cli_equivalent: provider_id ? `emails address list --provider ${provider_id} --json` : "emails address list --json",
+      }, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+  );
+
+  server.tool(
   "get_address_owner",
   "Show owner and administering agent for an address by email or ID.",
   {

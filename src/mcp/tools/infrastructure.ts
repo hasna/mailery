@@ -405,20 +405,28 @@ export function registerInfrastructureTools(server: McpServer): void {
     {
       email: z.string(),
       provider_id: z.string(),
+      domain_id: z.string().optional().describe("Domain ID or prefix; defaults to matching provider/domain"),
       receive_strategy: z.enum(["ses-s3", "cf-routing", "resend-webhook"]).optional(),
       forward_to: z.string().optional(),
+      owner: z.string().optional().describe("Owner name, ID, or ID prefix"),
+      administrator: z.string().optional().describe("Administering agent name, ID, or ID prefix"),
+      wait: z.boolean().optional().describe("Advance provisioning now and wait until ready"),
+      timeout_seconds: z.number().int().positive().optional().describe("Max seconds to wait when wait=true"),
+      interval_seconds: z.number().int().positive().optional().describe("Polling interval when wait=true"),
+      inbound_bucket: z.string().optional().describe("Inbound S3 bucket for receive validation"),
     },
-    async ({ email, provider_id, receive_strategy, forward_to }) => {
+    async ({ email, provider_id, domain_id, receive_strategy, forward_to, owner, administrator, wait, timeout_seconds, interval_seconds, inbound_bucket }) => {
       try {
         const db = getDatabase();
         const pid = resolveId("providers", provider_id);
-        if (!getProvider(pid)) throw new ProviderNotFoundError(provider_id);
+        const provider = getProvider(pid);
+        if (!provider) throw new ProviderNotFoundError(provider_id);
         const { createAddress, getAddressByEmail } = await import("../../db/addresses.js");
         const { getDomainByName } = await import("../../db/domains.js");
-        const { setAddressProvisioning } = await import("../../db/provisioning.js");
+        const { getAddressProvisioning, setAddressProvisioning } = await import("../../db/provisioning.js");
         const addr = getAddressByEmail(pid, email, db) ?? createAddress({ provider_id: pid, email }, db);
         const domainName = email.split("@")[1];
-        const domainId = domainName ? getDomainByName(pid, domainName, db)?.id ?? null : null;
+        const domainId = domain_id ? resolveId("domains", domain_id) : (domainName ? getDomainByName(pid, domainName, db)?.id ?? null : null);
         setAddressProvisioning(addr.id, {
           domain_id: domainId,
           receive_strategy: receive_strategy ?? "ses-s3",
@@ -426,7 +434,53 @@ export function registerInfrastructureTools(server: McpServer): void {
           provisioning_status: "requested",
           next_check_at: new Date().toISOString(),
         }, db);
-        return { content: [{ type: "text" as const, text: JSON.stringify({ email, receive_strategy: receive_strategy ?? "ses-s3", domain_id: domainId }, null, 2) }] };
+        let ownership = null;
+        if (owner) {
+          const { setAddressOwnerByRef } = await import("../../lib/address-ownership.js");
+          ownership = setAddressOwnerByRef(addr.id, owner, administrator, db);
+        }
+
+        let provisioning = getAddressProvisioning(addr.id, db);
+        if (wait) {
+          const { getInboundConfig } = await import("../../lib/config.js");
+          const cfg = getInboundConfig();
+          if (cfg.profile) process.env["AWS_PROFILE"] = cfg.profile;
+          const bucket = inbound_bucket ?? cfg.bucket;
+          if (!bucket) throw new Error("No inbound bucket: pass inbound_bucket or set inbound_s3_bucket");
+          const { makeAddressDeps } = await import("../../lib/provision/real-deps.js");
+          const { advanceAddress } = await import("../../lib/provision/orchestrator.js");
+          const deps = makeAddressDeps({ provider, inboundBucket: bucket, region: cfg.region, db });
+          const deadline = Date.now() + (timeout_seconds ?? 120) * 1000;
+          const intervalMs = (interval_seconds ?? 5) * 1000;
+          while (Date.now() < deadline) {
+            provisioning = getAddressProvisioning(addr.id, db);
+            if (provisioning?.provisioning_status === "ready") break;
+            if (provisioning?.provisioning_status === "failed") {
+              throw new Error(`Address provisioning failed: ${provisioning.last_error ?? "unknown error"}`);
+            }
+            const res = await advanceAddress(addr.id, deps, { db, now: new Date().toISOString() });
+            provisioning = getAddressProvisioning(addr.id, db);
+            if (provisioning?.provisioning_status === "ready") break;
+            if (res.error || provisioning?.provisioning_status === "failed") {
+              throw new Error(`Address provisioning failed: ${res.error ?? provisioning?.last_error ?? "unknown error"}`);
+            }
+            await new Promise((resolve) => setTimeout(resolve, intervalMs));
+          }
+          provisioning = getAddressProvisioning(addr.id, db);
+          if (provisioning?.provisioning_status !== "ready") {
+            throw new Error(`Timed out waiting for ${email} to become ready (current=${provisioning?.provisioning_status ?? "unknown"})`);
+          }
+        }
+
+        return { content: [{ type: "text" as const, text: JSON.stringify({
+          id: addr.id,
+          email,
+          receive_strategy: receive_strategy ?? "ses-s3",
+          domain_id: domainId,
+          provisioning,
+          ownership,
+          cli_equivalent: `emails address provision ${email} --provider ${provider_id}${owner ? ` --owner ${owner}` : ""}${administrator ? ` --administrator ${administrator}` : ""}${wait ? " --wait" : ""} --json`,
+        }, null, 2) }] };
       } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }
     },
   );

@@ -179,6 +179,61 @@ export function registerInboxTools(server: McpServer): void {
 );
 
   server.tool(
+  "wait_for_code",
+  "Alias for wait_for_verification_code: wait for a verification code for an inbound address.",
+  {
+    address: z.string().describe("Recipient email address"),
+    from: z.string().optional().describe("Only consider messages whose From contains this text"),
+    subject: z.string().optional().describe("Only consider messages whose subject contains this text"),
+    since: z.string().optional().describe("Only consider messages received after this ISO date"),
+    timeout_seconds: z.number().int().positive().optional().describe("Wait timeout (default 120)"),
+    interval_seconds: z.number().int().positive().optional().describe("Polling interval (default 5)"),
+    refresh: z.boolean().optional().describe("Refresh inbound sources while waiting (default true)"),
+    gmail: z.boolean().optional().describe("Also pull Gmail while refreshing (default false)"),
+  },
+  async ({ address, from, subject, since, timeout_seconds, interval_seconds, refresh, gmail }) => {
+    try {
+      const normalized = address.trim().toLowerCase();
+      const deadline = Date.now() + (timeout_seconds ?? 120) * 1000;
+      const intervalMs = (interval_seconds ?? 5) * 1000;
+      while (true) {
+        if (refresh !== false) await autoPull({ s3: true, gmail: gmail === true, limit: 1000 });
+        const local = listInboundEmails({ recipients: [normalized], since, limit: 50 });
+        const archived = listInboundEmails({ recipients: [normalized], since, limit: 50, archived: true });
+        const byId = new Map([...local, ...archived].map((email) => [email.id, email]));
+        const match = findVerificationCode([...byId.values()], { from, subject });
+        if (match) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({
+              code: match.code,
+              email_id: match.email.id,
+              from: match.email.from_address,
+              subject: match.email.subject,
+              received_at: match.email.received_at,
+              confidence: match.confidence,
+              cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+            }, null, 2) }],
+          };
+        }
+        if (Date.now() >= deadline) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({
+              code: null,
+              address: normalized,
+              cli_equivalent: `emails inbox wait-code ${normalized} --timeout ${timeout_seconds ?? 120} --json`,
+            }, null, 2) }],
+            isError: true,
+          };
+        }
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+  server.tool(
   "get_inbound_email",
   "Get a specific inbound email by ID",
   {

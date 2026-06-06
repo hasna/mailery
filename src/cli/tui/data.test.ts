@@ -12,7 +12,7 @@ import { storeInboundEmail, setInboundRead, setInboundStarred, setInboundArchive
 import {
   listMailbox, mailboxCounts, getMessageBody, toggleStar, toggleRead, archiveMessage,
   replyDefaults, sendComposed, listSources, listInboxAddresses, getSettings, setSetting,
-  defaultFromAddress, providerIdForSender,
+  defaultFromAddress, providerIdForSender, listDomainSummaries,
 } from "./data.js";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
@@ -247,7 +247,7 @@ describe("tui data — Sent folder (Gmail SENT + app-sent)", () => {
 });
 
 describe("tui data — inbox sources (per-inbox switching)", () => {
-  it("lists All addresses, configured addresses, and observed recipients", () => {
+  it("lists All inboxes, configured addresses, and observed recipients", () => {
     createAddress({ provider_id: providerId, email: "ops@elyratelier.com" });
     seed("observed", { to: ['"Signup" <signup@wobblyrobottaco.com>'] });
     storeInboundEmail({
@@ -257,7 +257,7 @@ describe("tui data — inbox sources (per-inbox switching)", () => {
     });
 
     const choices = listInboxAddresses();
-    expect(choices[0]).toMatchObject({ id: "all", label: "All addresses" });
+    expect(choices[0]).toMatchObject({ id: "all", label: "All inboxes" });
     expect(choices.some((choice) => choice.address === "ops@elyratelier.com" && choice.configured)).toBe(true);
     expect(choices.some((choice) => choice.address === "signup@wobblyrobottaco.com" && choice.observed)).toBe(true);
     expect(choices.some((choice) => choice.address === "client@example.com")).toBe(false);
@@ -322,6 +322,26 @@ describe("tui data — inbox sources (per-inbox switching)", () => {
     expect(mailboxCounts({ source: { providerId } }).sent).toBe(1);
     expect(mailboxCounts({ source: { domain: "elyratelier.com" } }).inbox).toBe(1);
     expect(mailboxCounts({ source: { domain: "elyratelier.com" } }).sent).toBe(1);
+  });
+
+  it("summarizes domains with address and email counts", async () => {
+    createDomain(providerId, "elyratelier.com");
+    const address = createAddress({ provider_id: providerId, email: "ops@elyratelier.com" });
+    markVerified(address.id);
+    seed("source-inbox", { to: ["ops@elyratelier.com"] });
+    await sendComposed({ from: "ops@elyratelier.com", to: "client@y.com", subject: "source-sent", body: "hi", providerId });
+
+    const summary = listDomainSummaries().find((item) => item.domain === "elyratelier.com");
+
+    expect(summary).toMatchObject({
+      provider: "sandbox",
+      addresses: 1,
+      inbox: 1,
+      unread: 1,
+      sent: 1,
+      total: 2,
+      readiness: "ready_to_receive",
+    });
   });
 
   it("filters Sent by sender domain for app-sent and Gmail SENT mail", async () => {

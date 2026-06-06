@@ -7,9 +7,10 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { closeDatabase, resetDatabase } from "../../db/database.js";
 import { createProvider } from "../../db/providers.js";
+import { createDomain } from "../../db/domains.js";
 import { createAddress, markVerified } from "../../db/addresses.js";
 import { storeInboundEmail } from "../../db/inbound.js";
-import { setSetting } from "./data.js";
+import { getSettings, setSetting } from "./data.js";
 
 let autoPullCalls = 0;
 let autoPullWaiter: Promise<void> | null = null;
@@ -160,12 +161,13 @@ describe("emails ui App", () => {
     expect(frame()).toContain("Choose");
     expect(frame()).toContain("Inbox");
     expect(frame()).toContain("Compose");
+    expect(frame()).toContain("Domains");
     expect(frame()).toContain("Profiles");
     expect(frame()).toContain("Settings");
 
     await type("l");
 
-    expect(frame()).toContain("Inbox: All addresses");
+    expect(frame()).toContain("Inbox: All inboxes");
     expect(frame()).toContain("hello inbox");
   });
 
@@ -173,16 +175,30 @@ describe("emails ui App", () => {
     seedMessage("wide message", "2026-01-01T10:00:00.000Z");
     await renderApp({ initialMailbox: "inbox" }, { width: 132, height: 32 });
 
-    expect(frame()).toContain("NAVIGATION");
-    expect(frame()).toContain("FOLDERS");
-    expect(frame()).toContain("Inbox: All addresses");
+    expect(frame()).toContain("MAIL");
+    expect(frame()).toContain("WORKSPACE");
+    expect(frame()).not.toContain("NAVIGATION");
+    expect(frame()).not.toContain("FOLDERS");
+    expect(frame()).toContain("Inbox: All inboxes");
     expect(frame()).toContain("wide message");
 
     await resize(78, 26);
 
-    expect(frame()).toContain("1 Inbox  2 Compose  3 Profiles  4 Settings");
-    expect(frame()).toContain("Inbox: All addresses");
-    expect(frame()).not.toContain("NAVIGATION");
+    expect(frame()).toContain("1 Inbox  2 Compose  3 Domains  4 Profiles  5 Settings");
+    expect(frame()).toContain("Inbox: All inboxes");
+    expect(frame()).not.toContain("WORKSPACE");
+  });
+
+  it("keeps large sidebar counts inside the navigation border", async () => {
+    for (let i = 0; i < 1000; i++) {
+      seedMessage(`bulk-${i}`, `2026-01-01T10:${String(i % 60).padStart(2, "0")}:00.000Z`);
+    }
+    await renderApp({ initialMailbox: "inbox" }, { width: 132, height: 32 });
+
+    const inboxLine = frame().split("\n").find((line) => line.includes("1  Inbox") && line.includes("1,000"));
+
+    expect(inboxLine).toBeTruthy();
+    expect(inboxLine).toMatch(/1\s+Inbox\s+1,000\s*│/);
   });
 
   it("opens compose with an editable From field defaulted from configured addresses", async () => {
@@ -215,7 +231,7 @@ describe("emails ui App", () => {
     await type("a");
     await key("down");
     await key("down");
-    await type("l");
+    await enter();
     await type("c");
 
     expect(frame()).toContain("New message");
@@ -232,7 +248,7 @@ describe("emails ui App", () => {
 
     await escape();
 
-    expect(frame()).toContain("Inbox: All addresses");
+    expect(frame()).toContain("Inbox: All inboxes");
     expect(frame()).toContain("inbox message");
     expect(frame()).not.toContain("Choose");
   });
@@ -275,22 +291,81 @@ describe("emails ui App", () => {
     seedMessage("sales message", "2026-01-02T10:00:00.000Z", "sales@example.com");
     await renderApp({ initialMailbox: "inbox" });
 
-    expect(frame()).toContain("Inbox: All addresses");
+    expect(frame()).toContain("Inbox: All inboxes");
     expect(frame()).toContain("ops message");
     expect(frame()).toContain("sales message");
 
     await type("a");
     expect(frame()).toContain("Choose Address");
-    expect(frame()).toContain("All addresses");
+    expect(frame()).toContain("All inboxes");
     expect(frame()).toContain("sales@example.com");
 
     await key("down");
     await key("down");
-    await type("l");
+    await enter();
 
     expect(frame()).toContain("Inbox: sales@example.com");
     expect(frame()).toContain("sales message");
     expect(frame()).not.toContain("ops message");
+  });
+
+  it("searches the address picker before applying an address", async () => {
+    const sales = createAddress({ provider_id: providerId, email: "sales@example.com" });
+    markVerified(sales.id);
+    seedMessage("ops message", "2026-01-01T10:00:00.000Z", "ops@example.com");
+    seedMessage("sales message", "2026-01-02T10:00:00.000Z", "sales@example.com");
+    await renderApp({ initialMailbox: "inbox" });
+
+    await type("a");
+    await type("sales");
+
+    expect(frame()).toContain("Choose Address");
+    expect(frame()).toContain("Search sales|");
+    expect(frame()).toContain("sales@example.com");
+
+    await enter();
+
+    expect(frame()).toContain("Inbox: sales@example.com");
+    expect(frame()).toContain("sales message");
+    expect(frame()).not.toContain("ops message");
+  });
+
+  it("opens a domains screen with address and email counts", async () => {
+    createDomain(providerId, "elyratelier.com");
+    const sales = createAddress({ provider_id: providerId, email: "sales@elyratelier.com" });
+    markVerified(sales.id);
+    seedMessage("domain inbox", "2026-01-02T10:00:00.000Z", "sales@elyratelier.com");
+    await renderApp({ initialMailbox: "inbox" }, { width: 160, height: 34 });
+
+    await type("d");
+
+    expect(frame()).toContain("Domains");
+    expect(frame()).toContain("Domain overview");
+    expect(frame()).toContain("elyratelier.com");
+    expect(frame()).toContain("1 address");
+    expect(frame()).toContain("1 emails");
+    expect(frame()).toContain("receive only");
+  });
+
+  it("clicking Inbox resets to the unified inbox", async () => {
+    const sales = createAddress({ provider_id: providerId, email: "sales@example.com" });
+    markVerified(sales.id);
+    seedMessage("ops message", "2026-01-01T10:00:00.000Z", "ops@example.com");
+    seedMessage("sales message", "2026-01-02T10:00:00.000Z", "sales@example.com");
+    await renderApp({ initialMailbox: "inbox" }, { width: 132, height: 32 });
+
+    await type("a");
+    await key("down");
+    await key("down");
+    await enter();
+    expect(frame()).toContain("Inbox: sales@example.com");
+    expect(frame()).not.toContain("ops message");
+
+    await click(5, 6);
+
+    expect(frame()).toContain("Inbox: All inboxes");
+    expect(frame()).toContain("ops message");
+    expect(frame()).toContain("sales message");
   });
 
   it("pages and changes sort order in Inbox", async () => {
@@ -338,6 +413,39 @@ describe("emails ui App", () => {
     expect(frame()).toContain("sandbox");
   });
 
+  it("opens settings as an editable dialog", async () => {
+    seedMessage("settings background", "2026-01-01T10:00:00.000Z");
+    await renderApp({ initialMailbox: "inbox" });
+
+    expect(getSettings().autoPull).toBe(false);
+
+    await type(",");
+
+    expect(frame()).toContain("Settings");
+    expect(frame()).toContain("Enter or click edits the selected value.");
+    expect(frame()).toContain("Auto-pull inbound");
+    expect(frame()).toContain("Inbox: All inboxes");
+
+    await enter();
+
+    expect(getSettings().autoPull).toBe(true);
+    expect(frame()).toContain("autoPull: on");
+
+    await escape();
+
+    expect(frame()).not.toContain("Enter or click edits the selected value.");
+    expect(frame()).toContain("settings background");
+  });
+
+  it("opens settings dialog from the sidebar", async () => {
+    await renderApp({ initialMailbox: "inbox" }, { width: 132, height: 32 });
+
+    await click(5, 16);
+
+    expect(frame()).toContain("Enter or click edits the selected value.");
+    expect(frame()).toContain("Default folder");
+  });
+
   it("keeps the selected address stable when refresh reorders address choices", async () => {
     const sales = createAddress({ provider_id: providerId, email: "sales@example.com" });
     markVerified(sales.id);
@@ -347,7 +455,7 @@ describe("emails ui App", () => {
     await type("a");
     await key("down");
     await key("down");
-    await type("l");
+    await enter();
     expect(frame()).toContain("Inbox: sales@example.com");
 
     const aaa = createAddress({ provider_id: providerId, email: "aaa@example.com" });
@@ -407,7 +515,7 @@ describe("emails ui App", () => {
   it("opens sidebar destinations with mouse clicks on wide terminals", async () => {
     await renderApp({ initialMailbox: "inbox" }, { width: 132, height: 32 });
 
-    await click(5, 7);
+    await click(5, 13);
 
     expect(frame()).toContain("New message");
     expect(frame()).toContain("from");
@@ -423,7 +531,7 @@ describe("emails ui App", () => {
     await type("a");
     expect(frame()).toContain("Choose Address");
 
-    await click(28, 11);
+    await click(28, 15);
 
     expect(frame()).toContain("Inbox: sales@example.com");
     expect(frame()).toContain("sales message");

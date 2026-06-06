@@ -410,6 +410,42 @@ export interface ProfileSendKeyInfo {
   active: boolean;
 }
 
+export interface DomainSummary {
+  domain: string;
+  provider: string;
+  addresses: number;
+  inbox: number;
+  unread: number;
+  sent: number;
+  archived: number;
+  total: number;
+  readiness: string;
+}
+
+export function listDomainSummaries(db?: Database): DomainSummary[] {
+  const d = db || getDatabase();
+  const providers = new Map(listProviders(d).map((provider) => [provider.id, provider.name]));
+  const addresses = listAddresses(undefined, d).filter((address) => (address.status ?? "active") === "active");
+  return listDomains(undefined, d)
+    .map((domain) => {
+      const counts = mailboxCounts({ source: { domain: domain.domain } }, d);
+      const provisioning = getDomainProvisioning(domain.id, d);
+      const domainAddresses = addresses.filter((address) => address.email.toLowerCase().endsWith(`@${domain.domain.toLowerCase()}`));
+      return {
+        domain: domain.domain,
+        provider: providers.get(domain.provider_id) ?? domain.provider_id,
+        addresses: domainAddresses.length,
+        inbox: counts.inbox,
+        unread: counts.unread,
+        sent: counts.sent,
+        archived: counts.archived,
+        total: counts.inbox + counts.sent + counts.archived,
+        readiness: assessDomainReadiness(domain, provisioning, { ready_addresses: domainAddresses.length }).state,
+      };
+    })
+    .sort((a, b) => a.domain.localeCompare(b.domain));
+}
+
 // ── inbox address choices ──────────────────────────────────────────────────────
 
 export interface InboxAddressChoice {
@@ -422,7 +458,7 @@ export interface InboxAddressChoice {
 
 export const ALL_ADDRESSES: InboxAddressChoice = {
   id: "all",
-  label: "All addresses",
+  label: "All inboxes",
   configured: false,
   observed: false,
 };
@@ -444,7 +480,7 @@ function upsertAddressChoice(
 }
 
 /**
- * User-facing inbox choices. The normal TUI exposes only "All addresses" or a
+ * User-facing inbox choices. The normal TUI exposes only "All inboxes" or a
  * concrete email address; providers/domains stay in Profiles/diagnostics.
  */
 export function listInboxAddresses(db?: Database): InboxAddressChoice[] {

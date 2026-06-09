@@ -105,13 +105,22 @@ describe("public package entrypoint", () => {
 
   it("keeps build outputs lean by externalizing installed runtime packages", () => {
     const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
-      scripts?: { build?: string };
+      scripts?: Record<string, string>;
     };
-    const build = pkg.scripts?.build ?? "";
-    const buildCommands = build.split("&&").filter((command) => command.includes("bun build"));
+    const scripts = pkg.scripts ?? {};
+    const buildCommands = [
+      scripts["build:cli"] ?? "",
+      scripts["build:mcp"] ?? "",
+      scripts["build:server"] ?? "",
+      scripts["build:lib"] ?? "",
+      scripts["build:pg-migrations"] ?? "",
+    ].filter((command) => command.includes("bun build"));
+    const tuiRuntimeBuild = scripts["build:tui-runtime"] ?? "";
+
     expect(buildCommands).toHaveLength(5);
     expect(buildCommands.every((command) => command.includes("--packages external"))).toBe(true);
     expect(buildCommands.every((command) => command.includes("--splitting"))).toBe(true);
+    expect(tuiRuntimeBuild).toContain("scripts/build-tui-runtime.ts");
   });
 
   it("keeps operational root APIs behind lazy implementation imports", () => {

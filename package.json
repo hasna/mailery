@@ -1,6 +1,6 @@
 {
   "name": "@hasna/emails",
-  "version": "0.6.8",
+  "version": "0.6.9",
   "description": "Email management CLI + MCP server + dashboard for Resend and AWS SES",
   "type": "module",
   "repository": {
@@ -37,7 +37,14 @@
   ],
   "scripts": {
     "clean": "rm -rf dist",
-    "build": "bun run clean && bun build src/cli/index.tsx --outdir dist/cli --target bun --packages external --splitting && bun build src/mcp/index.ts --outdir dist/mcp --target bun --packages external --splitting && bun build src/server/index.ts --outdir dist/server --target bun --packages external --splitting && bun build src/index.ts src/storage.ts --outdir dist --target bun --packages external --splitting && bun build src/db/pg-migrations.ts --outdir dist/db --target bun --packages external --splitting && tsc --emitDeclarationOnly --outDir dist",
+    "build": "bun run clean && bun run build:cli && bun run build:tui-runtime && bun run build:mcp && bun run build:server && bun run build:lib && bun run build:pg-migrations && bun run build:types",
+    "build:cli": "bun build src/cli/index.tsx --outdir dist/cli --target bun --packages external --splitting",
+    "build:tui-runtime": "bun run scripts/build-tui-runtime.ts",
+    "build:mcp": "bun build src/mcp/index.ts --outdir dist/mcp --target bun --packages external --splitting",
+    "build:server": "bun build src/server/index.ts --outdir dist/server --target bun --packages external --splitting",
+    "build:lib": "bun build src/index.ts src/storage.ts --outdir dist --target bun --packages external --splitting",
+    "build:pg-migrations": "bun build src/db/pg-migrations.ts --outdir dist/db --target bun --packages external --splitting",
+    "build:types": "tsc --emitDeclarationOnly --outDir dist",
     "test": "bun test",
     "dev:cli": "bun run src/cli/index.tsx",
     "dev:mcp": "bun run src/mcp/index.ts",

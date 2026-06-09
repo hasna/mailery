@@ -2,6 +2,14 @@ import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import type { Mailbox } from "../tui/data.js";
 
+interface UiRuntime {
+  runOpenTuiApp(initialMailbox?: Mailbox): Promise<void>;
+}
+
+const runtimeBundleSpecifier = "./ui-runtime-bundle.js";
+const workspaceDistRuntimeSpecifier = "../../../dist/cli/ui-runtime-bundle.js";
+const sourceRuntimeSpecifier = "../tui/runtime.js";
+
 export function registerUiCommand(program: Command, _output: (data: unknown, formatted: string) => void): void {
   program
     .command("ui")
@@ -21,60 +29,30 @@ export function registerUiCommand(program: Command, _output: (data: unknown, for
 }
 
 export async function runOpenTuiApp(initialMailbox?: Mailbox): Promise<void> {
-  const previousAlternateScreen = process.env["OTUI_USE_ALTERNATE_SCREEN"];
-  process.env["OTUI_USE_ALTERNATE_SCREEN"] = "true";
-  let renderer: Awaited<ReturnType<(typeof import("@opentui/core"))["createCliRenderer"]>> | null = null;
-  const signalExitCodes: Partial<Record<NodeJS.Signals, number>> = {
-    SIGINT: 130,
-    SIGTERM: 143,
-  };
-  const signalHandlers: Array<[NodeJS.Signals, () => void]> = [];
-  const restoreAlternateScreenEnv = () => {
-    if (previousAlternateScreen === undefined) {
-      delete process.env["OTUI_USE_ALTERNATE_SCREEN"];
-    } else {
-      process.env["OTUI_USE_ALTERNATE_SCREEN"] = previousAlternateScreen;
-    }
-  };
+  const runtime = await loadUiRuntime();
+  await runtime.runOpenTuiApp(initialMailbox);
+}
 
-  const [{ createCliRenderer }, { createRoot }, React, { App }] = await Promise.all([
-    import("@opentui/core"),
-    import("@opentui/react"),
-    import("react"),
-    import("../tui/App.js"),
-  ]);
+async function loadUiRuntime(): Promise<UiRuntime> {
+  const bundledRuntime = await tryImportRuntime(runtimeBundleSpecifier);
+  if (bundledRuntime) return bundledRuntime;
+
+  const workspaceDistRuntime = await tryImportRuntime(workspaceDistRuntimeSpecifier);
+  if (workspaceDistRuntime) return workspaceDistRuntime;
+
+  return await import(sourceRuntimeSpecifier) as UiRuntime;
+}
+
+async function tryImportRuntime(specifier: string): Promise<UiRuntime | null> {
   try {
-    renderer = await createCliRenderer({
-      exitOnCtrlC: false,
-      screenMode: "alternate-screen",
-      clearOnShutdown: true,
-      targetFps: 60,
-      consoleMode: "disabled",
-      openConsoleOnError: false,
-      useKittyKeyboard: {},
-      useMouse: true,
-      enableMouseMovement: true,
-      backgroundColor: "#101418",
-    });
-    for (const signal of ["SIGINT", "SIGTERM"] as const) {
-      const handler = () => {
-        process.exitCode = signalExitCodes[signal] ?? 1;
-        renderer?.destroy();
-      };
-      signalHandlers.push([signal, handler]);
-      process.once(signal, handler);
-    }
-    renderer.setTerminalTitle("emails ui");
-    const destroyed = new Promise<void>((resolve) => {
-      renderer!.on("destroy", () => resolve());
-    });
-    createRoot(renderer).render(React.createElement(App, { initialMailbox }));
-    await destroyed;
-  } finally {
-    for (const [signal, handler] of signalHandlers) {
-      process.removeListener(signal, handler);
-    }
-    renderer?.destroy();
-    restoreAlternateScreenEnv();
+    return await import(specifier) as UiRuntime;
+  } catch (error) {
+    if (!isMissingRuntimeBundle(error)) throw error;
+    return null;
   }
+}
+
+function isMissingRuntimeBundle(error: unknown): boolean {
+  const message = String((error as { message?: unknown })?.message ?? error);
+  return message.includes("ui-runtime-bundle.js") || message.includes(runtimeBundleSpecifier);
 }

@@ -5,6 +5,7 @@
  * required for email sending (SES/Resend) in a Cloudflare-managed zone.
  *
  * Records created:
+ *   - TXT         SES identity verification token (_amazonses)
  *   - CNAME × 3  DKIM tokens (SES EasyDKIM)
  *   - TXT         SPF record
  *   - TXT         DMARC record
@@ -214,7 +215,7 @@ export async function addMxRecord(
  * Full email DNS setup via Cloudflare:
  * 1. Get required DNS records from the provider adapter (SES/Resend)
  * 2. Find the Cloudflare zone for the domain
- * 3. Upsert all records (DKIM CNAMEs, SPF TXT, DMARC TXT)
+ * 3. Upsert all records (SES identity TXT, DKIM CNAMEs, SPF TXT, DMARC TXT)
  * 4. Optionally add MX record for receiving
  */
 export async function setupEmailDns(opts: {
@@ -228,6 +229,9 @@ export async function setupEmailDns(opts: {
 
   // Get required DNS records from the email provider
   const adapter = getAdapter(opts.provider);
+  if (opts.provider.type === "ses" && adapter.reinitiateDomainVerification) {
+    await adapter.reinitiateDomainVerification(opts.domain);
+  }
   const dnsRecords = await adapter.getDnsRecords(opts.domain);
 
   // Find Cloudflare zone

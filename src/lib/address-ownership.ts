@@ -1,11 +1,12 @@
 import type { Database } from "../db/database.js";
 import { getDatabase, resolvePartialId } from "../db/database.js";
-import { getAddress, listAddresses } from "../db/addresses.js";
-import { getProvider } from "../db/providers.js";
+import { findAddressesByEmail, getAddress, listAddresses, type ListAddressOptions } from "../db/addresses.js";
+import { listProviderNamesByIds } from "../db/providers.js";
 import {
   assignAddressOwner,
   getOwner,
   getOwnerByName,
+  listOwnersByIds,
   listAddressOwnershipEvents,
   transferAddressOwner,
   unassignAddressOwner,
@@ -28,21 +29,25 @@ export interface AddressOwnershipDetail {
 }
 
 function resolveOwnerRef(ref: string, db: Database): Owner | null {
+  const partialId = resolvePartialId(db, "owners", ref);
   return getOwnerByName(ref, db)
     ?? getOwner(ref, db)
-    ?? (resolvePartialId(db, "owners", ref) ? getOwner(resolvePartialId(db, "owners", ref)!, db) : null);
+    ?? (partialId ? getOwner(partialId, db) : null);
 }
 
 export function resolveAddressRef(ref: string, db: Database = getDatabase()): EmailAddress {
   const trimmed = ref.trim();
-  const id = getAddress(trimmed, db) ? trimmed : resolvePartialId(db, "addresses", trimmed);
+  const exact = getAddress(trimmed, db);
+  if (exact) return exact;
+
+  const id = resolvePartialId(db, "addresses", trimmed);
   if (id) {
     const address = getAddress(id, db);
     if (address) return address;
   }
 
   const lowered = trimmed.toLowerCase();
-  const matches = listAddresses(undefined, db).filter((address) => address.email.toLowerCase() === lowered);
+  const matches = findAddressesByEmail(lowered, db);
   if (matches.length === 1) return matches[0]!;
   if (matches.length > 1) {
     const ids = matches.map((address) => `${address.id.slice(0, 8)}:${address.provider_id.slice(0, 8)}`).join(", ");
@@ -52,19 +57,32 @@ export function resolveAddressRef(ref: string, db: Database = getDatabase()): Em
 }
 
 export function enrichAddress(address: EmailAddress, db: Database = getDatabase()): EnrichedAddress {
-  const provider = getProvider(address.provider_id, db);
+  const providers = listProviderNamesByIds([address.provider_id], db);
   const owner = address.owner_id ? getOwner(address.owner_id, db) : null;
   const administrator = address.administrator_id ? getOwner(address.administrator_id, db) : null;
   return {
     ...address,
-    provider_name: provider?.name ?? null,
+    provider_name: providers.get(address.provider_id) ?? null,
     owner,
     administrator,
   };
 }
 
-export function listEnrichedAddresses(providerId?: string, db: Database = getDatabase()): EnrichedAddress[] {
-  return listAddresses(providerId, db).map((address) => enrichAddress(address, db));
+export function enrichAddresses(addresses: EmailAddress[], db: Database = getDatabase()): EnrichedAddress[] {
+  const providers = listProviderNamesByIds(addresses.map((address) => address.provider_id), db);
+  const ownerIds = addresses.flatMap((address) => [address.owner_id, address.administrator_id])
+    .filter((id): id is string => !!id);
+  const owners = listOwnersByIds(ownerIds, db);
+  return addresses.map((address) => ({
+    ...address,
+    provider_name: providers.get(address.provider_id) ?? null,
+    owner: address.owner_id ? owners.get(address.owner_id) ?? null : null,
+    administrator: address.administrator_id ? owners.get(address.administrator_id) ?? null : null,
+  }));
+}
+
+export function listEnrichedAddresses(providerId?: string, db: Database = getDatabase(), opts?: ListAddressOptions): EnrichedAddress[] {
+  return enrichAddresses(listAddresses(providerId, db, opts), db);
 }
 
 export function getAddressOwnershipDetail(ref: string, db: Database = getDatabase()): AddressOwnershipDetail {

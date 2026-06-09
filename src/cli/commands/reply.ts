@@ -1,40 +1,48 @@
 import type { Command } from "commander";
-import chalk from "chalk";
-import { getDatabase, uuid, resolvePartialId, type Database } from "../../db/database.js";
+import chalk from "../../lib/chalk-lite.js";
+import { getDatabase, uuid, resolvePartialId, listPartialIdMatches, resolvePartialIdOrThrow, type Database } from "../../db/database.js";
 import { getInboundEmail, type InboundEmail } from "../../db/inbound.js";
 import { getEmail, createEmail } from "../../db/emails.js";
-import { listProviders } from "../../db/providers.js";
+import { getLatestActiveProviderId } from "../../db/providers.js";
 import type { Email } from "../../types/index.js";
 import { storeEmailContent } from "../../db/email-content.js";
 import { getEmailThreading, setEmailThreading, setInboundThreadId } from "../../db/threads.js";
 import { generateMessageId, buildThreadingHeaders, parseReferences } from "../../lib/threading.js";
-import { sendWithFailover } from "../../lib/send.js";
 import { handleError } from "../utils.js";
 
 /**
- * Resolve an id that may name an inbound OR a sent email. Uses resolvePartialId
- * (returns null on miss) rather than resolveId (which exits the process) so a
- * sent-email id doesn't get killed by the inbound lookup.
+ * Resolve an id that may name an inbound OR a sent email. A miss in the first
+ * table falls through to the second, but ambiguous prefixes fail loudly.
  */
 export function resolveInboundOrSent(id: string, db: Database): { inbound: InboundEmail | null; sent: Email | null } {
-  const inbound = getInboundEmail(resolvePartialId(db, "inbound_emails", id) ?? id, db);
+  const inboundId = resolveMaybeId(db, "inbound_emails", id);
+  const inbound = inboundId ? getInboundEmail(inboundId, db) : null;
   if (inbound) return { inbound, sent: null };
-  const sent = getEmail(resolvePartialId(db, "emails", id) ?? id, db);
+  const sentId = resolveMaybeId(db, "emails", id);
+  const sent = sentId ? getEmail(sentId, db) : null;
   return { inbound: null, sent };
+}
+
+function resolveMaybeId(db: Database, table: "inbound_emails" | "emails", id: string): string | null {
+  const value = id.trim();
+  if (!value) return null;
+  const resolved = resolvePartialId(db, table, value);
+  if (resolved) return resolved;
+  const matches = listPartialIdMatches(db, table, value, 2);
+  if (matches.length > 1) {
+    throw new Error(`Ambiguous ID '${value}' in table '${table}'. Use a longer prefix or full ID.`);
+  }
+  return null;
 }
 
 /** Resolve the provider to send through — the given one, else the first active. */
 function resolveSendProvider(optProvider: string | undefined, db: Database): string {
   if (optProvider) {
-    // resolvePartialId returns null (vs resolveId which calls process.exit),
-    // so a bad --provider surfaces through the command's catch/handleError.
-    const id = resolvePartialId(db, "providers", optProvider);
-    if (!id) throw new Error(`Provider not found: ${optProvider}`);
-    return id;
+    return resolvePartialIdOrThrow(db, "providers", optProvider);
   }
-  const active = listProviders(db).filter((p) => p.active);
-  if (active.length === 0) throw new Error("No active providers. Add one with 'emails provider add'");
-  return active[0]!.id;
+  const activeProviderId = getLatestActiveProviderId(undefined, db);
+  if (!activeProviderId) throw new Error("No active providers. Add one with 'emails provider add'");
+  return activeProviderId;
 }
 
 function rePrefix(subject: string): string {
@@ -79,6 +87,7 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
         const providerId = resolveSendProvider(opts.provider, db);
         const ourMessageId = generateMessageId(opts.from.split("@")[1] ?? "localhost");
         const sendOpts = { provider_id: providerId, from: opts.from, to: opts.to, subject, text: body, headers: { "Message-ID": ourMessageId } };
+        const { sendWithFailover } = await import("../../lib/send.js");
         const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, db);
         const email = createEmail(actual, sendOpts, messageId, db);
         setEmailThreading(email.id, { message_id: ourMessageId, thread_id: ourMessageId.replace(/[<>]/g, ""), in_reply_to: null, references: [] });
@@ -147,6 +156,7 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
           ...(opts.html ? { html: opts.body } : { text: opts.body }),
           headers,
         };
+        const { sendWithFailover } = await import("../../lib/send.js");
         const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, db);
         const email = createEmail(actual, sendOpts, messageId, db);
         setEmailThreading(email.id, { message_id: ourMessageId, thread_id: threadId, in_reply_to: inReplyTo, references }, db);

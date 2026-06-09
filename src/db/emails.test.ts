@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, resetDatabase } from "./database.js";
+import { closeDatabase, getDatabase, resetDatabase } from "./database.js";
 import { createProvider } from "./providers.js";
 import {
   createEmail,
@@ -82,6 +82,20 @@ describe("getEmail", () => {
     expect(found?.id).toBe(e.id);
   });
 
+  it("tolerates malformed recipient and tag JSON", () => {
+    const e = createEmail(providerId, { ...baseOpts, cc: ["cc@example.com"], bcc: ["bcc@example.com"], tags: { campaign: "x" } });
+    getDatabase().run(
+      "UPDATE emails SET to_addresses = ?, cc_addresses = ?, bcc_addresses = ?, tags = ? WHERE id = ?",
+      ["not-json", "{}", "not-json", "[]", e.id],
+    );
+
+    const found = getEmail(e.id);
+    expect(found?.to_addresses).toEqual([]);
+    expect(found?.cc_addresses).toEqual([]);
+    expect(found?.bcc_addresses).toEqual([]);
+    expect(found?.tags).toEqual({});
+  });
+
   it("returns null for unknown id", () => {
     expect(getEmail("nonexistent")).toBeNull();
   });
@@ -121,10 +135,56 @@ describe("listEmails", () => {
     expect(list.length).toBe(2);
   });
 
+  it("filters by canonical sender through display-name From values", () => {
+    createEmail(providerId, { ...baseOpts, from: '"Ops Team" <ops@example.com>', subject: "Display sender" });
+    createEmail(providerId, { ...baseOpts, from: "ops@example.com", subject: "Bare sender" });
+    createEmail(providerId, { ...baseOpts, from: "team@example.com", subject: "Other sender" });
+
+    const bare = listEmails({ from_address: "ops@example.com" }).map((email) => email.subject).sort();
+    const display = listEmails({ from_address: "Ops Team <ops@example.com>" }).map((email) => email.subject).sort();
+
+    expect(bare).toEqual(["Bare sender", "Display sender"]);
+    expect(display).toEqual(["Bare sender", "Display sender"]);
+  });
+
   it("supports limit and offset", () => {
     for (let i = 0; i < 5; i++) createEmail(providerId, { ...baseOpts, subject: `Email ${i}` });
     expect(listEmails({ limit: 3 }).length).toBe(3);
     expect(listEmails({ limit: 3, offset: 3 }).length).toBe(2);
+  });
+
+  it("clamps bad limit and offset values", () => {
+    for (let i = 0; i < 5; i++) createEmail(providerId, { ...baseOpts, subject: `Clamp ${i}` });
+
+    expect(listEmails({ limit: 0 }).length).toBe(1);
+    expect(listEmails({ limit: -2 }).length).toBe(1);
+    expect(listEmails({ limit: Number.NaN }).length).toBe(5);
+    expect(listEmails({ limit: Number.POSITIVE_INFINITY, offset: Number.POSITIVE_INFINITY }).length).toBe(5);
+  });
+
+  it("uses a lean projection and omits idempotency keys from list rows", () => {
+    const db = getDatabase();
+    createEmail(providerId, { ...baseOpts, subject: "Sensitive key", idempotency_key: "dedupe-secret-key" });
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") {
+          return (sql: string) => {
+            queries.push(sql);
+            return target.query(sql);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const [email] = listEmails({ limit: 1 }, recordingDb);
+
+    expect(email).toBeDefined();
+    expect("idempotency_key" in email!).toBe(false);
+    expect(JSON.stringify(email)).not.toContain("dedupe-secret-key");
+    expect(queries[0]).not.toContain("SELECT *");
+    expect(queries[0]).not.toContain("idempotency_key");
   });
 });
 
@@ -183,6 +243,52 @@ describe("searchEmails", () => {
     }
     const results = searchEmails("Match", { limit: 3 });
     expect(results.length).toBe(3);
+  });
+
+  it("clamps bad search limits", () => {
+    for (let i = 0; i < 5; i++) {
+      createEmail(providerId, { ...baseOpts, subject: `Match ${i}` });
+    }
+
+    expect(searchEmails("Match", { limit: 0 }).length).toBe(1);
+    expect(searchEmails("Match", { limit: -10 }).length).toBe(1);
+    expect(searchEmails("Match", { limit: Number.NaN }).length).toBe(5);
+    expect(searchEmails("Match", { limit: Number.POSITIVE_INFINITY }).length).toBe(5);
+  });
+
+  it("supports offset paging after filtering", () => {
+    for (let i = 0; i < 4; i++) {
+      createEmail(providerId, { ...baseOpts, subject: `Paged Match ${i}` });
+    }
+
+    const results = searchEmails("Paged Match", { limit: 2, offset: 1 });
+
+    expect(results.map((email) => email.subject)).toEqual(["Paged Match 2", "Paged Match 1"]);
+  });
+
+  it("uses a lean projection and omits idempotency keys from search rows", () => {
+    const db = getDatabase();
+    createEmail(providerId, { ...baseOpts, subject: "Find sensitive", idempotency_key: "search-dedupe-secret" });
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") {
+          return (sql: string) => {
+            queries.push(sql);
+            return target.query(sql);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const [email] = searchEmails("sensitive", { limit: 1 }, recordingDb);
+
+    expect(email).toBeDefined();
+    expect("idempotency_key" in email!).toBe(false);
+    expect(JSON.stringify(email)).not.toContain("search-dedupe-secret");
+    expect(queries[0]).not.toContain("SELECT *");
+    expect(queries[0]).not.toContain("idempotency_key");
   });
 
   it("returns empty array for no matches", () => {

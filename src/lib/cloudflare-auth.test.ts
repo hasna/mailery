@@ -26,16 +26,6 @@ describe("resolveCloudflareAuth — priority", () => {
     expect(auth).toEqual({ kind: "global", apiKey: "gk", email: "a@b.com" });
   });
 
-  it("falls back to the HASNAXYZ vault env names (key + email)", () => {
-    const auth = resolveCloudflareAuth({
-      env: {
-        HASNAXYZ_CLOUDFLARE_LIVE_API_KEY: "vault-key",
-        HASNAXYZ_CLOUDFLARE_LIVE_EMAIL: "ops@hasna.com",
-      },
-    });
-    expect(auth).toEqual({ kind: "global", apiKey: "vault-key", email: "ops@hasna.com" });
-  });
-
   it("returns undefined when nothing is configured", () => {
     expect(resolveCloudflareAuth({ env: {} })).toBeUndefined();
   });

@@ -3,7 +3,7 @@ import { closeDatabase, resetDatabase } from "./database.js";
 import {
   createAlias, createCatchAll, removeAlias, getAlias,
   listAliases, resolveAlias, CATCH_ALL,
-  setGlobalCatchAll, ensureDefaultCatchAll,
+  setGlobalCatchAll, ensureDefaultCatchAll, listAliasesByTargets,
 } from "./aliases.js";
 
 beforeEach(() => { process.env["EMAILS_DB_PATH"] = ":memory:"; resetDatabase(); });
@@ -74,6 +74,46 @@ describe("list / remove", () => {
     expect(removeAlias(a.id)).toBe(true);
     expect(getAlias(a.id)).toBeNull();
     expect(resolveAlias("a@x.com")).toBeNull();
+  });
+
+  it("paginates all aliases after applying stable list order", () => {
+    ensureDefaultCatchAll();
+    createAlias("b@x.com", "t@x.com");
+    createAlias("a@x.com", "t@x.com");
+    createAlias("a@y.com", "t@y.com");
+
+    const page = listAliases(undefined, undefined, { limit: 2, offset: 1 });
+
+    expect(page.map((alias) => `${alias.local_part}@${alias.domain}`)).toEqual([
+      "a@x.com",
+      "b@x.com",
+    ]);
+  });
+
+  it("paginates domain aliases after sorting by local part", () => {
+    createAlias("c@x.com", "t@x.com");
+    createAlias("a@x.com", "t@x.com");
+    createAlias("b@x.com", "t@x.com");
+    createAlias("a@y.com", "t@y.com");
+
+    const page = listAliases("x.com", undefined, { limit: 2, offset: 1 });
+
+    expect(page.map((alias) => `${alias.local_part}@${alias.domain}`)).toEqual([
+      "b@x.com",
+      "c@x.com",
+    ]);
+  });
+
+  it("lists aliases by target addresses without scanning unrelated targets in callers", () => {
+    createAlias("support@x.com", "ops@x.com");
+    createCatchAll("y.com", "ops@x.com");
+    createAlias("sales@x.com", "sales@x.com");
+
+    expect(listAliasesByTargets(["OPS@x.com", "ops@x.com"]).map((alias) => `${alias.local_part}@${alias.domain}`)).toEqual([
+      "support@x.com",
+      "*@y.com",
+    ]);
+    expect(listAliasesByTargets([])).toEqual([]);
   });
 });
 

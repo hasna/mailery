@@ -1,12 +1,46 @@
 import type { Database } from "./database.js";
 import type { SQLQueryBindings } from "bun:sqlite";
-import type { EmailEvent, EventFilter, EventRow, EventType } from "../types/index.js";
+import type { EmailEvent, EventFilter, EventRow, EventSummary, EventType } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
+import { parseJsonObject } from "./json.js";
+import { safeOffset, safeOptionalLimit } from "./pagination.js";
+
+const EVENT_COLUMNS = [
+  "id",
+  "email_id",
+  "provider_id",
+  "provider_event_id",
+  "type",
+  "recipient",
+  "metadata",
+  "occurred_at",
+  "created_at",
+].join(", ");
+
+const EVENT_SUMMARY_COLUMNS = [
+  "id",
+  "email_id",
+  "provider_id",
+  "provider_event_id",
+  "type",
+  "recipient",
+  "occurred_at",
+  "created_at",
+].join(", ");
+
+type EventSummaryRow = Omit<EventRow, "metadata">;
 
 function rowToEvent(row: EventRow): EmailEvent {
   return {
     ...row,
-    metadata: JSON.parse(row.metadata || "{}") as Record<string, unknown>,
+    metadata: parseJsonObject(row.metadata),
+    type: row.type as EventType,
+  };
+}
+
+function rowToEventSummary(row: EventSummaryRow): EventSummary {
+  return {
+    ...row,
     type: row.type as EventType,
   };
 }
@@ -21,32 +55,56 @@ export interface CreateEventInput {
   occurred_at: string;
 }
 
+function eventFromInput(id: string, timestamp: string, input: CreateEventInput): EmailEvent {
+  return {
+    id,
+    email_id: input.email_id || null,
+    provider_id: input.provider_id,
+    provider_event_id: input.provider_event_id || null,
+    type: input.type,
+    recipient: input.recipient || null,
+    metadata: input.metadata || {},
+    occurred_at: input.occurred_at,
+    created_at: timestamp,
+  };
+}
+
 export function createEvent(input: CreateEventInput, db?: Database): EmailEvent {
   const d = db || getDatabase();
   const id = uuid();
   const timestamp = now();
+  const event = eventFromInput(id, timestamp, input);
 
   d.run(
     `INSERT INTO events (id, email_id, provider_id, provider_event_id, type, recipient, metadata, occurred_at, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
-      input.email_id || null,
-      input.provider_id,
-      input.provider_event_id || null,
-      input.type,
-      input.recipient || null,
-      JSON.stringify(input.metadata || {}),
-      input.occurred_at,
+      event.email_id,
+      event.provider_id,
+      event.provider_event_id,
+      event.type,
+      event.recipient,
+      JSON.stringify(event.metadata),
+      event.occurred_at,
       timestamp,
     ],
   );
 
-  const row = d.query("SELECT * FROM events WHERE id = ?").get(id) as EventRow;
-  return rowToEvent(row);
+  return event;
 }
 
 export function listEvents(filter: EventFilter = {}, db?: Database): EmailEvent[] {
+  const rows = selectEventRows(filter, EVENT_COLUMNS, db) as EventRow[];
+  return rows.map(rowToEvent);
+}
+
+export function listEventSummaries(filter: EventFilter = {}, db?: Database): EventSummary[] {
+  const rows = selectEventRows(filter, EVENT_SUMMARY_COLUMNS, db) as EventSummaryRow[];
+  return rows.map(rowToEventSummary);
+}
+
+function selectEventRows(filter: EventFilter = {}, columns: string, db?: Database): EventRow[] | EventSummaryRow[] {
   const d = db || getDatabase();
   const conditions: string[] = [];
   const params: SQLQueryBindings[] = [];
@@ -76,23 +134,33 @@ export function listEvents(filter: EventFilter = {}, db?: Database): EmailEvent[
     params.push(filter.since);
   }
 
+  if (filter.until) {
+    conditions.push("occurred_at <= ?");
+    params.push(filter.until);
+  }
+
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
   let limitClause = "";
-  if (filter.limit) {
+  const limit = safeOptionalLimit(filter.limit);
+  if (limit !== null) {
     limitClause = " LIMIT ?";
-    params.push(filter.limit);
-    if (filter.offset) {
-      limitClause += " OFFSET ?";
-      params.push(filter.offset);
-    }
+    params.push(limit);
+    limitClause += " OFFSET ?";
+    params.push(safeOffset(filter.offset));
   }
 
   const rows = d
-    .query(`SELECT * FROM events ${where} ORDER BY occurred_at DESC${limitClause}`)
-    .all(...params) as EventRow[];
+    .query(`SELECT ${columns} FROM events ${where} ORDER BY occurred_at DESC${limitClause}`)
+    .all(...params) as EventRow[] | EventSummaryRow[];
 
-  return rows.map(rowToEvent);
+  return rows;
+}
+
+export function getEvent(id: string, db?: Database): EmailEvent | null {
+  const d = db || getDatabase();
+  const row = d.query(`SELECT ${EVENT_COLUMNS} FROM events WHERE id = ?`).get(id) as EventRow | null;
+  return row ? rowToEvent(row) : null;
 }
 
 export function getEventsByEmail(email_id: string, db?: Database): EmailEvent[] {
@@ -100,18 +168,42 @@ export function getEventsByEmail(email_id: string, db?: Database): EmailEvent[] 
 }
 
 export function upsertEvent(input: CreateEventInput, db?: Database): EmailEvent {
+  return upsertEventWithResult(input, db).event;
+}
+
+export function upsertEventWithResult(input: CreateEventInput, db?: Database): { event: EmailEvent; created: boolean } {
   const d = db || getDatabase();
 
-  // If has a provider_event_id, check for existing to avoid dupes
   if (input.provider_event_id) {
-    const existing = d.query(
-      "SELECT * FROM events WHERE provider_id = ? AND provider_event_id = ?",
-    ).get(input.provider_id, input.provider_event_id) as EventRow | null;
+    const id = uuid();
+    const timestamp = now();
+    const event = eventFromInput(id, timestamp, input);
+    const result = d.run(
+      `INSERT OR IGNORE INTO events
+         (id, email_id, provider_id, provider_event_id, type, recipient, metadata, occurred_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        event.email_id,
+        event.provider_id,
+        event.provider_event_id,
+        event.type,
+        event.recipient,
+        JSON.stringify(event.metadata),
+        event.occurred_at,
+        timestamp,
+      ],
+    );
 
+    if (result.changes > 0) return { event, created: true };
+
+    const existing = d.query(
+      `SELECT ${EVENT_COLUMNS} FROM events WHERE provider_id = ? AND provider_event_id = ?`,
+    ).get(input.provider_id, input.provider_event_id) as EventRow | null;
     if (existing) {
-      return rowToEvent(existing);
+      return { event: rowToEvent(existing), created: false };
     }
   }
 
-  return createEvent(input, d);
+  return { event: createEvent(input, d), created: true };
 }

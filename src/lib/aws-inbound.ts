@@ -10,23 +10,8 @@
  * Uses @aws-sdk/client-s3 for bucket creation (already a dep via s3 config).
  */
 
-import {
-  SESClient,
-  CreateReceiptRuleSetCommand,
-  SetActiveReceiptRuleSetCommand,
-  ListReceiptRuleSetsCommand,
-  CreateReceiptRuleCommand,
-  DescribeActiveReceiptRuleSetCommand,
-} from "@aws-sdk/client-ses";
-import {
-  S3Client,
-  CreateBucketCommand,
-  PutBucketPolicyCommand,
-  HeadBucketCommand,
-  PutPublicAccessBlockCommand,
-  PutBucketVersioningCommand,
-  PutBucketEncryptionCommand,
-} from "@aws-sdk/client-s3";
+import type { S3Client } from "@aws-sdk/client-s3";
+import type { SESClient } from "@aws-sdk/client-ses";
 
 export interface InboundSetupOptions {
   domain: string;
@@ -50,15 +35,36 @@ export interface InboundSetupResult {
   mx_record: string;
 }
 
-function makeClients(opts: InboundSetupOptions) {
+type S3Sdk = typeof import("@aws-sdk/client-s3");
+type SesSdk = typeof import("@aws-sdk/client-ses");
+
+let s3SdkPromise: Promise<S3Sdk> | undefined;
+let sesSdkPromise: Promise<SesSdk> | undefined;
+
+function loadS3Sdk(): Promise<S3Sdk> {
+  s3SdkPromise ??= import("@aws-sdk/client-s3");
+  return s3SdkPromise;
+}
+
+function loadSesSdk(): Promise<SesSdk> {
+  sesSdkPromise ??= import("@aws-sdk/client-ses");
+  return sesSdkPromise;
+}
+
+async function makeClients(opts: InboundSetupOptions) {
   const region = opts.region || process.env["AWS_REGION"] || "us-east-1";
   const credentials = opts.accessKeyId && opts.secretAccessKey
     ? { accessKeyId: opts.accessKeyId, secretAccessKey: opts.secretAccessKey }
     : undefined;
+  const [s3Sdk, sesSdk] = await Promise.all([loadS3Sdk(), loadSesSdk()]);
+  const { S3Client } = s3Sdk;
+  const { SESClient } = sesSdk;
   return {
     ses: new SESClient({ region, credentials }),
     s3: new S3Client({ region, credentials }),
     region,
+    s3Sdk,
+    sesSdk,
   };
 }
 
@@ -66,7 +72,15 @@ function makeClients(opts: InboundSetupOptions) {
  * Create S3 bucket with SES delivery policy.
  * Safe to call if bucket already exists (checks first).
  */
-async function ensureS3Bucket(s3: S3Client, bucket: string, region: string): Promise<boolean> {
+async function ensureS3Bucket(s3: S3Client, s3Sdk: S3Sdk, bucket: string, region: string): Promise<boolean> {
+  const {
+    CreateBucketCommand,
+    HeadBucketCommand,
+    PutBucketEncryptionCommand,
+    PutBucketVersioningCommand,
+    PutPublicAccessBlockCommand,
+  } = s3Sdk;
+
   // Check if already exists
   try {
     await s3.send(new HeadBucketCommand({ Bucket: bucket }));
@@ -142,7 +156,8 @@ export function buildSesBucketPolicy(bucket: string, prefix: string, accountId?:
   return { Version: "2012-10-17", Statement: [statement] };
 }
 
-async function attachSesBucketPolicy(s3: S3Client, bucket: string, prefix: string, accountId?: string): Promise<void> {
+async function attachSesBucketPolicy(s3: S3Client, s3Sdk: S3Sdk, bucket: string, prefix: string, accountId?: string): Promise<void> {
+  const { PutBucketPolicyCommand } = s3Sdk;
   await s3.send(new PutBucketPolicyCommand({
     Bucket: bucket,
     Policy: JSON.stringify(buildSesBucketPolicy(bucket, prefix, accountId)),
@@ -153,7 +168,14 @@ async function attachSesBucketPolicy(s3: S3Client, bucket: string, prefix: strin
  * Ensure an active SES receipt rule set exists.
  * Returns { name, created }.
  */
-async function ensureReceiptRuleSet(ses: SESClient): Promise<{ name: string; created: boolean }> {
+async function ensureReceiptRuleSet(ses: SESClient, sesSdk: SesSdk): Promise<{ name: string; created: boolean }> {
+  const {
+    CreateReceiptRuleSetCommand,
+    DescribeActiveReceiptRuleSetCommand,
+    ListReceiptRuleSetsCommand,
+    SetActiveReceiptRuleSetCommand,
+  } = sesSdk;
+
   // Check for active rule set
   try {
     const active = await ses.send(new DescribeActiveReceiptRuleSetCommand({}));
@@ -181,7 +203,7 @@ async function ensureReceiptRuleSet(ses: SESClient): Promise<{ name: string; cre
  * Full setup: S3 bucket + SES receipt rule for the domain.
  */
 export async function setupInboundEmail(opts: InboundSetupOptions): Promise<InboundSetupResult> {
-  const { ses, s3, region } = makeClients(opts);
+  const { ses, s3, region, s3Sdk, sesSdk } = await makeClients(opts);
   const prefix = opts.prefix ?? `inbound/${opts.domain}/`;
 
   // Resolve the account id so the SES bucket policy condition is correct.
@@ -201,13 +223,14 @@ export async function setupInboundEmail(opts: InboundSetupOptions): Promise<Inbo
   }
 
   // 1. S3 bucket
-  const bucketCreated = await ensureS3Bucket(s3, opts.bucket, region);
-  await attachSesBucketPolicy(s3, opts.bucket, prefix, accountId);
+  const bucketCreated = await ensureS3Bucket(s3, s3Sdk, opts.bucket, region);
+  await attachSesBucketPolicy(s3, s3Sdk, opts.bucket, prefix, accountId);
 
   // 2. Receipt rule set
-  const ruleSet = await ensureReceiptRuleSet(ses);
+  const ruleSet = await ensureReceiptRuleSet(ses, sesSdk);
 
   // 3. Receipt rule: domain → S3
+  const { CreateReceiptRuleCommand } = sesSdk;
   const ruleName = `inbound-${opts.domain.replace(/\./g, "-")}`;
   let ruleCreated = false;
   try {

@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { resetDatabase, closeDatabase, getDatabase, uuid } from "../db/database.js";
 import { createProvider } from "../db/providers.js";
 
@@ -17,6 +19,8 @@ mock.module("@aws-sdk/client-s3", () => ({
   PutBucketEncryptionCommand: class { constructor(public input: unknown) {} },
   PutObjectCommand: class { constructor(public input: unknown) {} },
   HeadBucketCommand: class { constructor(public input: unknown) {} },
+  HeadObjectCommand: class { constructor(public input: unknown) {} },
+  CopyObjectCommand: class { constructor(public input: unknown) {} },
 }));
 
 // ─── Mock mailparser ──────────────────────────────────────────────────────────
@@ -59,6 +63,16 @@ afterEach(() => {
 });
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
+
+describe("syncS3Inbox — import weight", () => {
+  it("keeps AWS S3 and mailparser behind sync-time dynamic imports", () => {
+    const source = readFileSync(join(import.meta.dir, "s3-sync.ts"), "utf8");
+    expect(source).not.toMatch(/^\s*import\s+(?!type\b)[\s\S]*?from\s+["']@aws-sdk\/client-s3["'];/m);
+    expect(source).not.toMatch(/^\s*import\s+(?!type\b)[\s\S]*?from\s+["']mailparser["'];/m);
+    expect(source).toContain('import("@aws-sdk/client-s3")');
+    expect(source).toContain('import("mailparser")');
+  });
+});
 
 describe("syncS3Inbox — empty bucket", () => {
   it("returns zero synced when no objects", async () => {
@@ -159,6 +173,49 @@ describe("syncS3Inbox — with objects", () => {
     expect(result.synced).toBe(1); // m-aaa stored, m-zzz skipped (dedup)
     const row = db.query("SELECT id FROM inbound_emails WHERE message_id = ?").get("inbound/example.com/m-aaa");
     expect(row).not.toBeNull();
+  });
+
+  it("continues past already-synced objects so a small limit does not starve later new mail", async () => {
+    const { db, providerId } = setupDb();
+    for (const key of ["inbound/example.com/old-1", "inbound/example.com/old-2"]) {
+      db.run(
+        `INSERT INTO inbound_emails (id, provider_id, message_id, from_address, to_addresses, cc_addresses, subject, received_at)
+         VALUES (?, ?, ?, 'x@y.com', '[]', '[]', 'old', datetime('now'))`,
+        [uuid(), providerId, key],
+      );
+    }
+
+    const listInputs: unknown[] = [];
+    mockSend.mockImplementation(async (cmd: unknown) => {
+      const c = cmd as { input?: Record<string, unknown> };
+      if (c?.input && "Prefix" in c.input) {
+        listInputs.push(c.input);
+        if (!c.input["ContinuationToken"]) {
+          return {
+            Contents: [
+              { Key: "inbound/example.com/old-1", Size: 100 },
+              { Key: "inbound/example.com/old-2", Size: 100 },
+            ],
+            IsTruncated: true,
+            NextContinuationToken: "page-2",
+          };
+        }
+        return {
+          Contents: [{ Key: "inbound/example.com/new-1", Size: 100 }],
+          IsTruncated: false,
+        };
+      }
+      if (c?.input && "Key" in c.input) {
+        return { Body: (async function* () { yield Buffer.from("From: a@b.com\r\nSubject: Later\r\n\r\nB"); })() };
+      }
+      return {};
+    });
+
+    const result = await syncS3Inbox({ bucket: "test-bucket", db, providerId, limit: 1 });
+    expect(result.synced).toBe(1);
+    expect(result.skipped).toBe(2);
+    expect(listInputs).toHaveLength(2);
+    expect(db.query("SELECT id FROM inbound_emails WHERE message_id = ?").get("inbound/example.com/new-1")).not.toBeNull();
   });
 
   it("throws a clear error for an unknown provider id", async () => {

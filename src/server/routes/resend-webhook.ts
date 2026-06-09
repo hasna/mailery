@@ -9,7 +9,7 @@
  */
 import { isResendInboundEvent, parseResendInboundEvent, verifyResendWebhook, type ResendInboundEvent } from "../../lib/resend-inbound.js";
 import { storeInboundEmail } from "../../db/inbound.js";
-import { listProviders } from "../../db/providers.js";
+import { getLatestActiveProvider } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
 import { json, badRequest } from "./helpers.js";
 
@@ -35,7 +35,7 @@ export async function handleResendWebhook(req: Request, path: string, method: st
 
   const parsed = parseResendInboundEvent(event);
   const db = getDatabase();
-  const resend = listProviders(db).find((p) => p.type === "resend" && p.active);
+  const resend = getLatestActiveProvider("resend", db);
 
   const stored = storeInboundEmail({
     provider_id: resend?.id ?? null,

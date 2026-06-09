@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
 import { getDatabase, closeDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.js";
 import { createTemplate } from "../db/templates.js";
-import { suppressContact } from "../db/contacts.js";
+import { getContact, suppressContact } from "../db/contacts.js";
 import { parseCsv, batchSend } from "./batch.js";
 import type { Provider } from "../types/index.js";
 
@@ -78,6 +78,8 @@ describe("batchSend", () => {
     expect(result.suppressed).toBe(0);
     expect(result.errors).toEqual([]);
     expect(mockSendEmail).toHaveBeenCalledTimes(2);
+    expect(getContact("alice@example.com")?.send_count).toBe(1);
+    expect(getContact("bob@example.com")?.send_count).toBe(1);
   });
 
   it("skips suppressed contacts", async () => {

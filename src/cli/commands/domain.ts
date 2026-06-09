@@ -1,25 +1,25 @@
 import type { Command } from "commander";
-import chalk from "chalk";
-import { createDomain, listDomains, deleteDomain, getDomain, getDomainByName, updateDnsStatus } from "../../db/domains.js";
-import { listAddresses } from "../../db/addresses.js";
-import { getProvider } from "../../db/providers.js";
+import chalk from "../../lib/chalk-lite.js";
+import { createDomain, listDomains, listUsableDomains, deleteDomain, findDomainsByName, getDomain, getDomainByName, updateDnsStatus } from "../../db/domains.js";
+import { getProvider, listProviderNamesByIds } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
 import { getAdapter } from "../../providers/index.js";
 import { formatDnsTable } from "../../lib/dns.js";
 import { colorDnsStatus, truncate, tableRow } from "../../lib/format.js";
-import { confirmDestructiveAction, handleError, resolveId } from "../utils.js";
+import { confirmDestructiveAction, handleError, parseCliPage, resolveId } from "../utils.js";
 import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus } from "../../db/warming.js";
 import { formatWarmingStatus, generateWarmingPlan, getTodayLimit, getTodaySentCount } from "../../lib/warming.js";
-import { getAddressProvisioning, getDomainProvisioning } from "../../db/provisioning.js";
+import { listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.js";
 import { assessDomainReadiness, formatDomainReadinessState } from "../../lib/domain-readiness.js";
+import { normalizeRoute53RegistrationContact } from "../../lib/route53-contact.js";
 
 export function registerDomainCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const domainCmd = program.command("domain").description("Manage sending domains");
 
-  const listDomainsAction = (opts: { provider?: string }) => {
+  const listDomainsAction = (opts: { provider?: string; limit?: string; offset?: string }) => {
     try {
       const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-      const domains = listDomains(providerId);
+      const domains = listDomains(providerId, getDatabase(), parseCliPage(opts));
       if (domains.length === 0) {
         output([], chalk.dim("No domains configured."));
         return;
@@ -42,6 +42,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("domains")
     .description("List sending domains (alias: emails domain list)")
     .option("--provider <id>", "Filter by provider ID")
+    .option("--limit <n>", "Maximum domains to show", "50")
+    .option("--offset <n>", "Number of domains to skip", "0")
     .action(listDomainsAction);
 
   domainCmd
@@ -183,6 +185,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("list")
     .description("List domains")
     .option("--provider <id>", "Filter by provider ID")
+    .option("--limit <n>", "Maximum domains to show", "50")
+    .option("--offset <n>", "Number of domains to skip", "0")
     .action(listDomainsAction);
 
   domainCmd
@@ -196,9 +200,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           providerId = resolveId("providers", opts.provider);
         }
 
-        // Find domain in DB
-        const domains = listDomains(providerId);
-        const found = domains.find((d) => d.domain === domain);
+        const found = providerId ? getDomainByName(providerId, domain) : findDomainsByName(domain)[0];
 
         if (found) {
           const provider = getProvider(found.provider_id);
@@ -226,18 +228,38 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .action(async (domain: string, opts: { provider?: string }) => {
       try {
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const domains = listDomains(providerId);
-        const found = domains.find((d) => d.domain === domain);
+        const found = providerId ? getDomainByName(providerId, domain) : findDomainsByName(domain)[0];
         if (!found) handleError(new Error(`Domain not found: ${domain}`));
 
         const provider = getProvider(found!.provider_id);
         if (!provider) handleError(new Error("Provider not found"));
 
         const adapter = getAdapter(provider!);
-        const status = await adapter.verifyDomain(domain);
+        let status = await adapter.verifyDomain(domain);
+        let reinitiatedRecords: Awaited<ReturnType<NonNullable<typeof adapter.reinitiateDomainVerification>>> | null = null;
+        if (
+          provider!.type === "ses" &&
+          adapter.reinitiateDomainVerification &&
+          (status.dkim === "failed" || status.spf === "failed")
+        ) {
+          reinitiatedRecords = await adapter.reinitiateDomainVerification(domain);
+          const refreshed = await adapter.verifyDomain(domain);
+          status = {
+            dkim: refreshed.dkim === "failed" ? "pending" : refreshed.dkim,
+            spf: refreshed.spf === "failed" ? "pending" : refreshed.spf,
+            dmarc: refreshed.dmarc,
+          };
+        }
         updateDnsStatus(found!.id, status.dkim, status.spf, status.dmarc);
 
         console.log(chalk.bold(`\nDNS Status for ${domain}:`));
+        if (reinitiatedRecords) {
+          console.log(chalk.yellow("  SES verification was failed; identity/DKIM verification was re-initiated."));
+          if (reinitiatedRecords.length > 0) {
+            console.log(chalk.dim("  Required SES verification records:"));
+            console.log(formatDnsTable(reinitiatedRecords));
+          }
+        }
         console.log(`  DKIM:  ${colorDnsStatus(status.dkim)}`);
         console.log(`  SPF:   ${colorDnsStatus(status.spf)}`);
         console.log(`  DMARC: ${colorDnsStatus(status.dmarc)}`);
@@ -251,27 +273,28 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("status")
     .description("Show domain readiness summary table")
     .option("--provider <id>", "Filter by provider ID")
-    .action((opts: { provider?: string }) => {
+    .option("--limit <n>", "Maximum domains to show", "50")
+    .option("--offset <n>", "Number of domains to skip", "0")
+    .action((opts: { provider?: string; limit?: string; offset?: string }) => {
       try {
         const db = getDatabase();
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const domains = listDomains(providerId, db);
+        const domains = listDomains(providerId, db, parseCliPage(opts));
         if (domains.length === 0) {
           output([], chalk.dim("No domains configured."));
           return;
         }
-        const addresses = listAddresses(undefined, db);
+        const domainIds = domains.map((domain) => domain.id);
+        const providerNames = listProviderNamesByIds(domains.map((domain) => domain.provider_id), db);
+        const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
+        const readyAddressCounts = listReadyAddressCountsByDomains(domainIds, db);
         const rows = domains.map((d) => {
-          const provider = getProvider(d.provider_id);
-          const provisioning = getDomainProvisioning(d.id, db);
-          const ready_addresses = addresses.filter((address) => {
-            const addressProvisioning = getAddressProvisioning(address.id, db);
-            return addressProvisioning?.domain_id === d.id && addressProvisioning.provisioning_status === "ready";
-          }).length;
+          const provisioning = domainProvisioning.get(d.id) ?? null;
+          const ready_addresses = readyAddressCounts.get(d.id) ?? 0;
           const readiness = assessDomainReadiness(d, provisioning, { ready_addresses });
           return {
             ...d,
-            provider_name: provider?.name ?? null,
+            provider_name: providerNames.get(d.provider_id) ?? null,
             provisioning,
             readiness,
           };
@@ -323,32 +346,38 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--receive", "Only domains ready to receive")
     .option("--send", "Only domains ready to send")
     .option("--provider <id>", "Filter by provider ID")
-    .action((opts: { receive?: boolean; send?: boolean; provider?: string }) => {
+    .option("--limit <n>", "Maximum domains to show", "50")
+    .option("--offset <n>", "Number of domains to skip after filtering", "0")
+    .action((opts: { receive?: boolean; send?: boolean; provider?: string; limit?: string; offset?: string }) => {
       try {
         const db = getDatabase();
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const addresses = listAddresses(undefined, db);
-        const rows = listDomains(providerId, db).map((domain) => {
-          const provisioning = getDomainProvisioning(domain.id, db);
-          const ready_addresses = addresses.filter((address) => {
-            const addressProvisioning = getAddressProvisioning(address.id, db);
-            return addressProvisioning?.domain_id === domain.id && addressProvisioning.provisioning_status === "ready";
-          }).length;
+        const page = parseCliPage(opts);
+        const domains = listUsableDomains({
+          provider_id: providerId,
+          send: opts.send,
+          receive: opts.receive,
+          limit: page.limit,
+          offset: page.offset,
+        }, db);
+        const domainIds = domains.map((domain) => domain.id);
+        const providerNames = listProviderNamesByIds(domains.map((domain) => domain.provider_id), db);
+        const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
+        const readyAddressCounts = listReadyAddressCountsByDomains(domainIds, db);
+        const rows = domains.map((domain) => {
+          const provisioning = domainProvisioning.get(domain.id) ?? null;
+          const ready_addresses = readyAddressCounts.get(domain.id) ?? 0;
           const readiness = assessDomainReadiness(domain, provisioning, { ready_addresses });
           return {
             ...domain,
-            provider_name: getProvider(domain.provider_id, db)?.name ?? null,
+            provider_name: providerNames.get(domain.provider_id) ?? null,
             provisioning,
             readiness,
           };
-        }).filter((row) => {
-          if (opts.receive && !row.readiness.receive_ready) return false;
-          if (opts.send && !row.readiness.send_ready) return false;
-          if (!opts.receive && !opts.send) return row.readiness.send_ready || row.readiness.receive_ready;
-          return true;
         });
-        const lines = rows.length ? [chalk.bold("\nUsable domains:")] : [chalk.dim("No usable domains found.")];
-        for (const row of rows) {
+        const visibleRows = rows;
+        const lines = visibleRows.length ? [chalk.bold("\nUsable domains:")] : [chalk.dim("No usable domains found.")];
+        for (const row of visibleRows) {
           const modes = [
             row.readiness.send_ready ? "send" : null,
             row.readiness.receive_ready ? "receive" : null,
@@ -356,7 +385,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           lines.push(`  ${chalk.cyan(row.domain)}  ${chalk.dim(row.provider_name ?? row.provider_id.slice(0, 8))}  ${chalk.green(modes || "none")}  ${chalk.dim(formatDomainReadinessState(row.readiness.state))}`);
         }
         lines.push("");
-        output(rows, lines.join("\n"));
+        output(visibleRows, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }
@@ -392,8 +421,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           providerId = resolveId("providers", opts.provider);
         }
 
-        const domains = listDomains(providerId);
-        const found = domains.find((d) => d.domain === domain);
+        const found = providerId ? getDomainByName(providerId, domain) : findDomainsByName(domain)[0];
 
         let expectedRecords;
         if (found) {
@@ -536,15 +564,17 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("warm-list")
     .description("List all domain warming schedules")
     .option("--status <status>", "Filter by status (active, paused, completed)")
-    .action((opts: { status?: string }) => {
+    .option("--limit <n>", "Maximum schedules to show", "50")
+    .option("--offset <n>", "Number of schedules to skip", "0")
+    .action((opts: { status?: string; limit?: string; offset?: string }) => {
       try {
-        const schedules = listWarmingSchedules(opts.status);
+        const schedules = listWarmingSchedules(opts.status, undefined, parseCliPage(opts));
         if (schedules.length === 0) {
-          console.log(chalk.dim("No warming schedules found."));
+          output([], chalk.dim("No warming schedules found."));
           return;
         }
-        console.log("");
-        console.log(tableRow(
+        const lines = [""];
+        lines.push(tableRow(
           [chalk.bold("Domain"), 20],
           [chalk.bold("Status"), 10],
           [chalk.bold("Start Date"), 12],
@@ -558,7 +588,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           const statusColor = s.status === "active" ? chalk.green(s.status)
             : s.status === "paused" ? chalk.yellow(s.status)
             : chalk.dim(s.status);
-          console.log(tableRow(
+          lines.push(tableRow(
             [truncate(s.domain, 20), 20],
             [statusColor, 10],
             [s.start_date, 12],
@@ -567,7 +597,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
             [String(todaySent), 12],
           ));
         }
-        console.log("");
+        lines.push("");
+        output(schedules, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }
@@ -649,14 +680,14 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .requiredOption("--phone <phone>", "Phone in E.164 format (e.g. +1.5551234567)")
     .requiredOption("--address <addr>", "Street address")
     .requiredOption("--city <city>", "City")
-    .requiredOption("--state <state>", "State/province")
+    .option("--state <state>", "State/province; optional and omitted for countries where Route 53 rejects it")
     .requiredOption("--country <code>", "Two-letter country code (e.g. US, RO)")
     .requiredOption("--zip <zip>", "ZIP/postal code")
     .option("--org <name>", "Organization name")
     .option("--years <n>", "Registration years", "1")
     .action(async (domain: string, opts: {
       email: string; firstName: string; lastName: string;
-      phone: string; address: string; city: string; state: string;
+      phone: string; address: string; city: string; state?: string;
       country: string; zip: string; org?: string; years: string;
     }) => {
       try {
@@ -666,13 +697,14 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         if (!avail.available) { console.error(chalk.red(`✗ ${domain} is not available`)); process.exit(1); }
         const price = avail.price ? ` (${avail.currency ?? "USD"} ${avail.price}/yr)` : "";
         console.log(chalk.green(`  ✓ Available${price}`));
-        const result = await r53RegisterDomain(domain, {
+        const contact = normalizeRoute53RegistrationContact({
           first_name: opts.firstName, last_name: opts.lastName,
           email: opts.email, phone: opts.phone,
           address_line_1: opts.address, city: opts.city,
           state: opts.state, country_code: opts.country,
           zip_code: opts.zip, organization_name: opts.org,
-        }, parseInt(opts.years));
+        });
+        const result = await r53RegisterDomain(domain, contact as Parameters<typeof r53RegisterDomain>[1], parseInt(opts.years));
         console.log(chalk.green(`✓ Registration submitted for ${domain}`));
         console.log(chalk.dim(`  Operation ID: ${result.operationId}`));
         console.log(chalk.dim(`  Check status: emails domain purchase-status ${result.operationId}`));
@@ -724,7 +756,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .requiredOption("--phone <phone>", "Phone (e.g. +1.5551234567)")
     .requiredOption("--address <addr>", "Street address")
     .requiredOption("--city <city>", "City")
-    .requiredOption("--state <state>", "State/province")
+    .option("--state <state>", "State/province; optional and omitted for countries where Route 53 rejects it")
     .requiredOption("--country <code>", "Country code (e.g. US, RO)")
     .requiredOption("--zip <zip>", "ZIP code")
     .option("--org <name>", "Organization name")
@@ -732,7 +764,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--skip-buy", "Skip domain purchase (domain already registered)")
     .action(async (domain: string, opts: {
       provider: string; email: string; firstName: string; lastName: string;
-      phone: string; address: string; city: string; state: string;
+      phone: string; address: string; city: string; state?: string;
       country: string; zip: string; org?: string; years: string; skipBuy?: boolean;
     }) => {
       try {
@@ -750,13 +782,14 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           if (!avail.available) handleError(new Error(`${domain} is not available`));
           const price = avail.price ? ` (${avail.currency ?? "USD"} ${avail.price}/yr)` : "";
           console.log(chalk.green(`  ✓ Available${price}`));
-          const reg = await r53RegisterDomain(domain, {
+          const contact = normalizeRoute53RegistrationContact({
             first_name: opts.firstName, last_name: opts.lastName,
             email: opts.email, phone: opts.phone,
             address_line_1: opts.address, city: opts.city,
             state: opts.state, country_code: opts.country,
             zip_code: opts.zip, organization_name: opts.org,
-          }, parseInt(opts.years));
+          });
+          const reg = await r53RegisterDomain(domain, contact as Parameters<typeof r53RegisterDomain>[1], parseInt(opts.years));
           console.log(chalk.green(`  ✓ Registration submitted (op: ${reg.operationId})`));
         }
 
@@ -777,6 +810,9 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         console.log(chalk.dim(`[${step}/${steps}] Registering with SES and configuring DNS records...`));
         const adapter = getAdapter(provider!);
         await adapter.addDomain(domain);
+        if (provider!.type === "ses" && adapter.reinitiateDomainVerification) {
+          await adapter.reinitiateDomainVerification(domain);
+        }
         createDomain(providerId, domain);
         const dnsRecords = await adapter.getDnsRecords(domain);
         const r53Records = dnsRecords.map((r) => ({

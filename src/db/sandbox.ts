@@ -1,6 +1,8 @@
 import type { Database } from "./database.js";
 import type { Attachment } from "../types/index.js";
 import { getDatabase, uuid } from "./database.js";
+import { parseJsonArray, parseJsonObject } from "./json.js";
+import { safeLimit, safeOffset } from "./pagination.js";
 
 export interface SandboxEmail {
   id: string;
@@ -18,6 +20,8 @@ export interface SandboxEmail {
   created_at: string;
 }
 
+export type SandboxEmailSummary = Omit<SandboxEmail, "html" | "text_body" | "headers">;
+
 interface SandboxEmailRow {
   id: string;
   provider_id: string;
@@ -34,20 +38,50 @@ interface SandboxEmailRow {
   created_at: string;
 }
 
+type SandboxEmailSummaryRow = Omit<SandboxEmailRow, "html" | "text_body" | "headers_json">;
+
+const SANDBOX_SUMMARY_COLS = `
+  id,
+  provider_id,
+  from_address,
+  to_addresses,
+  cc_addresses,
+  bcc_addresses,
+  reply_to,
+  subject,
+  attachments_json,
+  created_at
+`;
+
 function rowToEmail(row: SandboxEmailRow): SandboxEmail {
   return {
     id: row.id,
     provider_id: row.provider_id,
     from_address: row.from_address,
-    to_addresses: JSON.parse(row.to_addresses) as string[],
-    cc_addresses: JSON.parse(row.cc_addresses) as string[],
-    bcc_addresses: JSON.parse(row.bcc_addresses) as string[],
+    to_addresses: parseJsonArray<string>(row.to_addresses),
+    cc_addresses: parseJsonArray<string>(row.cc_addresses),
+    bcc_addresses: parseJsonArray<string>(row.bcc_addresses),
     reply_to: row.reply_to,
     subject: row.subject,
     html: row.html,
     text_body: row.text_body,
-    attachments: JSON.parse(row.attachments_json) as Attachment[],
-    headers: JSON.parse(row.headers_json) as Record<string, string>,
+    attachments: parseJsonArray<Attachment>(row.attachments_json),
+    headers: parseJsonObject<Record<string, string>>(row.headers_json),
+    created_at: row.created_at,
+  };
+}
+
+function rowToEmailSummary(row: SandboxEmailSummaryRow): SandboxEmailSummary {
+  return {
+    id: row.id,
+    provider_id: row.provider_id,
+    from_address: row.from_address,
+    to_addresses: parseJsonArray<string>(row.to_addresses),
+    cc_addresses: parseJsonArray<string>(row.cc_addresses),
+    bcc_addresses: parseJsonArray<string>(row.bcc_addresses),
+    reply_to: row.reply_to,
+    subject: row.subject,
+    attachments: parseJsonArray<Attachment>(row.attachments_json),
     created_at: row.created_at,
   };
 }
@@ -101,8 +135,8 @@ export function listSandboxEmails(
   maybeDb?: Database,
 ): SandboxEmail[] {
   const rawOffset = typeof dbOrOffset === "number" ? dbOrOffset : 0;
-  const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.trunc(limit)) : 50;
-  const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.trunc(rawOffset)) : 0;
+  const normalizedLimit = safeLimit(limit);
+  const offset = safeOffset(rawOffset);
   const d = typeof dbOrOffset === "number"
     ? (maybeDb || getDatabase())
     : (dbOrOffset || getDatabase());
@@ -111,13 +145,39 @@ export function listSandboxEmails(
   if (providerId) {
     rows = d.query(
       "SELECT * FROM sandbox_emails WHERE provider_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-    ).all(providerId, safeLimit, offset) as SandboxEmailRow[];
+    ).all(providerId, normalizedLimit, offset) as SandboxEmailRow[];
   } else {
     rows = d.query(
       "SELECT * FROM sandbox_emails ORDER BY created_at DESC LIMIT ? OFFSET ?",
-    ).all(safeLimit, offset) as SandboxEmailRow[];
+    ).all(normalizedLimit, offset) as SandboxEmailRow[];
   }
   return rows.map(rowToEmail);
+}
+
+export function listSandboxEmailSummaries(
+  providerId?: string,
+  limit = 50,
+  dbOrOffset?: Database | number,
+  maybeDb?: Database,
+): SandboxEmailSummary[] {
+  const rawOffset = typeof dbOrOffset === "number" ? dbOrOffset : 0;
+  const normalizedLimit = safeLimit(limit);
+  const offset = safeOffset(rawOffset);
+  const d = typeof dbOrOffset === "number"
+    ? (maybeDb || getDatabase())
+    : (dbOrOffset || getDatabase());
+
+  let rows: SandboxEmailSummaryRow[];
+  if (providerId) {
+    rows = d.query(
+      `SELECT ${SANDBOX_SUMMARY_COLS} FROM sandbox_emails WHERE provider_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    ).all(providerId, normalizedLimit, offset) as SandboxEmailSummaryRow[];
+  } else {
+    rows = d.query(
+      `SELECT ${SANDBOX_SUMMARY_COLS} FROM sandbox_emails ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    ).all(normalizedLimit, offset) as SandboxEmailSummaryRow[];
+  }
+  return rows.map(rowToEmailSummary);
 }
 
 export function getSandboxEmail(id: string, db?: Database): SandboxEmail | null {

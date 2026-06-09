@@ -1,7 +1,7 @@
 import type { Command } from "commander";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import { createAlias, createCatchAll, setGlobalCatchAll, getGlobalCatchAll, ensureDefaultCatchAll, removeAlias, getAlias, listAliases, resolveAlias, CATCH_ALL, ALL_DOMAINS } from "../../db/aliases.js";
-import { handleError } from "../utils.js";
+import { handleError, parseCliPage } from "../utils.js";
 
 function display(a: { local_part: string; domain: string }): string {
   if (a.domain === ALL_DOMAINS) return "*@* (all domains)";
@@ -45,9 +45,11 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
     .command("list")
     .description("List aliases (optionally for one domain), incl. the protected global catch-all")
     .option("--domain <domain>", "Filter by domain")
-    .action((opts: { domain?: string }) => {
+    .option("--limit <n>", "Maximum aliases to show", "50")
+    .option("--offset <n>", "Number of aliases to skip", "0")
+    .action((opts: { domain?: string; limit?: string; offset?: string }) => {
       if (!opts.domain) ensureDefaultCatchAll(); // make sure the protected default exists
-      const aliases = listAliases(opts.domain);
+      const aliases = listAliases(opts.domain, undefined, parseCliPage(opts));
       if (aliases.length === 0) { output([], chalk.dim("No aliases configured.")); return; }
       const lines = [chalk.bold("\nAliases:")];
       for (const a of aliases) {

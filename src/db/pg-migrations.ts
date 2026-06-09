@@ -1,5 +1,5 @@
 /**
- * PostgreSQL migrations for open-emails cloud sync.
+ * PostgreSQL migrations for open-emails remote storage sync.
  *
  * Equivalent of the SQLite migrations in database.ts, translated for PostgreSQL.
  * Each element is a standalone SQL string that must be executed in order.
@@ -546,6 +546,84 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (29) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 30: hot-path composite indexes for bounded list views.
+  `
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_read_arch_recv ON inbound_emails(is_sent, is_read, is_archived, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_star_arch_recv ON inbound_emails(is_sent, is_starred, is_archived, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_arch_recv ON inbound_emails(provider_id, is_sent, is_archived, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_read_arch_recv ON inbound_emails(provider_id, is_sent, is_read, is_archived, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_star_arch_recv ON inbound_emails(provider_id, is_sent, is_starred, is_archived, received_at);
+  CREATE INDEX IF NOT EXISTS idx_emails_provider_sent ON emails(provider_id, sent_at);
+  CREATE INDEX IF NOT EXISTS idx_emails_status_sent ON emails(status, sent_at);
+  CREATE INDEX IF NOT EXISTS idx_emails_provider_status_sent ON emails(provider_id, status, sent_at);
+  CREATE INDEX IF NOT EXISTS idx_emails_from_sent ON emails(from_address, sent_at);
+  CREATE INDEX IF NOT EXISTS idx_events_provider_occurred ON events(provider_id, occurred_at);
+  CREATE INDEX IF NOT EXISTS idx_events_type_occurred ON events(type, occurred_at);
+  CREATE INDEX IF NOT EXISTS idx_events_provider_type_occurred ON events(provider_id, type, occurred_at);
+  INSERT INTO _migrations (id) VALUES (30) ON CONFLICT DO NOTHING;
+  `,
+
+  // Migration 31: denormalized recipient index for inbound mail.
+  `
+  CREATE TABLE IF NOT EXISTS inbound_recipients (
+    inbound_email_id TEXT NOT NULL REFERENCES inbound_emails(id) ON DELETE CASCADE,
+    address TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    PRIMARY KEY (inbound_email_id, address)
+  );
+  CREATE INDEX IF NOT EXISTS idx_inbound_recipients_address ON inbound_recipients(address, inbound_email_id);
+  CREATE INDEX IF NOT EXISTS idx_inbound_recipients_domain ON inbound_recipients(domain, inbound_email_id);
+  CREATE INDEX IF NOT EXISTS idx_inbound_recipients_email ON inbound_recipients(inbound_email_id);
+  INSERT INTO _migrations (id) VALUES (31) ON CONFLICT DO NOTHING;
+  `,
+
+  // Migration 32: standalone inbound message-id index for S3 object dedupe.
+  `
+  CREATE INDEX IF NOT EXISTS idx_inbound_message_id ON inbound_emails(message_id)
+    WHERE message_id IS NOT NULL;
+  INSERT INTO _migrations (id) VALUES (32) ON CONFLICT DO NOTHING;
+  `,
+
+  // Migration 33: scheduler due-enrollment composite index.
+  `
+  CREATE INDEX IF NOT EXISTS idx_enrollments_due ON sequence_enrollments(status, next_send_at, id);
+  INSERT INTO _migrations (id) VALUES (33) ON CONFLICT DO NOTHING;
+  `,
+
+  // Migration 34: scheduler due-email composite index.
+  `
+  CREATE INDEX IF NOT EXISTS idx_scheduled_due ON scheduled_emails(status, scheduled_at, id);
+  INSERT INTO _migrations (id) VALUES (34) ON CONFLICT DO NOTHING;
+  `,
+
+  // Migration 35: expression indexes for display-name sender filters.
+  `
+  CREATE INDEX IF NOT EXISTS idx_emails_sender_canonical_sent ON emails((
+    lower(btrim(CASE
+      WHEN btrim(from_address) ~ '<[^<>]+>' THEN regexp_replace(btrim(from_address), '^.*<([^<>]+)>.*$', '\\1')
+      ELSE rtrim(btrim(from_address), ' >')
+    END))
+  ), sent_at);
+  CREATE INDEX IF NOT EXISTS idx_emails_sender_domain_sent ON emails((
+    split_part(lower(btrim(CASE
+      WHEN btrim(from_address) ~ '<[^<>]+>' THEN regexp_replace(btrim(from_address), '^.*<([^<>]+)>.*$', '\\1')
+      ELSE rtrim(btrim(from_address), ' >')
+    END)), '@', 2)
+  ), sent_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_sender_canonical_recv ON inbound_emails(is_sent, is_archived, (
+    lower(btrim(CASE
+      WHEN btrim(from_address) ~ '<[^<>]+>' THEN regexp_replace(btrim(from_address), '^.*<([^<>]+)>.*$', '\\1')
+      ELSE rtrim(btrim(from_address), ' >')
+    END))
+  ), received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_sender_domain_recv ON inbound_emails(is_sent, is_archived, (
+    split_part(lower(btrim(CASE
+      WHEN btrim(from_address) ~ '<[^<>]+>' THEN regexp_replace(btrim(from_address), '^.*<([^<>]+)>.*$', '\\1')
+      ELSE rtrim(btrim(from_address), ' >')
+    END)), '@', 2)
+  ), received_at);
+  INSERT INTO _migrations (id) VALUES (35) ON CONFLICT DO NOTHING;
+  `,
 
   // Feedback table
   `

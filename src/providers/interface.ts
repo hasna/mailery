@@ -27,6 +27,8 @@ export interface ProviderAdapter {
   getDnsRecords(domain: string): Promise<DnsRecord[]>;
   verifyDomain(domain: string): Promise<{ dkim: DnsStatus; spf: DnsStatus; dmarc: DnsStatus }>;
   addDomain(domain: string): Promise<void>;
+  /** Optional: re-initiate domain identity/DKIM verification and return DNS records to publish. */
+  reinitiateDomainVerification?(domain: string): Promise<DnsRecord[]>;
   /** Optional: set a custom MAIL FROM domain (SES). Returns the mail-from domain used. */
   setMailFrom?(domain: string, mailFromDomain?: string): Promise<string>;
   listAddresses(): Promise<RemoteAddress[]>;

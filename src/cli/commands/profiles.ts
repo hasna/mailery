@@ -1,6 +1,5 @@
 import type { Command } from "commander";
-import chalk from "chalk";
-import { listProfiles } from "../tui/data.js";
+import chalk from "../../lib/chalk-lite.js";
 import { handleError } from "../utils.js";
 
 /**
@@ -13,8 +12,9 @@ export function registerProfilesCommands(program: Command, output: (data: unknow
     .command("profiles")
     .alias("accounts")
     .description("List your email profiles (configured accounts) with their domains + addresses")
-    .action(() => {
+    .action(async () => {
       try {
+        const { listProfiles } = await import("../tui/data.js");
         const profiles = listProfiles();
         if (profiles.length === 0) { output([], chalk.dim("No profiles configured. Add one with 'emails provider add'.")); return; }
         const byProvider = new Map<string, typeof profiles>();

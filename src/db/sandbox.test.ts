@@ -4,6 +4,7 @@ import { createProvider } from "./providers.js";
 import {
   storeSandboxEmail,
   listSandboxEmails,
+  listSandboxEmailSummaries,
   getSandboxEmail,
   clearSandboxEmails,
   getSandboxCount,
@@ -154,6 +155,45 @@ describe("listSandboxEmails", () => {
     const withNegative = listSandboxEmails(undefined, -5, -10, db);
     expect(withNegative.length).toBe(1);
   });
+
+  it("lists summary rows without projecting body or header payloads", () => {
+    const provider = makeProvider();
+    const db = getDatabase();
+    storeSandboxEmail({
+      provider_id: provider.id,
+      from_address: "from@example.com",
+      to_addresses: ["to@example.com"],
+      cc_addresses: [],
+      bcc_addresses: [],
+      reply_to: null,
+      subject: "Large summary",
+      html: `<p>${"large html ".repeat(1000)}</p>`,
+      text_body: "large body ".repeat(1000),
+      attachments: [],
+      headers: { "x-large": "header" },
+    }, db);
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    const [summary] = listSandboxEmailSummaries(provider.id, 1, recordingDb);
+
+    expect(summary?.subject).toBe("Large summary");
+    expect("html" in summary!).toBe(false);
+    expect("text_body" in summary!).toBe(false);
+    expect("headers" in summary!).toBe(false);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).not.toContain("SELECT *");
+    expect(queries[0]).not.toMatch(/\b(html|text_body|headers_json)\b/);
+  });
 });
 
 describe("getSandboxEmail", () => {
@@ -166,6 +206,23 @@ describe("getSandboxEmail", () => {
     expect(found).not.toBeNull();
     expect(found!.id).toBe(stored.id);
     expect(found!.subject).toBe("Find me");
+  });
+
+  it("tolerates malformed recipient, attachment, and header JSON", () => {
+    const provider = makeProvider();
+    const db = getDatabase();
+    const stored = storeSandboxEmail({ provider_id: provider.id, from_address: "a@a.com", to_addresses: ["b@b.com"], cc_addresses: ["c@c.com"], bcc_addresses: ["d@d.com"], reply_to: null, subject: "Bad JSON", html: null, text_body: null, attachments: [{ filename: "a.txt", content: "x" }], headers: { "X-Test": "1" } }, db);
+    db.run(
+      "UPDATE sandbox_emails SET to_addresses = ?, cc_addresses = ?, bcc_addresses = ?, attachments_json = ?, headers_json = ? WHERE id = ?",
+      ["not-json", "{}", "not-json", "not-json", "[]", stored.id],
+    );
+
+    const found = getSandboxEmail(stored.id, db);
+    expect(found?.to_addresses).toEqual([]);
+    expect(found?.cc_addresses).toEqual([]);
+    expect(found?.bcc_addresses).toEqual([]);
+    expect(found?.attachments).toEqual([]);
+    expect(found?.headers).toEqual({});
   });
 
   it("returns null for unknown id", () => {

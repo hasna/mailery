@@ -1,102 +1,15 @@
-import { upsertEvent } from "../db/events.js";
-import { getDatabase } from "../db/database.js";
-import chalk from "chalk";
+import { parseResendWebhook, parseSesWebhook, verifyResendSignature, verifySnsStructure } from "./webhook-events.js";
+import type { WebhookEvent } from "./webhook-events.js";
 
-/**
- * Verify Resend webhook signature (svix-style HMAC-SHA256).
- * Resend sends: svix-id, svix-timestamp, svix-signature headers.
- * The signed content is: `{svix-id}.{svix-timestamp}.{body}`
- */
-export async function verifyResendSignature(
-  body: string,
-  headers: Record<string, string | null>,
-  secret: string,
-): Promise<boolean> {
-  const svixId = headers["svix-id"];
-  const svixTimestamp = headers["svix-timestamp"];
-  const svixSignature = headers["svix-signature"];
-  if (!svixId || !svixTimestamp || !svixSignature) return false;
+export {
+  parseResendWebhook,
+  parseSesWebhook,
+  verifyResendSignature,
+  verifySnsStructure,
+} from "./webhook-events.js";
+export type { WebhookEvent } from "./webhook-events.js";
 
-  // Reject if timestamp is more than 5 minutes old
-  const ts = parseInt(svixTimestamp, 10);
-  if (Math.abs(Date.now() / 1000 - ts) > 300) return false;
-
-  const signedContent = `${svixId}.${svixTimestamp}.${body}`;
-  const secretBytes = Buffer.from(secret.replace(/^whsec_/, ""), "base64");
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey("raw", secretBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(signedContent));
-  const computed = "v1," + Buffer.from(sig).toString("base64");
-
-  // svix-signature may be multiple signatures separated by spaces
-  return svixSignature.split(" ").some(s => s === computed);
-}
-
-/**
- * Verify SES/SNS webhook signature.
- * SNS signs with its own certificate — we do a basic check that the message
- * comes from an SNS source (Type=Notification). Full cert verification requires
- * downloading the cert from AWS which is optional — we at least check the structure.
- */
-export function verifySnsStructure(body: Record<string, unknown>): boolean {
-  // If Type is present, ensure it's an SNS type
-  if (body.Type && body.Type !== "Notification" && body.Type !== "SubscriptionConfirmation") return false;
-  // If TopicArn is present, ensure it's an AWS ARN (arn:aws:sns:...)
-  const topicArn = body.TopicArn as string | undefined;
-  if (topicArn && !topicArn.startsWith("arn:aws")) return false;
-  return true;
-}
-
-export interface WebhookEvent {
-  provider_event_id: string;
-  type: "delivered" | "bounced" | "complained" | "opened" | "clicked";
-  recipient?: string;
-  provider_message_id?: string;
-  occurred_at: string;
-  metadata?: Record<string, unknown>;
-}
-
-export function parseResendWebhook(body: any): WebhookEvent | null {
-  const typeMap: Record<string, string> = {
-    "email.delivered": "delivered",
-    "email.bounced": "bounced",
-    "email.complained": "complained",
-    "email.opened": "opened",
-    "email.clicked": "clicked",
-  };
-  const eventType = typeMap[body.type];
-  if (!eventType) return null;
-  return {
-    provider_event_id: body.data?.email_id || crypto.randomUUID(),
-    type: eventType as WebhookEvent["type"],
-    recipient: Array.isArray(body.data?.to) ? body.data.to[0] : body.data?.to,
-    provider_message_id: body.data?.email_id,
-    occurred_at: body.data?.created_at || new Date().toISOString(),
-    metadata: body.data || {},
-  };
-}
-
-export function parseSesWebhook(body: any): WebhookEvent | null {
-  const typeMap: Record<string, string> = {
-    Delivery: "delivered",
-    Bounce: "bounced",
-    Complaint: "complained",
-  };
-  const eventType = typeMap[body.notificationType];
-  if (!eventType) return null;
-  const messageId = body.mail?.messageId;
-  const recipients = body.mail?.destination || [];
-  return {
-    provider_event_id: body.mail?.messageId || crypto.randomUUID(),
-    type: eventType as WebhookEvent["type"],
-    recipient: recipients[0],
-    provider_message_id: messageId,
-    occurred_at: body.mail?.timestamp || new Date().toISOString(),
-    metadata: body,
-  };
-}
-
-function colorEventType(type: string): string {
+function colorEventType(type: string, chalk: typeof import("chalk").default): string {
   switch (type) {
     case "delivered": return chalk.green(type);
     case "bounced": return chalk.red(type);
@@ -108,8 +21,6 @@ function colorEventType(type: string): string {
 }
 
 export function createWebhookServer(port: number, providerId?: string, webhookSecret?: string) {
-  const db = getDatabase();
-
   const server = Bun.serve({
     port,
     async fetch(req) {
@@ -158,6 +69,10 @@ export function createWebhookServer(port: number, providerId?: string, webhookSe
       const pId = providerId || "webhook";
 
       try {
+        const [{ getDatabase }, { upsertEvent }] = await Promise.all([
+          import("../db/database.js"),
+          import("../db/events.js"),
+        ]);
         upsertEvent(
           {
             provider_id: pId,
@@ -167,15 +82,16 @@ export function createWebhookServer(port: number, providerId?: string, webhookSe
             metadata: event.metadata || {},
             occurred_at: event.occurred_at,
           },
-          db,
+          getDatabase(),
         );
       } catch {
         // If provider_id doesn't exist in providers table, just log
       }
 
       const timestamp = new Date().toLocaleTimeString();
+      const { default: chalk } = await import("chalk");
       console.log(
-        `${chalk.gray(`[${timestamp}]`)} ${colorEventType(event.type)}  ${event.recipient || "unknown"}  ${chalk.dim(event.provider_event_id.slice(0, 12))}`,
+        `${chalk.gray(`[${timestamp}]`)} ${colorEventType(event.type, chalk)}  ${event.recipient || "unknown"}  ${chalk.dim(event.provider_event_id.slice(0, 12))}`,
       );
 
       return new Response("OK", { status: 200 });

@@ -1,26 +1,44 @@
 import type { Stats } from "../types/index.js";
-import { listEvents } from "../db/events.js";
-import type { Database } from "../db/database.js";
+import { getDatabase, type Database } from "../db/database.js";
+import { countValue } from "../db/scalars.js";
+
+function parsePeriodDays(period: string): number {
+  const days = Number.parseInt(period.replace("d", ""), 10);
+  return Number.isFinite(days) && days > 0 ? days : 30;
+}
+
+function roundRate(value: number): number {
+  return Math.round(value * 10) / 10;
+}
 
 export function getLocalStats(providerId?: string, period = "30d", db?: Database): Stats {
-  const days = parseInt(period.replace("d", ""), 10) || 30;
+  const d = db || getDatabase();
+  const days = parsePeriodDays(period);
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const providerClause = providerId ? " AND provider_id = ?" : "";
+  const params = providerId ? [since, providerId, since, providerId] : [since, since];
+  const row = d.query(
+    `SELECT
+       (
+         SELECT COUNT(*)
+           FROM emails
+          WHERE sent_at >= ?${providerClause}
+       ) AS sent,
+       COALESCE(SUM(CASE WHEN type = 'delivered' THEN 1 ELSE 0 END), 0) AS delivered,
+       COALESCE(SUM(CASE WHEN type = 'bounced' THEN 1 ELSE 0 END), 0) AS bounced,
+       COALESCE(SUM(CASE WHEN type = 'complained' THEN 1 ELSE 0 END), 0) AS complained,
+       COALESCE(SUM(CASE WHEN type = 'opened' THEN 1 ELSE 0 END), 0) AS opened,
+       COALESCE(SUM(CASE WHEN type = 'clicked' THEN 1 ELSE 0 END), 0) AS clicked
+     FROM events
+     WHERE occurred_at >= ?${providerClause}`,
+  ).get(...params) as Record<string, unknown> | null;
 
-  const events = listEvents(
-    {
-      provider_id: providerId,
-      since,
-      limit: 10000,
-    },
-    db,
-  );
-
-  const sent = events.length;
-  const delivered = events.filter((e) => e.type === "delivered").length;
-  const bounced = events.filter((e) => e.type === "bounced").length;
-  const complained = events.filter((e) => e.type === "complained").length;
-  const opened = events.filter((e) => e.type === "opened").length;
-  const clicked = events.filter((e) => e.type === "clicked").length;
+  const sent = countValue(row?.sent);
+  const delivered = countValue(row?.delivered);
+  const bounced = countValue(row?.bounced);
+  const complained = countValue(row?.complained);
+  const opened = countValue(row?.opened);
+  const clicked = countValue(row?.clicked);
 
   return {
     provider_id: providerId ?? "all",
@@ -31,9 +49,9 @@ export function getLocalStats(providerId?: string, period = "30d", db?: Database
     complained,
     opened,
     clicked,
-    delivery_rate: sent > 0 ? Math.round((delivered / sent) * 100 * 10) / 10 : 0,
-    bounce_rate: sent > 0 ? Math.round((bounced / sent) * 100 * 10) / 10 : 0,
-    open_rate: delivered > 0 ? Math.round((opened / delivered) * 100 * 10) / 10 : 0,
+    delivery_rate: sent > 0 ? roundRate((delivered / sent) * 100) : 0,
+    bounce_rate: sent > 0 ? roundRate((bounced / sent) * 100) : 0,
+    open_rate: delivered > 0 ? roundRate((opened / delivered) * 100) : 0,
   };
 }
 

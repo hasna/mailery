@@ -1,8 +1,8 @@
 import type { Command } from "commander";
-import chalk from "chalk";
-import { createSendKey, listSendKeys, revokeSendKey, getSendKey, canOwnerSendFrom } from "../../db/send-keys.js";
-import { getOwner, getOwnerByName, listAddressesByOwner } from "../../db/owners.js";
-import { handleError } from "../utils.js";
+import chalk from "../../lib/chalk-lite.js";
+import { createSendKey, listSendKeySummaries, revokeSendKey, getSendKey, canOwnerSendFrom } from "../../db/send-keys.js";
+import { getOwner, getOwnerByName, listAddressesByOwner, listOwnerNamesByIds } from "../../db/owners.js";
+import { handleError, parseCliPage } from "../utils.js";
 
 export function registerSendKeyCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const cmd = program.command("sendkey").description("Scoped send keys — restrict an agent to sending from its own addresses");
@@ -30,9 +30,11 @@ export function registerSendKeyCommands(program: Command, output: (data: unknown
 
   cmd
     .command("list")
-    .description("List send keys (hashes only; tokens are never stored)")
+    .description("List send keys (tokens and hashes are never shown)")
     .option("--owner <owner>", "Filter by owner name or id")
-    .action((opts: { owner?: string }) => {
+    .option("--limit <n>", "Maximum send keys to show", "50")
+    .option("--offset <n>", "Number of send keys to skip", "0")
+    .action((opts: { owner?: string; limit?: string; offset?: string }) => {
       try {
         let ownerId: string | undefined;
         if (opts.owner) {
@@ -40,13 +42,13 @@ export function registerSendKeyCommands(program: Command, output: (data: unknown
           if (!o) return handleError(new Error(`Owner not found: ${opts.owner}`));
           ownerId = o.id;
         }
-        const keys = listSendKeys(ownerId);
+        const keys = listSendKeySummaries(ownerId, undefined, parseCliPage(opts));
         if (keys.length === 0) { output([], chalk.dim("No send keys.")); return; }
+        const ownerNames = listOwnerNamesByIds(keys.map((key) => key.owner_id));
         const lines = [chalk.bold("\nSend keys:")];
         for (const k of keys) {
-          const o = getOwner(k.owner_id);
           const status = k.revoked_at ? chalk.red("revoked") : chalk.green("active");
-          lines.push(`  ${chalk.cyan(k.id.slice(0, 8))} ${k.prefix}…  ${o?.name ?? k.owner_id.slice(0, 8)}  [${status}]${k.label ? `  ${chalk.dim(k.label)}` : ""}`);
+          lines.push(`  ${chalk.cyan(k.id.slice(0, 8))} ${k.prefix}…  ${ownerNames.get(k.owner_id) ?? k.owner_id.slice(0, 8)}  [${status}]${k.label ? `  ${chalk.dim(k.label)}` : ""}`);
         }
         output(keys, lines.join("\n"));
       } catch (e) { handleError(e); }

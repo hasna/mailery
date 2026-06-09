@@ -3,11 +3,15 @@
  * exercised by `emails inbox` subcommands.
  */
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { getDatabase, resetDatabase, closeDatabase, uuid, getDataDir } from "../../db/database.js";
 import { storeInboundEmail, listInboundEmails, getInboundEmail, getInboundCount, clearInboundEmails } from "../../db/inbound.js";
 import { getGmailSyncState, updateLastSynced, setGmailSyncState } from "../../db/gmail-sync-state.js";
+import { createAddress } from "../../db/addresses.js";
+import { createDomain } from "../../db/domains.js";
+import { createProvider } from "../../db/providers.js";
+import { setAddressProvisioning, setDomainProvisioning } from "../../db/provisioning.js";
 import { saveConfig } from "../../lib/config.js";
 
 // ─── Mock @hasna/connectors before any gmail-sync imports ─────────────────────
@@ -34,6 +38,9 @@ const mockRun = mock(async (operationArgs: {
 });
 
 mock.module("@hasna/connectors", () => ({ runConnectorOperation: mockRun }));
+
+const mockAutoPull = mock(async () => ({ pulled: 0, ok: true, configured: true }));
+mock.module("../tui/autopull.js", () => ({ autoPull: mockAutoPull }));
 
 const { syncGmailInbox } = await import("../../lib/gmail-sync.js");
 const { registerInboxCommands } = await import("./inbox.js");
@@ -93,6 +100,8 @@ async function runInboxCommand(args: string[]) {
 
 beforeEach(() => {
   mockListMsgs = [];
+  mockAutoPull.mockReset();
+  mockAutoPull.mockImplementation(async () => ({ pulled: 0, ok: true, configured: true }));
   mockRun.mockReset();
   mockRun.mockImplementation(async (operationArgs: {
     operation: string;
@@ -193,11 +202,13 @@ describe("inbox list — listInboundEmails", () => {
     }, db);
     mk("to-elyra", ["el@elyratelier.com"]);
     mk("to-holy", ["ap@holypaper.com"]);
+    mk("to-display", ['"Display Name" <display@elyratelier.com>']);
 
     // exact address
     expect(listInboundEmails({ recipients: ["el@elyratelier.com"] }, db).map((e) => e.subject)).toEqual(["to-elyra"]);
+    expect(listInboundEmails({ recipients: ["display@elyratelier.com"] }, db).map((e) => e.subject)).toEqual(["to-display"]);
     // bare domain (catch-all routing) — case-insensitive
-    expect(listInboundEmails({ recipientDomains: ["ELYRATELIER.COM"] }, db).map((e) => e.subject)).toEqual(["to-elyra"]);
+    expect(listInboundEmails({ recipientDomains: ["ELYRATELIER.COM"] }, db).map((e) => e.subject).sort()).toEqual(["to-display", "to-elyra"]);
     expect(listInboundEmails({ recipientDomains: ["holypaper.com"] }, db).map((e) => e.subject)).toEqual(["to-holy"]);
   });
 
@@ -218,6 +229,143 @@ describe("inbox list — listInboundEmails", () => {
     setupDb();
     const emails = listInboundEmails();
     expect(emails).toHaveLength(0);
+  });
+
+  it("explains display-name recipients as normalized addresses", async () => {
+    const { db, providerId } = setupDb();
+    const email = storeInboundEmail({
+      provider_id: providerId,
+      message_id: "display-explain",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ['"Me" <me@example.com>'],
+      cc_addresses: [],
+      subject: "Display explain",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const { out } = await runInboxCommand(["inbox", "explain", email.id]);
+
+    expect(out).toContain("To:       me@example.com");
+  });
+
+  it("explains only matching address and domain configuration", async () => {
+    const { db, providerId } = setupDb();
+    const targetDomain = createDomain(providerId, "example.com", db);
+    const targetAddress = createAddress({ provider_id: providerId, email: "me@example.com" }, db);
+    const sameDomainAddress = createAddress({ provider_id: providerId, email: "other@example.com" }, db);
+    setDomainProvisioning(targetDomain.id, { provisioning_status: "ready" }, db);
+    setAddressProvisioning(targetAddress.id, { domain_id: targetDomain.id, provisioning_status: "ready" }, db);
+    setAddressProvisioning(sameDomainAddress.id, { domain_id: targetDomain.id, provisioning_status: "ready" }, db);
+
+    const otherProvider = createProvider({ name: "Other", type: "ses" }, db);
+    const otherDomain = createDomain(otherProvider.id, "other.com", db);
+    const otherAddress = createAddress({ provider_id: otherProvider.id, email: "other@other.com" }, db);
+    setDomainProvisioning(otherDomain.id, { provisioning_status: "ready" }, db);
+    setAddressProvisioning(otherAddress.id, { domain_id: otherDomain.id, provisioning_status: "ready" }, db);
+
+    const email = storeInboundEmail({
+      provider_id: providerId,
+      message_id: "scoped-explain",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ['"Me" <ME@example.com>'],
+      cc_addresses: [],
+      subject: "Scoped explain",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const originalQuery = db.query;
+    const queries: string[] = [];
+    db.query = ((sql: string) => {
+      queries.push(sql);
+      return originalQuery.call(db, sql);
+    }) as typeof db.query;
+
+    let resultData: unknown;
+    let out = "";
+    try {
+      const result = await runInboxCommand(["inbox", "explain", email.id]);
+      resultData = result.data;
+      out = result.out;
+    } finally {
+      db.query = originalQuery;
+    }
+    const data = resultData;
+    const result = data as {
+      recipients: Array<{
+        recipient: string;
+        configured_addresses: Array<{
+          id: string;
+          provider_name: string | null;
+          provisioning: { domain_id: string | null; provisioning_status: string } | null;
+        }>;
+        domains: Array<{
+          id: string;
+          provider_name: string | null;
+          readiness: { ready_addresses: number; receive_ready: boolean };
+        }>;
+      }>;
+    };
+
+    const recipient = result.recipients[0]!;
+    expect(recipient.recipient).toBe("me@example.com");
+    expect(recipient.configured_addresses.map((address) => address.id)).toEqual([targetAddress.id]);
+    expect(recipient.configured_addresses[0]?.provider_name).toBe("Gmail Test");
+    expect(recipient.configured_addresses[0]?.provisioning?.domain_id).toBe(targetDomain.id);
+    expect(recipient.domains.map((domain) => domain.id)).toEqual([targetDomain.id]);
+    expect(recipient.domains[0]?.provider_name).toBe("Gmail Test");
+    expect(recipient.domains[0]?.readiness.ready_addresses).toBe(2);
+    expect(recipient.domains[0]?.readiness.receive_ready).toBe(true);
+
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain(otherAddress.id);
+    expect(serialized).not.toContain(otherDomain.id);
+    expect(out).toContain(targetAddress.id.slice(0, 8));
+    expect(out).not.toContain(otherAddress.id.slice(0, 8));
+
+    const providerQueries = queries.filter((sql) => sql.includes("FROM providers"));
+    expect(providerQueries.join("\n")).not.toContain("SELECT *");
+    expect(providerQueries.join("\n")).not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_secret|oauth_refresh_token|oauth_access_token)\b/);
+    const inboundQueries = queries.filter((sql) => sql.includes("FROM inbound_emails"));
+    expect(inboundQueries.join("\n")).not.toContain("SELECT *");
+    expect(inboundQueries.join("\n")).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
+    expect(queries.some((sql) => sql.includes("FROM address_ownership_events"))).toBe(false);
+    expect(queries.some((sql) => sql.includes("FROM addresses") && sql.includes("WHERE id IN ("))).toBe(true);
+    expect(queries.some((sql) => sql.includes("FROM domains") && sql.includes("WHERE id IN ("))).toBe(true);
+    expect(queries.some((sql) => sql.includes("COUNT(*)") && sql.includes("domain_id IN ("))).toBe(true);
+  });
+});
+
+// ─── archive migration command contract ──────────────────────────────────────
+
+describe("inbox archive-migrate contract", () => {
+  it("supports bounded continuation-token resumes and target-region clients", () => {
+    const source = readFileSync(join(import.meta.dir, "inbox.ts"), "utf8");
+    expect(source).toContain('.option("--continuation-token <token>"');
+    expect(source).toContain("continuationToken: opts.continuationToken");
+    expect(source).toContain("targetRegion !== opts.region");
+    expect(source).toContain("getDefaultGmailArchiveS3Region()");
+  });
+
+  it("does not resolve archive config defaults during command registration", () => {
+    const source = readFileSync(join(import.meta.dir, "inbox.ts"), "utf8");
+    expect(source).not.toContain('from "../../lib/config.js"');
+    expect(source).not.toContain("const defaultGmailArchiveBucket = getDefaultGmailArchiveS3Bucket()");
+    expect(source).not.toContain("const defaultGmailArchiveRegion = getDefaultGmailArchiveS3Region()");
+    expect(source).toContain('import("../../lib/config.js")');
   });
 });
 
@@ -266,6 +414,104 @@ describe("inbox search — local filter", () => {
     const results = all.filter(e => e.subject.toLowerCase().includes(q) || e.from_address.toLowerCase().includes(q));
     expect(results).toHaveLength(0);
   });
+
+  it("searches before applying the result limit", async () => {
+    const { db, providerId } = setupDb();
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "recent-unrelated",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["recent@example.com"],
+      cc_addresses: [],
+      subject: "Recent unrelated",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:30:09.000Z",
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "older-match",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["target@example.com"],
+      cc_addresses: [],
+      subject: "Older match",
+      text_body: "contains needle",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const { data } = await runInboxCommand(["inbox", "search", "needle", "--limit", "1"]);
+
+    expect((data as Array<{ subject: string }>).map((email) => email.subject)).toEqual(["Older match"]);
+  });
+
+  it("paginates local search results with offset after filtering", async () => {
+    const { db, providerId } = setupDb();
+    for (let i = 1; i <= 4; i++) {
+      storeInboundEmail({
+        provider_id: providerId,
+        message_id: `paged-search-${i}`,
+        in_reply_to_email_id: null,
+        from_address: "sender@example.com",
+        to_addresses: ["target@example.com"],
+        cc_addresses: [],
+        subject: `Paged needle ${i}`,
+        text_body: "contains needle",
+        html_body: null,
+        attachments: [],
+        attachment_paths: [],
+        headers: {},
+        raw_size: 100,
+        received_at: `2026-06-04T11:0${i}:00.000Z`,
+      }, db);
+    }
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "paged-search-unrelated",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["target@example.com"],
+      cc_addresses: [],
+      subject: "Newest unrelated",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:05:00.000Z",
+    }, db);
+
+    const { data } = await runInboxCommand(["inbox", "search", "needle", "--limit", "2", "--offset", "1"]);
+    const emails = data as Array<Record<string, unknown>>;
+
+    expect(emails.map((email) => email.subject)).toEqual([
+      "Paged needle 3",
+      "Paged needle 2",
+    ]);
+    expect(emails[0]).not.toHaveProperty("text_body");
+    expect(emails[0]).not.toHaveProperty("html_body");
+    expect(emails[0]).not.toHaveProperty("headers");
+  });
+
+  it("caps remote Gmail search limit before calling the connector", async () => {
+    setupDb();
+
+    await runInboxCommand(["inbox", "search", "needle", "--remote", "--limit", "100000"]);
+
+    const listCall = mockRun.mock.calls.find((call) => call[0]?.operation === "messages.list");
+    expect(listCall?.[0]?.input).toMatchObject({ query: "needle", max: 1000 });
+  });
 });
 
 describe("inbox code", () => {
@@ -286,6 +532,23 @@ describe("inbox code", () => {
       headers: {},
       raw_size: 100,
       received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "openai-sent-code",
+      in_reply_to_email_id: null,
+      from_address: '"ChatGPT" <noreply@tm.openai.com>',
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Your temporary ChatGPT verification code",
+      text_body: "Enter this temporary verification code to continue:\n\n999999",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      label_ids: ["SENT"],
+      raw_size: 100,
+      received_at: "2026-06-04T11:30:09.000Z",
     }, db);
 
     const { out, data } = await runInboxCommand(["inbox", "code", "me@example.com", "--no-refresh", "--from", "openai"]);
@@ -319,6 +582,32 @@ describe("inbox code", () => {
     expect(data).toMatchObject({ code: "123456", confidence: "high" });
   });
 
+  it("wait-code checks local mail before refreshing", async () => {
+    const { db, providerId } = setupDb();
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "code-local-first",
+      in_reply_to_email_id: null,
+      from_address: "security@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Verification code",
+      text_body: "Your code is 456789",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const { out, data } = await runInboxCommand(["inbox", "wait-code", "me@example.com", "--timeout", "1"]);
+
+    expect(out).toBe("456789");
+    expect(data).toMatchObject({ code: "456789", confidence: "high" });
+    expect(mockAutoPull).toHaveBeenCalledTimes(0);
+  });
+
   it("latest returns the newest matching local email", async () => {
     const { db, providerId } = setupDb();
     storeInboundEmail({
@@ -342,6 +631,56 @@ describe("inbox code", () => {
 
     expect(out).toContain("Latest local mail");
     expect(data).toMatchObject({ subject: "Latest local mail" });
+  });
+
+  it("latest applies from and subject filters before the result limit", async () => {
+    const { db, providerId } = setupDb();
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "recent-noise",
+      in_reply_to_email_id: null,
+      from_address: "updates@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Recent noise",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:30:09.000Z",
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "older-target",
+      in_reply_to_email_id: null,
+      from_address: "security@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Target login alert",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const { data } = await runInboxCommand([
+      "inbox",
+      "latest",
+      "me@example.com",
+      "--from",
+      "security",
+      "--subject",
+      "target",
+      "--limit",
+      "1",
+    ]);
+
+    expect(data).toMatchObject({ subject: "Target login alert", from_address: "security@example.com" });
   });
 
   it("unread-count groups unread messages by recipient address", async () => {
@@ -378,14 +717,213 @@ describe("inbox code", () => {
       raw_size: 100,
       received_at: "2026-06-04T11:30:09.000Z",
     }, db);
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "unread-display",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ['"One" <one@example.com>'],
+      cc_addresses: [],
+      subject: "Unread display",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:31:09.000Z",
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "sent-one",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["one@example.com"],
+      cc_addresses: [],
+      subject: "Sent one",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      label_ids: ["SENT"],
+      raw_size: 100,
+      received_at: "2026-06-04T11:32:09.000Z",
+    }, db);
 
     const { data, out } = await runInboxCommand(["inbox", "unread-count", "--by-address"]);
 
     expect(out).toContain("one@example.com");
     expect(out).toContain("two@example.com");
     expect(data).toEqual([
-      { address: "one@example.com", unread: 1 },
+      { address: "one@example.com", unread: 2 },
       { address: "two@example.com", unread: 1 },
+    ]);
+  });
+
+  it("unread-count by address paginates grouped results in SQL", async () => {
+    const { db, providerId } = setupDb();
+    const counts = new Map([
+      ["alpha@example.com", 4],
+      ["bravo@example.com", 3],
+      ["charlie@example.com", 2],
+      ["delta@example.com", 1],
+    ]);
+    for (const [address, count] of counts) {
+      for (let i = 0; i < count; i++) {
+        storeInboundEmail({
+          provider_id: providerId,
+          message_id: `unread-page-${address}-${i}`,
+          in_reply_to_email_id: null,
+          from_address: "sender@example.com",
+          to_addresses: [i === 0 ? `"${address}" <${address}>` : address],
+          cc_addresses: [],
+          subject: `Unread page ${address} ${i}`,
+          text_body: "body",
+          html_body: null,
+          attachments: [],
+          attachment_paths: [],
+          headers: {},
+          raw_size: 100,
+          received_at: `2026-06-04T11:${String(20 + i).padStart(2, "0")}:09.000Z`,
+        }, db);
+      }
+    }
+
+    const originalQuery = db.query;
+    const queries: string[] = [];
+    db.query = ((sql: string) => {
+      queries.push(sql);
+      return originalQuery.call(db, sql);
+    }) as typeof db.query;
+
+    let data: unknown;
+    try {
+      data = (await runInboxCommand(["inbox", "unread-count", "--by-address", "--limit", "2", "--offset", "1"])).data;
+    } finally {
+      db.query = originalQuery;
+    }
+
+    expect(data).toEqual([
+      { address: "bravo@example.com", unread: 3 },
+      { address: "charlie@example.com", unread: 2 },
+    ]);
+    const unreadQuery = queries.find((sql) => sql.includes("inbound_recipients") && sql.includes("COUNT(*) AS unread"));
+    expect(unreadQuery).toBeTruthy();
+    expect(unreadQuery ?? "").toContain("GROUP BY");
+    expect(unreadQuery ?? "").toContain("LIMIT ? OFFSET ?");
+  });
+
+  it("realtime-status reports received inbox mail without synced SENT rows", async () => {
+    const { db, providerId } = setupDb();
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "received-status",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Received status",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "sent-status",
+      in_reply_to_email_id: null,
+      from_address: "me@example.com",
+      to_addresses: ["client@example.com"],
+      cc_addresses: [],
+      subject: "Sent status",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      label_ids: ["SENT"],
+      raw_size: 100,
+      received_at: "2026-06-04T11:30:09.000Z",
+    }, db);
+
+    const { data, out } = await runInboxCommand(["inbox", "realtime-status"]);
+
+    expect(data).toMatchObject({
+      total_inbound_emails: 1,
+      unread_inbound_emails: 1,
+      last_received_at: "2026-06-04T11:29:09.000Z",
+    });
+    expect(out).toContain("1 total, 1 unread");
+    expect(out).toContain("2026-06-04T11:29:09.000Z");
+    expect(out).not.toContain("2026-06-04T11:30:09.000Z");
+  });
+
+  it("mark-read returns a summary without body or header payloads", async () => {
+    const { db, providerId } = setupDb();
+    const email = storeInboundEmail({
+      provider_id: providerId,
+      message_id: "mark-read-summary",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Mark read summary",
+      text_body: "large body ".repeat(1000),
+      html_body: `<p>${"large html ".repeat(1000)}</p>`,
+      attachments: [],
+      attachment_paths: [],
+      headers: { "x-large": "header" },
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const { data, out } = await runInboxCommand(["inbox", "mark-read", email.id]);
+    const row = data as Record<string, unknown>;
+
+    expect(out).toContain("Marked read");
+    expect(row.id).toBe(email.id);
+    expect(row.is_read).toBe(true);
+    expect(row).not.toHaveProperty("text_body");
+    expect(row).not.toHaveProperty("html_body");
+    expect(row).not.toHaveProperty("headers");
+    expect(getInboundEmail(email.id, db)?.is_read).toBe(true);
+  });
+});
+
+describe("inbox attachment", () => {
+  it("lists attachment paths by partial inbound id and filename", async () => {
+    const { db, providerId } = setupDb();
+    const email = storeInboundEmail({
+      provider_id: providerId,
+      message_id: "attachment-row",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "Has attachments",
+      text_body: "large body ".repeat(1000),
+      html_body: `<p>${"large html ".repeat(1000)}</p>`,
+      attachments: [
+        { filename: "invoice.pdf", content_type: "application/pdf", size: 2048 },
+        { filename: "notes.txt", content_type: "text/plain", size: 12 },
+      ],
+      attachment_paths: [
+        { filename: "invoice.pdf", content_type: "application/pdf", size: 2048, local_path: "/tmp/invoice.pdf" },
+        { filename: "notes.txt", content_type: "text/plain", size: 12, local_path: "/tmp/notes.txt" },
+      ],
+      headers: { "x-large": "header" },
+      raw_size: 100,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const { data } = await runInboxCommand(["inbox", "attachment", email.id.slice(0, 8), "--filename", "invoice.pdf"]);
+
+    expect(data).toEqual([
+      { filename: "invoice.pdf", content_type: "application/pdf", size: 2048, local_path: "/tmp/invoice.pdf" },
     ]);
   });
 });
@@ -393,6 +931,24 @@ describe("inbox code", () => {
 // ─── inbox sync (via syncGmailInbox) ─────────────────────────────────────────
 
 describe("inbox sync — syncGmailInbox", () => {
+  it("defaults invalid sync limits before calling the Gmail connector", async () => {
+    setupDb();
+
+    await runInboxCommand(["inbox", "sync", "--limit", "not-a-number", "--concurrency", "not-a-number"]);
+
+    const listCall = mockRun.mock.calls.find((call) => call[0]?.operation === "messages.list");
+    expect(listCall?.[0]?.input).toMatchObject({ max: 50 });
+  });
+
+  it("caps oversized sync limits before calling the Gmail connector", async () => {
+    setupDb();
+
+    await runInboxCommand(["inbox", "sync", "--limit", "100000"]);
+
+    const listCall = mockRun.mock.calls.find((call) => call[0]?.operation === "messages.list");
+    expect(listCall?.[0]?.input).toMatchObject({ max: 1000 });
+  });
+
   it("stores downloaded attachments as local_path when S3 storage is disabled", async () => {
     const { db, providerId } = setupDb();
     mkdirSync(TMP_HOME, { recursive: true });

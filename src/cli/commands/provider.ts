@@ -1,13 +1,12 @@
 import type { Command } from "commander";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createProvider, listProviders, deleteProvider, getProvider, updateProvider } from "../../db/providers.js";
+import { createProvider, listProviders, listProviderSummaries, deleteProvider, getProvider, updateProvider } from "../../db/providers.js";
 import { createAddress } from "../../db/addresses.js";
 import { getAdapter } from "../../providers/index.js";
-import { checkAllProviders, formatProviderHealth } from "../../lib/health.js";
 import { log } from "../../lib/logger.js";
-import { confirmDestructiveAction, handleError, resolveId } from "../utils.js";
+import { confirmDestructiveAction, handleError, parseCliPage, resolveId } from "../utils.js";
 
 export function registerProviderCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const providerCmd = program.command("provider").description("Manage email providers");
@@ -107,9 +106,11 @@ export function registerProviderCommands(program: Command, output: (data: unknow
   providerCmd
     .command("list")
     .description("List configured providers")
-    .action(() => {
+    .option("--limit <n>", "Maximum providers to show", "50")
+    .option("--offset <n>", "Number of providers to skip", "0")
+    .action((opts: { limit?: string; offset?: string }) => {
       try {
-        const providers = listProviders();
+        const providers = listProviderSummaries(undefined, parseCliPage(opts));
         if (providers.length === 0) {
           output([], chalk.dim("No providers configured. Use 'emails provider add' to add one."));
           return;
@@ -245,6 +246,7 @@ export function registerProviderCommands(program: Command, output: (data: unknow
     .description("Health check all active providers")
     .action(async () => {
       try {
+        const { checkAllProviders, formatProviderHealth } = await import("../../lib/health.js");
         const results = await checkAllProviders();
         if (results.length === 0) {
           output([], chalk.dim("No active providers. Add one with 'emails provider add'"));

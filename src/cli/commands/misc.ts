@@ -1,20 +1,210 @@
 import type { Command } from "commander";
-import chalk from "chalk";
-import { listScheduledEmails, cancelScheduledEmail, getDueEmails, markSent, markFailed } from "../../db/scheduled.js";
-import { getProvider } from "../../db/providers.js";
+import chalk from "../../lib/chalk-lite.js";
+import type { Database } from "../../db/database.js";
+import type { Provider, SendEmailOptions } from "../../types/index.js";
+import type { Template } from "../../db/templates.js";
+import type { ProviderAdapter } from "../../providers/interface.js";
+import { listScheduledEmailSummaries, cancelScheduledEmail, getDueEmails, markSent, markFailed } from "../../db/scheduled.js";
+import { getActiveProvider, getLatestActiveProviderId, getProvider } from "../../db/providers.js";
 import { createEmail } from "../../db/emails.js";
 import { getTemplate, renderTemplate } from "../../db/templates.js";
-import { listProviders } from "../../db/providers.js";
 import { getAdapter } from "../../providers/index.js";
-import { batchSend } from "../../lib/batch.js";
-import { generateBashCompletion, generateZshCompletion, generateFishCompletion } from "../../lib/completion.js";
-import { runDiagnostics, formatDiagnostics } from "../../lib/doctor.js";
-import { diagnoseInboundDelivery, formatDeliveryDoctorReport } from "../../lib/delivery-doctor.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import {
-  getDueEnrollments, advanceEnrollment, listSteps,
+  getDueEnrollments, advanceEnrollment, getStepAtIndex,
 } from "../../db/sequences.js";
-import { handleError, resolveId, parseDuration } from "../utils.js";
+import { handleError, resolveId, parseDuration, parseCliPage } from "../utils.js";
+
+const SCHEDULED_EMAIL_BATCH_SIZE = 100;
+const SEQUENCE_SCHEDULER_BATCH_SIZE = 100;
+
+type SchedulerLog = (message: string) => void;
+
+export interface SchedulerTickResult {
+  scheduled: { attempted: number; sent: number; failed: number; skipped: number };
+  sequences: { attempted: number; sent: number; failed: number; skipped: number };
+}
+
+interface SchedulerTickOptions {
+  scheduledLimit?: number;
+  sequenceLimit?: number;
+  log?: SchedulerLog;
+}
+
+interface SchedulerTickCache {
+  db: Database;
+  providers: Map<string, Provider | null>;
+  adapters: Map<string, ProviderAdapter>;
+  templates: Map<string, Template | null>;
+  fromAddresses: Map<string, string | null>;
+  defaultProvider?: Provider | null;
+}
+
+function schedulerCache(db: Database): SchedulerTickCache {
+  return {
+    db,
+    providers: new Map(),
+    adapters: new Map(),
+    templates: new Map(),
+    fromAddresses: new Map(),
+  };
+}
+
+function emptyBatchResult() {
+  return { attempted: 0, sent: 0, failed: 0, skipped: 0 };
+}
+
+function getCachedProvider(cache: SchedulerTickCache, providerId: string): Provider | null {
+  if (!cache.providers.has(providerId)) {
+    cache.providers.set(providerId, getProvider(providerId, cache.db));
+  }
+  return cache.providers.get(providerId) ?? null;
+}
+
+function getCachedDefaultProvider(cache: SchedulerTickCache): Provider | null {
+  if (cache.defaultProvider !== undefined) return cache.defaultProvider;
+  try {
+    cache.defaultProvider = getActiveProvider(cache.db);
+  } catch {
+    cache.defaultProvider = null;
+  }
+  return cache.defaultProvider;
+}
+
+function getCachedAdapter(cache: SchedulerTickCache, provider: Provider): ProviderAdapter {
+  const cached = cache.adapters.get(provider.id);
+  if (cached) return cached;
+  const adapter = getAdapter(provider);
+  cache.adapters.set(provider.id, adapter);
+  return adapter;
+}
+
+function getCachedTemplate(cache: SchedulerTickCache, name: string): Template | null {
+  if (!cache.templates.has(name)) {
+    cache.templates.set(name, getTemplate(name, cache.db));
+  }
+  return cache.templates.get(name) ?? null;
+}
+
+function getCachedFromAddress(cache: SchedulerTickCache, providerId: string): string | null {
+  if (!cache.fromAddresses.has(providerId)) {
+    const row = cache.db.query("SELECT email FROM addresses WHERE provider_id = ? LIMIT 1").get(providerId) as { email: string } | null;
+    cache.fromAddresses.set(providerId, row?.email ?? null);
+  }
+  return cache.fromAddresses.get(providerId) ?? null;
+}
+
+async function processDueScheduledEmails(cache: SchedulerTickCache, log: SchedulerLog, limit: number) {
+  const result = emptyBatchResult();
+  const due = getDueEmails({ limit }, cache.db);
+  result.attempted = due.length;
+
+  for (const scheduled of due) {
+    try {
+      const provider = getCachedProvider(cache, scheduled.provider_id);
+      if (!provider) {
+        markFailed(scheduled.id, "Provider not found", cache.db);
+        result.failed++;
+        continue;
+      }
+
+      const sendOpts: SendEmailOptions = {
+        from: scheduled.from_address,
+        to: scheduled.to_addresses,
+        cc: scheduled.cc_addresses.length > 0 ? scheduled.cc_addresses : undefined,
+        bcc: scheduled.bcc_addresses.length > 0 ? scheduled.bcc_addresses : undefined,
+        reply_to: scheduled.reply_to || undefined,
+        subject: scheduled.subject,
+        html: scheduled.html || undefined,
+        text: scheduled.text_body || undefined,
+      };
+      const messageId = await getCachedAdapter(cache, provider).sendEmail(sendOpts);
+      createEmail(scheduled.provider_id, sendOpts, messageId, cache.db);
+      markSent(scheduled.id, cache.db);
+      result.sent++;
+      log(chalk.green(`✓ Sent scheduled email ${scheduled.id.slice(0, 8)} to ${scheduled.to_addresses.join(", ")}`));
+    } catch (err) {
+      markFailed(scheduled.id, err instanceof Error ? err.message : String(err), cache.db);
+      result.failed++;
+      log(chalk.red(`✗ Failed scheduled email ${scheduled.id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`));
+    }
+  }
+
+  return result;
+}
+
+async function processDueSequenceEnrollments(cache: SchedulerTickCache, log: SchedulerLog, limit: number) {
+  const result = emptyBatchResult();
+  const dueEnrollments = getDueEnrollments({ limit }, cache.db);
+  result.attempted = dueEnrollments.length;
+
+  for (const enrollment of dueEnrollments) {
+    try {
+      const stepIndex = enrollment.current_step;
+      const step = getStepAtIndex(enrollment.sequence_id, stepIndex, cache.db);
+      if (!step) {
+        advanceEnrollment(enrollment.id, cache.db);
+        result.skipped++;
+        continue;
+      }
+
+      const template = getCachedTemplate(cache, step.template_name);
+      if (!template) {
+        log(chalk.yellow(`⚠ Template not found for sequence step: ${step.template_name}`));
+        advanceEnrollment(enrollment.id, cache.db);
+        result.skipped++;
+        continue;
+      }
+
+      const provider = enrollment.provider_id
+        ? getCachedProvider(cache, enrollment.provider_id)
+        : getCachedDefaultProvider(cache);
+      if (!provider) {
+        log(chalk.yellow(`⚠ No provider for sequence enrollment ${enrollment.id.slice(0, 8)}`));
+        result.skipped++;
+        continue;
+      }
+
+      let from = step.from_address || "";
+      if (!from) from = getCachedFromAddress(cache, provider.id) ?? "";
+      if (!from) {
+        log(chalk.yellow(`⚠ No from address for sequence step ${step.id.slice(0, 8)}`));
+        advanceEnrollment(enrollment.id, cache.db);
+        result.skipped++;
+        continue;
+      }
+
+      const vars: Record<string, string> = { email: enrollment.contact_email };
+      const sendOpts: SendEmailOptions = {
+        from,
+        to: [enrollment.contact_email],
+        subject: renderTemplate(step.subject_override || template.subject_template, vars),
+        html: template.html_template ? renderTemplate(template.html_template, vars) : undefined,
+        text: template.text_template ? renderTemplate(template.text_template, vars) : undefined,
+      };
+
+      const messageId = await getCachedAdapter(cache, provider).sendEmail(sendOpts);
+      createEmail(provider.id, sendOpts, messageId, cache.db);
+      advanceEnrollment(enrollment.id, cache.db);
+      result.sent++;
+      log(chalk.green(`✓ Sent sequence step ${step.step_number} to ${enrollment.contact_email}`));
+    } catch (err) {
+      result.failed++;
+      log(chalk.red(`✗ Failed sequence enrollment ${enrollment.id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`));
+    }
+  }
+
+  return result;
+}
+
+export async function runSchedulerTick(opts: SchedulerTickOptions = {}): Promise<SchedulerTickResult> {
+  const cache = schedulerCache(getDatabase());
+  const log = opts.log ?? (() => {});
+  return {
+    scheduled: await processDueScheduledEmails(cache, log, opts.scheduledLimit ?? SCHEDULED_EMAIL_BATCH_SIZE),
+    sequences: await processDueSequenceEnrollments(cache, log, opts.sequenceLimit ?? SEQUENCE_SCHEDULER_BATCH_SIZE),
+  };
+}
 
 export function registerMiscCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   // ─── SCHEDULE ───────────────────────────────────────────────────────────────
@@ -27,10 +217,15 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .command("list")
     .description("List scheduled emails")
     .option("--status <status>", "Filter by status: pending|sent|cancelled|failed")
-    .action((opts: { status?: string }) => {
+    .option("--limit <n>", "Maximum scheduled emails to show", "50")
+    .option("--offset <n>", "Number of scheduled emails to skip", "0")
+    .action((opts: { status?: string; limit?: string; offset?: string }) => {
       try {
         const status = opts.status as "pending" | "sent" | "cancelled" | "failed" | undefined;
-        const emails = listScheduledEmails(status ? { status } : undefined);
+        const emails = listScheduledEmailSummaries({
+          ...(status ? { status } : {}),
+          ...parseCliPage(opts),
+        });
         if (emails.length === 0) {
           console.log(chalk.dim("No scheduled emails."));
           return;
@@ -70,10 +265,15 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .command("list")
     .description("List scheduled emails")
     .option("--status <status>", "Filter: pending|sent|cancelled|failed")
-    .action((opts: { status?: string }) => {
+    .option("--limit <n>", "Maximum scheduled emails to show", "50")
+    .option("--offset <n>", "Number of scheduled emails to skip", "0")
+    .action((opts: { status?: string; limit?: string; offset?: string }) => {
       try {
         const status = opts.status as "pending" | "sent" | "cancelled" | "failed" | undefined;
-        const emails = listScheduledEmails(status ? { status } : undefined);
+        const emails = listScheduledEmailSummaries({
+          ...(status ? { status } : {}),
+          ...parseCliPage(opts),
+        });
         if (emails.length === 0) { console.log(chalk.dim("No scheduled emails.")); return; }
         console.log(chalk.bold("\nScheduled:"));
         for (const e of emails) {
@@ -106,30 +306,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
         const interval = parseDuration(opts.interval || "30s");
         console.log(chalk.blue(`Scheduler running. Polling every ${opts.interval || "30s"}. Press Ctrl+C to stop.`));
         while (true) {
-          const due = getDueEmails();
-          for (const scheduled of due) {
-            try {
-              const provider = getProvider(scheduled.provider_id);
-              if (!provider) { markFailed(scheduled.id, "Provider not found"); continue; }
-              const adapter = getAdapter(provider);
-              const sendOpts = {
-                from: scheduled.from_address, to: scheduled.to_addresses,
-                cc: scheduled.cc_addresses.length > 0 ? scheduled.cc_addresses : undefined,
-                bcc: scheduled.bcc_addresses.length > 0 ? scheduled.bcc_addresses : undefined,
-                reply_to: scheduled.reply_to || undefined,
-                subject: scheduled.subject,
-                html: scheduled.html || undefined,
-                text: scheduled.text_body || undefined,
-              };
-              const messageId = await adapter.sendEmail(sendOpts);
-              createEmail(scheduled.provider_id, sendOpts, messageId);
-              markSent(scheduled.id);
-              console.log(chalk.green(`✓ Sent ${scheduled.id.slice(0,8)} to ${scheduled.to_addresses.join(", ")}`));
-            } catch (err) {
-              markFailed(scheduled.id, err instanceof Error ? err.message : String(err));
-              console.log(chalk.red(`✗ Failed ${scheduled.id.slice(0,8)}: ${err instanceof Error ? err.message : String(err)}`));
-            }
-          }
+          await runSchedulerTick({ log: console.log });
           await new Promise(r => setTimeout(r, interval));
         }
       } catch (e) { handleError(e); }
@@ -145,110 +322,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
         const interval = parseDuration(opts.interval || "30s");
         console.log(chalk.blue(`Scheduler started. Polling every ${opts.interval || "30s"}...`));
         while (true) {
-          const due = getDueEmails();
-          for (const scheduled of due) {
-            try {
-              const provider = getProvider(scheduled.provider_id);
-              if (!provider) {
-                markFailed(scheduled.id, "Provider not found");
-                continue;
-              }
-              const adapter = getAdapter(provider);
-              const sendOpts = {
-                from: scheduled.from_address,
-                to: scheduled.to_addresses,
-                cc: scheduled.cc_addresses.length > 0 ? scheduled.cc_addresses : undefined,
-                bcc: scheduled.bcc_addresses.length > 0 ? scheduled.bcc_addresses : undefined,
-                reply_to: scheduled.reply_to || undefined,
-                subject: scheduled.subject,
-                html: scheduled.html || undefined,
-                text: scheduled.text_body || undefined,
-              };
-              const messageId = await adapter.sendEmail(sendOpts);
-              createEmail(scheduled.provider_id, sendOpts, messageId);
-              markSent(scheduled.id);
-              console.log(chalk.green(`✓ Sent scheduled email ${scheduled.id.slice(0, 8)} to ${scheduled.to_addresses.join(", ")}`));
-            } catch (err) {
-              markFailed(scheduled.id, err instanceof Error ? err.message : String(err));
-              console.log(chalk.red(`✗ Failed scheduled email ${scheduled.id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`));
-            }
-          }
-
-          // Process due sequence enrollments
-          const dueEnrollments = getDueEnrollments();
-          for (const enrollment of dueEnrollments) {
-            try {
-              const steps = listSteps(enrollment.sequence_id);
-              const stepIndex = enrollment.current_step; // 0-based index into sorted steps array
-              const step = steps[stepIndex];
-              if (!step) {
-                // No step at this index — advance/complete
-                advanceEnrollment(enrollment.id);
-                continue;
-              }
-
-              const template = getTemplate(step.template_name);
-              if (!template) {
-                console.log(chalk.yellow(`⚠ Template not found for sequence step: ${step.template_name}`));
-                advanceEnrollment(enrollment.id);
-                continue;
-              }
-
-              const vars: Record<string, string> = { email: enrollment.contact_email };
-              const subject = renderTemplate(
-                step.subject_override || template.subject_template,
-                vars,
-              );
-              const html = template.html_template ? renderTemplate(template.html_template, vars) : undefined;
-              const text = template.text_template ? renderTemplate(template.text_template, vars) : undefined;
-
-              // Resolve provider: enrollment's provider or first active provider
-              const db = getDatabase();
-              const providerRow = enrollment.provider_id
-                ? (db.query("SELECT * FROM providers WHERE id = ?").get(enrollment.provider_id) as { id: string; active: number } | null)
-                : (db.query("SELECT * FROM providers WHERE active = 1 LIMIT 1").get() as { id: string; active: number } | null);
-
-              if (!providerRow) {
-                console.log(chalk.yellow(`⚠ No provider for sequence enrollment ${enrollment.id.slice(0, 8)}`));
-                continue;
-              }
-
-              const seqProvider = getProvider(providerRow.id);
-              if (!seqProvider) {
-                console.log(chalk.yellow(`⚠ Provider not found for sequence enrollment ${enrollment.id.slice(0, 8)}`));
-                continue;
-              }
-
-              const adapter = getAdapter(seqProvider);
-              const sendOpts = {
-                from: step.from_address || "",
-                to: [enrollment.contact_email],
-                subject,
-                html,
-                text,
-              };
-
-              if (!sendOpts.from) {
-                // Try to get from address from provider's first address
-                const addrRow = db.query("SELECT email FROM addresses WHERE provider_id = ? LIMIT 1").get(seqProvider.id) as { email: string } | null;
-                if (addrRow) sendOpts.from = addrRow.email;
-              }
-
-              if (!sendOpts.from) {
-                console.log(chalk.yellow(`⚠ No from address for sequence step ${step.id.slice(0, 8)}`));
-                advanceEnrollment(enrollment.id);
-                continue;
-              }
-
-              const messageId = await adapter.sendEmail(sendOpts);
-              createEmail(seqProvider.id, sendOpts, messageId);
-              advanceEnrollment(enrollment.id);
-              console.log(chalk.green(`✓ Sent sequence step ${step.step_number} to ${enrollment.contact_email}`));
-            } catch (err) {
-              console.log(chalk.red(`✗ Failed sequence enrollment ${enrollment.id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`));
-            }
-          }
-
+          await runSchedulerTick({ log: console.log });
           await new Promise(r => setTimeout(r, interval));
         }
       } catch (e) {
@@ -273,15 +347,16 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
         if (opts.provider) {
           providerId = resolveId("providers", opts.provider);
         } else {
-          const providers = listProviders(db).filter((p) => p.active);
-          if (providers.length === 0) handleError(new Error("No active providers. Add one with 'emails provider add'"));
-          providerId = providers[0]!.id;
+          const activeProviderId = getLatestActiveProviderId(undefined, db);
+          if (!activeProviderId) handleError(new Error("No active providers. Add one with 'emails provider add'"));
+          providerId = activeProviderId!;
         }
 
         const provider = getProvider(providerId, db);
         if (!provider) handleError(new Error(`Provider not found: ${providerId}`));
 
         console.log(chalk.dim(`Batch sending with template '${opts.template}' from ${opts.from}...`));
+        const { batchSend } = await import("../../lib/batch.js");
         const result = await batchSend({
           csvPath: opts.csv,
           templateName: opts.template,
@@ -312,7 +387,8 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .command("completion")
     .description("Generate shell completion script")
     .argument("<shell>", "Shell type: bash, zsh, or fish")
-    .action((shell: string) => {
+    .action(async (shell: string) => {
+      const { generateBashCompletion, generateZshCompletion, generateFishCompletion } = await import("../../lib/completion.js");
       switch (shell) {
         case "bash":
           console.log(generateBashCompletion());
@@ -332,9 +408,11 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
   const doctorCmd = program
     .command("doctor")
     .description("Run system diagnostics")
-    .action(async () => {
+    .option("--live", "Validate provider credentials with live provider API calls")
+    .action(async (opts: { live?: boolean }) => {
       try {
-        const checks = await runDiagnostics();
+        const { runDiagnostics, formatDiagnostics } = await import("../../lib/doctor.js");
+        const checks = await runDiagnostics(undefined, { liveProviderChecks: opts.live === true });
         output(checks, formatDiagnostics(checks));
       } catch (e) {
         handleError(e);
@@ -344,8 +422,9 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
   doctorCmd
     .command("delivery <address>")
     .description("Diagnose why inbound mail may not be reaching a local address")
-    .action((address: string) => {
+    .action(async (address: string) => {
       try {
+        const { diagnoseInboundDelivery, formatDeliveryDoctorReport } = await import("../../lib/delivery-doctor.js");
         const report = diagnoseInboundDelivery(address);
         output(report, formatDeliveryDoctorReport(report));
       } catch (e) {

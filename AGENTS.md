@@ -92,7 +92,7 @@ list_usable_from_addresses(send?, receive?)
 ```
 get_analytics(period?)                    → daily volume, top recipients, hourly distribution
 get_stats(period?)                        → delivery/bounce/complaint rates
-run_doctor()                              → full diagnostic check
+run_doctor(live?)                        → diagnostic check; live=true validates provider credentials remotely
 ```
 
 ### Sandbox (development)
@@ -104,8 +104,8 @@ clear_sandbox_emails()                    → wipe sandbox
 
 ### Export
 ```
-export_emails(format?, provider_id?, since?)  → CSV or JSON
-export_events(format?, provider_id?, since?)  → CSV or JSON
+export_emails(format?, provider_id?, since?, until?, limit?, offset?)  → CSV or JSON
+export_events(format?, provider_id?, since?, until?, limit?, offset?)  → CSV or JSON
 ```
 
 ### Agent orientation resources

@@ -3,20 +3,43 @@ import type { SQLQueryBindings } from "bun:sqlite";
 import type { Email, EmailFilter, EmailRow, EmailStatus, SendEmailOptions } from "../types/index.js";
 import { EmailNotFoundError } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
+import { sqlEmailAddress } from "./email-address-sql.js";
+import { parseJsonArray, parseJsonObject } from "./json.js";
+import { safeOffset, safeOptionalLimit } from "./pagination.js";
+import { canonicalSender } from "../lib/email-address.js";
 
 function parseEmailRow(row: EmailRow): Email {
   return {
     ...row,
-    to_addresses: JSON.parse(row.to_addresses || "[]") as string[],
-    cc_addresses: JSON.parse(row.cc_addresses || "[]") as string[],
-    bcc_addresses: JSON.parse(row.bcc_addresses || "[]") as string[],
-    tags: JSON.parse(row.tags || "{}") as Record<string, string>,
+    to_addresses: parseJsonArray<string>(row.to_addresses),
+    cc_addresses: parseJsonArray<string>(row.cc_addresses),
+    bcc_addresses: parseJsonArray<string>(row.bcc_addresses),
+    tags: parseJsonObject<Record<string, string>>(row.tags),
     status: row.status as EmailStatus,
     has_attachments: !!row.has_attachments,
   };
 }
 
 const rowToEmail = parseEmailRow;
+
+const EMAIL_LIST_COLS = [
+  "id",
+  "provider_id",
+  "provider_message_id",
+  "from_address",
+  "to_addresses",
+  "cc_addresses",
+  "bcc_addresses",
+  "reply_to",
+  "subject",
+  "status",
+  "has_attachments",
+  "attachment_count",
+  "tags",
+  "sent_at",
+  "created_at",
+  "updated_at",
+].join(", ");
 
 export function createEmail(
   provider_id: string,
@@ -93,8 +116,8 @@ export function listEmails(filter: EmailFilter = {}, db?: Database): Email[] {
   }
 
   if (filter.from_address) {
-    conditions.push("from_address = ?");
-    params.push(filter.from_address);
+    conditions.push(`${sqlEmailAddress("from_address")} = ?`);
+    params.push(canonicalSender(filter.from_address) ?? filter.from_address.trim().toLowerCase());
   }
 
   if (filter.since) {
@@ -110,29 +133,29 @@ export function listEmails(filter: EmailFilter = {}, db?: Database): Email[] {
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
   let limitClause = "";
-  if (filter.limit) {
+  const limit = safeOptionalLimit(filter.limit);
+  if (limit !== null) {
     limitClause = " LIMIT ?";
-    params.push(filter.limit);
-    if (filter.offset) {
-      limitClause += " OFFSET ?";
-      params.push(filter.offset);
-    }
+    params.push(limit);
+    limitClause += " OFFSET ?";
+    params.push(safeOffset(filter.offset));
   }
 
   const rows = d
-    .query(`SELECT * FROM emails ${where} ORDER BY sent_at DESC${limitClause}`)
+    .query(`SELECT ${EMAIL_LIST_COLS} FROM emails ${where} ORDER BY sent_at DESC${limitClause}`)
     .all(...params) as EmailRow[];
 
   return rows.map(rowToEmail);
 }
 
-export function searchEmails(query: string, opts?: { since?: string; limit?: number }, db?: Database): Email[] {
+export function searchEmails(query: string, opts?: { since?: string; limit?: number; offset?: number }, db?: Database): Email[] {
   const d = db || getDatabase();
-  let sql = "SELECT * FROM emails WHERE (subject LIKE ? OR from_address LIKE ? OR to_addresses LIKE ?)";
+  let sql = `SELECT ${EMAIL_LIST_COLS} FROM emails WHERE (subject LIKE ? OR from_address LIKE ? OR to_addresses LIKE ?)`;
   const params: any[] = [`%${query}%`, `%${query}%`, `%${query}%`];
   if (opts?.since) { sql += " AND sent_at >= ?"; params.push(opts.since); }
   sql += " ORDER BY sent_at DESC";
-  if (opts?.limit) { sql += " LIMIT ?"; params.push(opts.limit); }
+  const limit = safeOptionalLimit(opts?.limit);
+  if (limit !== null) { sql += " LIMIT ? OFFSET ?"; params.push(limit, safeOffset(opts?.offset)); }
   return (d.query(sql).all(...params) as any[]).map(parseEmailRow);
 }
 

@@ -1,5 +1,6 @@
 import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
+import { safeOffset, safeOptionalLimit } from "./pagination.js";
 
 export type SequenceStatus = "active" | "paused" | "archived";
 export type EnrollmentStatus = "active" | "completed" | "cancelled";
@@ -36,6 +37,29 @@ export interface SequenceEnrollment {
   completed_at: string | null;
 }
 
+export interface ListSequenceOptions {
+  limit?: number;
+  offset?: number;
+}
+
+export interface ListEnrollmentOptions {
+  sequence_id?: string;
+  status?: EnrollmentStatus;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ListDueEnrollmentOptions {
+  limit?: number;
+}
+
+export interface EnrollmentStatusCounts {
+  active: number;
+  completed: number;
+  cancelled: number;
+  total: number;
+}
+
 interface SequenceRow {
   id: string;
   name: string;
@@ -63,6 +87,10 @@ function rowToSequence(row: SequenceRow): Sequence {
 
 function rowToEnrollment(row: EnrollmentRow): SequenceEnrollment {
   return { ...row, status: row.status as EnrollmentStatus };
+}
+
+function isDatabase(value: unknown): value is Database {
+  return Boolean(value && typeof (value as { query?: unknown }).query === "function");
 }
 
 // ─── SEQUENCES ────────────────────────────────────────────────────────────────
@@ -94,9 +122,13 @@ export function getSequence(nameOrId: string, db?: Database): Sequence | null {
   return rowToSequence(row);
 }
 
-export function listSequences(db?: Database): Sequence[] {
+export function listSequences(db?: Database, opts?: ListSequenceOptions): Sequence[] {
   const d = db || getDatabase();
-  const rows = d.query("SELECT * FROM sequences ORDER BY created_at DESC").all() as SequenceRow[];
+  const limit = safeOptionalLimit(opts?.limit);
+  const offset = safeOffset(opts?.offset);
+  const rows = limit !== null
+    ? d.query("SELECT * FROM sequences ORDER BY created_at DESC LIMIT ? OFFSET ?").all(limit, offset) as SequenceRow[]
+    : d.query("SELECT * FROM sequences ORDER BY created_at DESC").all() as SequenceRow[];
   return rows.map(rowToSequence);
 }
 
@@ -170,6 +202,14 @@ export function listSteps(sequence_id: string, db?: Database): SequenceStep[] {
     .all(sequence_id) as SequenceStep[];
 }
 
+export function getStepAtIndex(sequence_id: string, index: number, db?: Database): SequenceStep | null {
+  const d = db || getDatabase();
+  const offset = safeOffset(index);
+  return (d
+    .query("SELECT * FROM sequence_steps WHERE sequence_id = ? ORDER BY step_number ASC LIMIT 1 OFFSET ?")
+    .get(sequence_id, offset) as SequenceStep | null) ?? null;
+}
+
 export function removeStep(id: string, db?: Database): boolean {
   const d = db || getDatabase();
   const result = d.run("DELETE FROM sequence_steps WHERE id = ?", [id]);
@@ -223,40 +263,64 @@ export function unenroll(sequence_id: string, contact_email: string, db?: Databa
   return result.changes > 0;
 }
 
-export function listEnrollments(
-  opts?: { sequence_id?: string; status?: string },
-  db?: Database,
-): SequenceEnrollment[] {
+export function listEnrollments(opts?: ListEnrollmentOptions, db?: Database): SequenceEnrollment[] {
   const d = db || getDatabase();
-
-  if (opts?.sequence_id && opts?.status) {
-    return d
-      .query("SELECT * FROM sequence_enrollments WHERE sequence_id = ? AND status = ? ORDER BY enrolled_at DESC")
-      .all(opts.sequence_id, opts.status) as SequenceEnrollment[];
-  }
+  const conditions: string[] = [];
+  const params: Array<string | number> = [];
   if (opts?.sequence_id) {
-    return d
-      .query("SELECT * FROM sequence_enrollments WHERE sequence_id = ? ORDER BY enrolled_at DESC")
-      .all(opts.sequence_id) as SequenceEnrollment[];
+    conditions.push("sequence_id = ?");
+    params.push(opts.sequence_id);
   }
   if (opts?.status) {
-    return d
-      .query("SELECT * FROM sequence_enrollments WHERE status = ? ORDER BY enrolled_at DESC")
-      .all(opts.status) as SequenceEnrollment[];
+    conditions.push("status = ?");
+    params.push(opts.status);
   }
-  return d
-    .query("SELECT * FROM sequence_enrollments ORDER BY enrolled_at DESC")
-    .all() as SequenceEnrollment[];
+  const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
+  const limit = safeOptionalLimit(opts?.limit);
+  const offset = safeOffset(opts?.offset);
+  if (limit !== null) params.push(limit, offset);
+  const rows = d
+    .query(`SELECT * FROM sequence_enrollments${where} ORDER BY enrolled_at DESC${limit !== null ? " LIMIT ? OFFSET ?" : ""}`)
+    .all(...params) as EnrollmentRow[];
+  return rows.map(rowToEnrollment);
 }
 
-export function getDueEnrollments(db?: Database): SequenceEnrollment[] {
+export function countEnrollmentsByStatus(sequenceId: string, db?: Database): EnrollmentStatusCounts {
   const d = db || getDatabase();
+  const row = d.query(
+    `SELECT
+       COUNT(*) AS total,
+       SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
+       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+       SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
+     FROM sequence_enrollments
+     WHERE sequence_id = ?`,
+  ).get(sequenceId) as { total: unknown; active: unknown; completed: unknown; cancelled: unknown } | null;
+  return {
+    active: Number(row?.active) || 0,
+    completed: Number(row?.completed) || 0,
+    cancelled: Number(row?.cancelled) || 0,
+    total: Number(row?.total) || 0,
+  };
+}
+
+export function getDueEnrollments(db?: Database): SequenceEnrollment[];
+export function getDueEnrollments(opts?: ListDueEnrollmentOptions, db?: Database): SequenceEnrollment[];
+export function getDueEnrollments(optsOrDb?: ListDueEnrollmentOptions | Database, maybeDb?: Database): SequenceEnrollment[] {
+  const d = isDatabase(optsOrDb) ? optsOrDb : maybeDb || getDatabase();
+  const opts = isDatabase(optsOrDb) ? undefined : optsOrDb;
   const currentTime = now();
-  return d
+  const limit = safeOptionalLimit(opts?.limit);
+  const params: Array<string | number> = [currentTime];
+  if (limit !== null) params.push(limit);
+  const rows = d
     .query(
-      "SELECT * FROM sequence_enrollments WHERE status = 'active' AND next_send_at IS NOT NULL AND next_send_at <= ? ORDER BY next_send_at ASC",
+      `SELECT * FROM sequence_enrollments
+       WHERE status = 'active' AND next_send_at <= ?
+       ORDER BY next_send_at ASC, id ASC${limit !== null ? " LIMIT ?" : ""}`,
     )
-    .all(currentTime) as SequenceEnrollment[];
+    .all(...params) as EnrollmentRow[];
+  return rows.map(rowToEnrollment);
 }
 
 export function advanceEnrollment(enrollment_id: string, db?: Database): SequenceEnrollment | null {
@@ -271,12 +335,7 @@ export function advanceEnrollment(enrollment_id: string, db?: Database): Sequenc
   // After sending the step at index current_step, advance to current_step+1.
   const nextIndex = enrollment.current_step + 1;
 
-  // Get all steps sorted by step_number and find the one at nextIndex
-  const allSteps = d
-    .query("SELECT * FROM sequence_steps WHERE sequence_id = ? ORDER BY step_number ASC")
-    .all(enrollment.sequence_id) as SequenceStep[];
-
-  const nextStep = allSteps[nextIndex] ?? null;
+  const nextStep = getStepAtIndex(enrollment.sequence_id, nextIndex, d);
 
   if (!nextStep) {
     // No more steps — mark as completed

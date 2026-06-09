@@ -1,9 +1,9 @@
 import type { Command } from "commander";
-import chalk from "chalk";
-import { createGroup, getGroupByName, listGroups, deleteGroup, addMember, removeMember, listMembers, getMemberCount } from "../../db/groups.js";
-import { confirmDestructiveAction, handleError } from "../utils.js";
+import chalk from "../../lib/chalk-lite.js";
+import { createGroup, getGroupByName, listGroups, deleteGroup, addMember, removeMember, listMemberSummaries, getMemberCount, getMemberCounts } from "../../db/groups.js";
+import { confirmDestructiveAction, handleError, parseCliPage } from "../utils.js";
 
-export function registerGroupCommands(program: Command, _output: (data: unknown, formatted: string) => void): void {
+export function registerGroupCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const groupCmd = program.command("group").description("Manage recipient groups");
 
   groupCmd
@@ -22,20 +22,29 @@ export function registerGroupCommands(program: Command, _output: (data: unknown,
   groupCmd
     .command("list")
     .description("List recipient groups")
-    .action(() => {
+    .option("--limit <n>", "Maximum groups to show", "50")
+    .option("--offset <n>", "Number of groups to skip", "0")
+    .action((opts: { limit?: string; offset?: string }) => {
       try {
-        const groups = listGroups();
+        const page = parseCliPage(opts);
+        const groups = listGroups(undefined, page);
         if (groups.length === 0) {
-          console.log(chalk.dim("No groups configured. Use 'emails group create' to add one."));
+          output([], chalk.dim("No groups configured. Use 'emails group create' to add one."));
           return;
         }
-        console.log(chalk.bold("\nGroups:"));
+        const counts = getMemberCounts(groups.map((group) => group.id));
+        const result = groups.map((group) => ({
+          ...group,
+          member_count: counts.get(group.id) ?? 0,
+        }));
+        const lines: string[] = [chalk.bold("\nGroups:")];
         for (const g of groups) {
-          const count = getMemberCount(g.id);
+          const count = counts.get(g.id) ?? 0;
           const desc = g.description ? chalk.dim(` — ${g.description}`) : "";
-          console.log(`  ${chalk.cyan(g.id.slice(0, 8))}  ${g.name}  (${count} members)${desc}`);
+          lines.push(`  ${chalk.cyan(g.id.slice(0, 8))}  ${g.name}  (${count} members)${desc}`);
         }
-        console.log();
+        lines.push("");
+        output(result, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }
@@ -44,25 +53,55 @@ export function registerGroupCommands(program: Command, _output: (data: unknown,
   groupCmd
     .command("show <name>")
     .description("Show group details and members")
-    .action((name: string) => {
+    .option("--limit <n>", "Maximum members to show", "50")
+    .option("--offset <n>", "Number of members to skip", "0")
+    .action((name: string, opts: { limit?: string; offset?: string }) => {
       try {
         const group = getGroupByName(name);
         if (!group) handleError(new Error(`Group not found: ${name}`));
-        const members = listMembers(group!.id);
-        console.log(chalk.bold(`
-Group: ${group!.name}`));
-        if (group!.description) console.log(chalk.dim(`  ${group!.description}`));
-        console.log(`  Members (${members.length}):`);
+        const page = parseCliPage(opts);
+        const members = listMemberSummaries(group!.id, undefined, page);
+        const memberCount = getMemberCount(group!.id);
+        const lines: string[] = [chalk.bold(`\nGroup: ${group!.name}`)];
+        if (group!.description) lines.push(chalk.dim(`  ${group!.description}`));
+        lines.push(`  Members (${members.length} shown / ${memberCount} total):`);
         if (members.length === 0) {
-          console.log(chalk.dim("    No members. Use 'emails group add' to add some."));
+          lines.push(chalk.dim("    No members. Use 'emails group add' to add some."));
         } else {
           for (const m of members) {
             const displayName = m.name ? ` (${m.name})` : "";
-            const vars = Object.keys(m.vars).length > 0 ? chalk.dim(` vars=${JSON.stringify(m.vars)}`) : "";
-            console.log(`    ${m.email}${displayName}${vars}`);
+            lines.push(`    ${m.email}${displayName}`);
           }
         }
-        console.log();
+        lines.push("");
+        output({ group, members, member_count: memberCount }, lines.join("\n"));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  groupCmd
+    .command("members <name>")
+    .description("List members in a recipient group")
+    .option("--limit <n>", "Maximum members to show", "50")
+    .option("--offset <n>", "Number of members to skip", "0")
+    .action((name: string, opts: { limit?: string; offset?: string }) => {
+      try {
+        const group = getGroupByName(name);
+        if (!group) handleError(new Error(`Group not found: ${name}`));
+        const page = parseCliPage(opts);
+        const members = listMemberSummaries(group!.id, undefined, page);
+        if (members.length === 0) {
+          output([], chalk.dim("No members."));
+          return;
+        }
+        const lines: string[] = [chalk.bold(`\nMembers for '${group!.name}':`)];
+        for (const m of members) {
+          const displayName = m.name ? ` (${m.name})` : "";
+          lines.push(`  ${m.email}${displayName}`);
+        }
+        lines.push("");
+        output(members, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }

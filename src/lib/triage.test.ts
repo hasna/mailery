@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { getDatabase, closeDatabase, resetDatabase } from "../db/database.js";
 import { storeEmailContent } from "../db/email-content.js";
+import { storeInboundEmail } from "../db/inbound.js";
 import { getTriage } from "../db/triage.js";
 
 // We mock fetch globally to intercept Cerebras API calls
 let fetchCallCount = 0;
 let fetchResponses: unknown[] = [];
+let fetchRequestBodies: Array<{ messages?: Array<{ role: string; content: string }> }> = [];
 
 function pushResponse(data: unknown) {
   fetchResponses.push(data);
@@ -46,15 +48,38 @@ function seedInboundEmail(db: ReturnType<typeof getDatabase>, id: string, subjec
   );
 }
 
+function seedReply(db: ReturnType<typeof getDatabase>, sentId: string, index: number, body: string) {
+  storeInboundEmail({
+    provider_id: null,
+    message_id: `reply-${index}`,
+    in_reply_to_email_id: sentId,
+    from_address: `sender-${index}@ext.com`,
+    to_addresses: ["sender@test.com"],
+    cc_addresses: [],
+    subject: `Reply ${index}`,
+    text_body: body,
+    html_body: null,
+    attachments: [],
+    attachment_paths: [],
+    headers: {},
+    raw_size: body.length,
+    received_at: new Date(Date.UTC(2026, 0, index + 1)).toISOString(),
+  }, db);
+}
+
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
   process.env["CEREBRAS_API_KEY"] = "test-key";
   resetDatabase();
   fetchCallCount = 0;
   fetchResponses = [];
+  fetchRequestBodies = [];
 
   // @ts-expect-error mock fetch
-  globalThis.fetch = async (url: string) => {
+  globalThis.fetch = async (url: string, init?: RequestInit) => {
+    if (typeof init?.body === "string") {
+      fetchRequestBodies.push(JSON.parse(init.body) as { messages?: Array<{ role: string; content: string }> });
+    }
     const idx = fetchCallCount++;
     const data = fetchResponses[idx];
     if (!data) throw new Error(`No mock response for fetch call #${idx} to ${url}`);
@@ -257,6 +282,32 @@ describe("generateDraftForEmail", () => {
     pushResponse({ draft: "Following up on our conversation..." });
     const draft = await generateDraftForEmail("dr1", "sent");
     expect(draft).toBe("Following up on our conversation...");
+  });
+
+  it("bounds prompt body and reply thread context for sent emails", async () => {
+    const { generateDraftForEmail } = await import("./triage.js");
+    const db = getDatabase();
+    seedSentEmail(db, "dr-bounded", "Long thread");
+    storeEmailContent("dr-bounded", {
+      text: `body-start ${"a".repeat(9000)} body-after-limit`,
+    }, db);
+    for (let i = 0; i < 12; i++) {
+      seedReply(db, "dr-bounded", i, `reply-${i} ${"r".repeat(1200)} tail-${i}`);
+    }
+
+    pushResponse({ draft: "Bounded draft" });
+    const draft = await generateDraftForEmail("dr-bounded", "sent");
+    expect(draft).toBe("Bounded draft");
+
+    const userPrompt = fetchRequestBodies[0]?.messages?.find((message) => message.role === "user")?.content ?? "";
+    expect(userPrompt).toContain("body-start");
+    expect(userPrompt).not.toContain("body-after-limit");
+    expect(userPrompt).toContain("[2 older replies omitted]");
+    expect(userPrompt).not.toContain("reply-0");
+    expect(userPrompt).toContain("reply-2");
+    expect(userPrompt).toContain("reply-11");
+    expect(userPrompt).not.toContain("tail-11");
+    expect(userPrompt).toContain("[truncated ");
   });
 
   it("throws for nonexistent email", async () => {

@@ -95,7 +95,7 @@ Every transition is idempotent and re-entrant. Each state records `attempts`, `l
 - New table **`provisioning_events`**: append-only audit (`entity_type`, `entity_id`, `from_state`,
   `to_state`, `detail_json`, `created_at`) — powers `emails provision status` and the dashboard.
 
-Add a SQLite migration in `src/db/database.ts` and the matching `pg-migrations.ts` for the cloud path.
+Add a SQLite migration in `src/db/database.ts` and the matching `pg-migrations.ts` for the remote storage path.
 
 ## 6. New / changed code modules
 
@@ -150,12 +150,11 @@ validation step.
 
 ## 9. Credentials / wiring gaps to close (from vault audit)
 
-- **Cloudflare:** vault has `hasnaxyz/cloudflare/live/api_key` + `email` (Global API Key), but code
-  expects `CLOUDFLARE_API_TOKEN`. Either mint a scoped token (Zone:Read, DNS:Edit, Email Routing:Edit,
-  Email Sending) or extend auth to accept key+email. → task T-E11.
+- **Cloudflare:** use `CLOUDFLARE_API_TOKEN`, or `CLOUDFLARE_API_KEY` + `CLOUDFLARE_EMAIL`
+  when global-key auth is required. → task T-E11.
 - **AWS:** no creds in shell env; `emails aws status` fails. Wire an AWS profile (SES + Route53Domains
   in us-east-1 for buy/inbound) via config/doctor. → task T-E12.
-- **Resend:** reuse `hasnatools/todos/email/live/resend_api_key` or mint a hasna-emails key. → T-E13.
+- **Resend:** set `RESEND_API_KEY` when Resend send/inbound support is needed. → T-E13.
 - **SES sandbox:** request production access (`PutAccountDetails`) before live send to external. → T-E14.
 
 ## 10. Sequencing (high level)

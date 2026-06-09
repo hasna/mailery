@@ -1,8 +1,8 @@
 import type { Command } from "commander";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import { createOwner, getOwner, getOwnerByName, listOwners, listAddressesByOwner } from "../../db/owners.js";
-import { enrichAddress } from "../../lib/address-ownership.js";
-import { handleError } from "../utils.js";
+import { enrichAddresses } from "../../lib/address-ownership.js";
+import { handleError, parseCliPage } from "../utils.js";
 
 export function registerOwnerCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const cmd = program.command("owner").description("Manage address owners (human or agent)");
@@ -24,8 +24,10 @@ export function registerOwnerCommands(program: Command, output: (data: unknown, 
     .command("list")
     .description("List owners")
     .option("--type <type>", "Filter: human | agent")
-    .action((opts: { type?: string }) => {
-      const owners = listOwners(opts.type as "human" | "agent" | undefined);
+    .option("--limit <n>", "Maximum owners to show", "50")
+    .option("--offset <n>", "Number of owners to skip", "0")
+    .action((opts: { type?: string; limit?: string; offset?: string }) => {
+      const owners = listOwners(opts.type as "human" | "agent" | undefined, undefined, parseCliPage(opts));
       const text = owners.length
         ? owners.map((o) => `  ${o.id.slice(0, 8)}  ${chalk.cyan(o.type)}  ${o.name}${o.contact_email ? ` <${o.contact_email}>` : ""}`).join("\n")
         : "No owners registered.";
@@ -36,11 +38,13 @@ export function registerOwnerCommands(program: Command, output: (data: unknown, 
     .command("addresses <owner>")
     .description("List addresses owned (or administered) by an owner")
     .option("--administered", "Show addresses this owner administers instead of owns")
-    .action((owner: string, opts: { administered?: boolean }) => {
+    .option("--limit <n>", "Maximum addresses to show", "50")
+    .option("--offset <n>", "Number of addresses to skip", "0")
+    .action((owner: string, opts: { administered?: boolean; limit?: string; offset?: string }) => {
       const o = getOwnerByName(owner) ?? getOwner(owner);
       if (!o) return handleError(new Error(`Owner not found: ${owner}`));
       const role = opts.administered ? "administrator" : "owner";
-      const addrs = listAddressesByOwner(o.id, role).map((address) => enrichAddress(address));
+      const addrs = enrichAddresses(listAddressesByOwner(o.id, role, undefined, parseCliPage(opts)));
       const text = addrs.length
         ? addrs.map((a) => {
           const ownerText = a.owner ? `owner=${a.owner.name}(${a.owner.type})` : "owner=none";

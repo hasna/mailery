@@ -5,7 +5,7 @@ describe("checkProvisionCredentials", () => {
   it("detects AWS profile, Cloudflare global key+account, Resend", () => {
     const s = checkProvisionCredentials({
       AWS_PROFILE: "hasna",
-      HASNAXYZ_CLOUDFLARE_LIVE_API_KEY: "k", HASNAXYZ_CLOUDFLARE_LIVE_EMAIL: "a@b.com", CLOUDFLARE_ACCOUNT_ID: "acct",
+      CLOUDFLARE_API_KEY: "k", CLOUDFLARE_EMAIL: "a@b.com", CLOUDFLARE_ACCOUNT_ID: "acct",
       RESEND_API_KEY: "re_x",
     });
     expect(s.find((x) => x.provider === "aws")!.configured).toBe(true);

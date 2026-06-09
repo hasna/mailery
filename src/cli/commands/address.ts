@@ -1,13 +1,13 @@
 import type { Command } from "commander";
-import chalk from "chalk";
-import { createAddress, listAddresses, deleteAddress, getAddress, getAddressByEmail } from "../../db/addresses.js";
+import chalk from "../../lib/chalk-lite.js";
+import { createAddress, findAddressesByEmail, listAddressEmails, deleteAddress, getAddress, getAddressByEmail } from "../../db/addresses.js";
 import { getDomainByName } from "../../db/domains.js";
-import { suspendAddress, activateAddress, setAddressQuota, countSendsToday } from "../../db/address-lifecycle.js";
+import { suspendAddress, activateAddress, setAddressQuota, countSendsTodayByAddress } from "../../db/address-lifecycle.js";
 import { getProvider } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
 import { getAdapter } from "../../providers/index.js";
 import { colorDnsStatus } from "../../lib/format.js";
-import { confirmDestructiveAction, handleError, resolveId } from "../utils.js";
+import { confirmDestructiveAction, handleError, parseCliPage, resolveId } from "../utils.js";
 import { getAddressProvisioning, setAddressProvisioning } from "../../db/provisioning.js";
 import {
   getAddressOwnershipDetail,
@@ -24,20 +24,25 @@ type ReceiveStrategy = "ses-s3" | "cf-routing" | "resend-webhook";
 export function registerAddressCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const addressCmd = program.command("address").description("Manage sender email addresses");
 
-  const listAddressesAction = (opts: { provider?: string }) => {
+  const listAddressesAction = (opts: { provider?: string; limit?: string; offset?: string }) => {
     try {
+      const db = getDatabase();
       const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-      const addresses = listEnrichedAddresses(providerId);
+      const addresses = listEnrichedAddresses(providerId, db, parseCliPage(opts));
       if (addresses.length === 0) {
         output([], chalk.dim("No addresses configured."));
         return;
       }
+      const quotaCounts = countSendsTodayByAddress(
+        addresses.filter((address) => address.daily_quota !== null).map((address) => address.email),
+        db,
+      );
       const lines: string[] = [chalk.bold("\nAddresses:")];
       for (const a of addresses) {
         const verified = a.verified ? colorDnsStatus("verified") : colorDnsStatus("pending");
         const name = a.display_name ? ` (${a.display_name})` : "";
         const status = a.status === "suspended" ? chalk.red("suspended") : chalk.green("active");
-        const quota = a.daily_quota !== null ? chalk.dim(`  quota ${countSendsToday(a.email)}/${a.daily_quota}/day`) : "";
+        const quota = a.daily_quota !== null ? chalk.dim(`  quota ${quotaCounts.get(a.email.trim().toLowerCase()) ?? 0}/${a.daily_quota}/day`) : "";
         const owner = a.owner
           ? chalk.dim(`  owner ${a.owner.name} (${a.owner.type})`)
           : chalk.dim("  owner none");
@@ -57,6 +62,8 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .command("addresses")
     .description("List sender email addresses (alias: emails address list)")
     .option("--provider <id>", "Filter by provider ID")
+    .option("--limit <n>", "Maximum addresses to show", "50")
+    .option("--offset <n>", "Number of addresses to skip", "0")
     .action(listAddressesAction);
 
   addressCmd
@@ -90,6 +97,8 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .command("list")
     .description("List sender addresses")
     .option("--provider <id>", "Filter by provider ID")
+    .option("--limit <n>", "Maximum addresses to show", "50")
+    .option("--offset <n>", "Number of addresses to skip", "0")
     .action(listAddressesAction);
 
   addressCmd
@@ -209,7 +218,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
       try {
         const db = getDatabase();
         const domain = opts.domain.trim().toLowerCase();
-        const exists = listAddresses(undefined, db).map((address) => address.email);
+        const exists = listAddressEmails(undefined, db);
         const suggestions = suggestAddressLocalParts(domain, exists);
         output({ domain, suggestions }, suggestions.length ? suggestions.join("\n") : chalk.dim(`No obvious suggestions left for ${domain}.`));
       } catch (e) {
@@ -338,9 +347,9 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--provider <id>", "Provider ID")
     .action(async (email: string, opts: { provider?: string }) => {
       try {
+        const db = getDatabase();
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const addresses = listAddresses(providerId);
-        const found = addresses.find((a) => a.email === email);
+        const found = findAddressesByEmail(email, db).find((a) => !providerId || a.provider_id === providerId);
         if (!found) handleError(new Error(`Address not found: ${email}`));
 
         const provider = getProvider(found!.provider_id);
@@ -350,7 +359,6 @@ export function registerAddressCommands(program: Command, output: (data: unknown
         const isVerified = await adapter.verifyAddress(email);
 
         if (isVerified) {
-          const db = getDatabase();
           db.run("UPDATE addresses SET verified = 1, updated_at = datetime('now') WHERE id = ?", [found!.id]);
           console.log(chalk.green(`✓ ${email} is verified`));
         } else {

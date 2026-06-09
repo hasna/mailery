@@ -28,6 +28,11 @@ function flag(input: unknown, key: string, name = key.replace(/_/g, "-")): strin
   return value ? ` --${name} ${value}` : "";
 }
 
+function enabled(input: unknown, key: string, name = key.replace(/_/g, "-")): string {
+  const obj = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  return obj[key] === true ? ` --${name}` : "";
+}
+
 export function cliEquivalentForTool(name: string, input: unknown): string {
   const id = arg(input, "id", "provider_id", "domain_id", "address_id", "email_id", "sequence_id", "group_id");
   const email = arg(input, "email", "address", "contact_email");
@@ -42,22 +47,23 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
     get_next_action: () => "emails status --json",
     diagnose_inbound_delivery: () => `emails doctor delivery ${email ?? "<address>"} --json`,
 
-    list_providers: () => "emails provider list --json",
+    list_providers: () => `emails provider list${flag(input, "limit")}${flag(input, "offset")} --json`,
     add_provider: () => `emails provider add --name ${arg(input, "name") ?? "<name>"} --type ${arg(input, "type") ?? "<type>"} --json`,
     update_provider: () => `emails provider update ${id ?? "<provider-id>"} --json`,
     authenticate_gmail_provider: () => `emails provider auth ${id ?? "<provider-id>"} --json`,
     remove_provider: () => `emails provider remove ${id ?? "<provider-id>"} --yes --json`,
 
-    list_domains: () => `emails domain list${provider ? ` --provider ${provider}` : ""} --json`,
-    list_usable_domains: () => "emails domain usable --json",
+    list_domains: () => `emails domain list${provider ? ` --provider ${provider}` : ""}${flag(input, "limit")}${flag(input, "offset")} --json`,
+    list_usable_domains: () => `emails domain usable${provider ? ` --provider ${provider}` : ""}${enabled(input, "send")}${enabled(input, "receive")}${flag(input, "limit")}${flag(input, "offset")} --json`,
     add_domain: () => `emails domain add ${domain ?? "<domain>"} --provider ${provider ?? "<provider-id>"} --json`,
     get_dns_records: () => `emails domain dns ${domain ?? id ?? "<domain-or-id>"} --json`,
     verify_domain: () => `emails domain verify ${domain ?? id ?? "<domain-or-id>"} --json`,
     remove_domain: () => `emails domain remove ${id ?? domain ?? "<domain-or-id>"} --yes --json`,
     provision_domain: () => `emails provision domain ${domain ?? "<domain>"} --provider ${provider ?? "<provider-id>"} --json`,
+    list_warming_schedules: () => `emails domain warm-list${flag(input, "status")}${flag(input, "limit")}${flag(input, "offset")} --json`,
 
-    list_addresses: () => `emails address list${provider ? ` --provider ${provider}` : ""} --json`,
-    list_usable_from_addresses: () => "emails address list --json",
+    list_addresses: () => `emails address list${provider ? ` --provider ${provider}` : ""}${flag(input, "limit")}${flag(input, "offset")} --json`,
+    list_usable_from_addresses: () => `emails address list${provider ? ` --provider ${provider}` : ""}${flag(input, "limit")}${flag(input, "offset")} --json`,
     add_address: () => `emails address add ${email ?? "<email>"} --provider ${provider ?? "<provider-id>"} --json`,
     verify_address: () => `emails address verify ${email ?? id ?? "<address-or-id>"} --json`,
     remove_address: () => `emails address remove ${email ?? id ?? "<address-or-id>"} --yes --json`,
@@ -74,23 +80,24 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
 
     add_alias: () => `emails alias add ${arg(input, "alias") ?? "<alias>"} ${arg(input, "target") ?? "<target>"} --json`,
     add_catch_all: () => `emails alias catch-all ${domain ?? "<domain>"} ${arg(input, "target") ?? "<target>"} --json`,
-    list_aliases: () => "emails alias list --json",
+    list_aliases: () => `emails alias list${flag(input, "domain")}${flag(input, "limit")}${flag(input, "offset")} --json`,
     remove_alias: () => `emails alias remove ${arg(input, "alias") ?? "<alias>"} --json`,
     resolve_alias: () => `emails alias resolve ${email ?? "<email>"} --json`,
     create_send_key: () => `emails sendkey create ${arg(input, "owner") ?? arg(input, "owner_id") ?? "<owner>"} --json`,
-    list_send_keys: () => `emails sendkey list${flag(input, "owner_id", "owner")} --json`,
+    list_send_keys: () => `emails sendkey list${flag(input, "owner_id", "owner")}${flag(input, "limit")}${flag(input, "offset")} --json`,
     revoke_send_key: () => `emails sendkey revoke ${id ?? "<key-id>"} --json`,
     check_send_authorization: () => `emails sendkey check ${arg(input, "owner") ?? "<owner>"} ${email ?? "<from-email>"} --json`,
 
     send_email: () => `emails send --from ${arg(input, "from") ?? "<from>"} --to ${arg(input, "to") ?? "<to>"} --subject ${arg(input, "subject") ?? "<subject>"} --json`,
-    list_emails: () => `emails log${flag(input, "status")}${flag(input, "since")} --json`,
-    search_emails: () => `emails search ${arg(input, "query") ?? "<query>"} --json`,
+    list_emails: () => `emails log${flag(input, "status")}${flag(input, "from_address", "from")}${flag(input, "since")}${flag(input, "limit")}${flag(input, "offset")} --json`,
+    search_emails: () => `emails search ${arg(input, "query") ?? "<query>"}${flag(input, "since")}${flag(input, "limit")}${flag(input, "offset")} --json`,
     get_email: () => `emails show ${id ?? "<email-id>"} --json`,
     get_email_content: () => `emails show ${id ?? "<email-id>"} --content --json`,
     pull_events: () => `emails sync${provider ? ` --provider ${provider}` : ""} --json`,
     get_stats: () => `emails stats${provider ? ` --provider ${provider}` : ""} --json`,
 
-    list_templates: () => "emails template list --json",
+    list_templates: () => `emails template list${flag(input, "limit")}${flag(input, "offset")} --json`,
+    get_template: () => `emails template show ${arg(input, "name_or_id") ?? arg(input, "name") ?? id ?? "<template>"} --json`,
     add_template: () => `emails template add ${arg(input, "name") ?? "<name>"} --subject ${arg(input, "subject_template") ?? "<subject>"} --json`,
     remove_template: () => `emails template remove ${arg(input, "name") ?? "<name>"} --json`,
     list_contacts: () => "emails contact list --json",
@@ -98,7 +105,7 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
     unsuppress_contact: () => `emails contact unsuppress ${email ?? "<email>"} --json`,
 
     schedule_email: () => "emails schedule create --json",
-    list_scheduled: () => "emails schedule list --json",
+    list_scheduled: () => `emails schedule list${flag(input, "status")}${flag(input, "limit")}${flag(input, "offset")} --json`,
     cancel_scheduled: () => `emails schedule cancel ${id ?? "<scheduled-id>"} --json`,
 
     list_inbound_emails: () => `emails inbox list${provider ? ` --provider ${provider}` : ""} --json`,
@@ -118,27 +125,31 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
     search_inbound: () => `emails inbox search ${arg(input, "query") ?? "<query>"} --json`,
     get_inbox_sync_status: () => "emails inbox sync-status --json",
 
-    list_sequences: () => "emails sequence list --json",
+    list_sequences: () => `emails sequence list${flag(input, "limit")}${flag(input, "offset")} --json`,
     create_sequence: () => `emails sequence create ${arg(input, "name") ?? "<name>"} --json`,
     add_sequence_step: () => `emails sequence step add ${id ?? "<sequence-id>"} --json`,
     enroll_contact: () => `emails sequence enroll ${id ?? "<sequence-id>"} ${email ?? "<email>"} --json`,
     unenroll_contact: () => `emails sequence unenroll ${id ?? "<sequence-id>"} ${email ?? "<email>"} --json`,
-    list_enrollments: () => `emails sequence enrollments${id ? ` ${id}` : ""} --json`,
-    list_replies: () => `emails replies ${id ?? "<email-id>"} --json`,
+    list_enrollments: () => `emails sequence enrollments${id ? ` ${id}` : ""}${flag(input, "status")}${flag(input, "limit")}${flag(input, "offset")} --json`,
+    list_replies: () => `emails replies ${id ?? "<email-id>"}${flag(input, "limit")}${flag(input, "offset")} --json`,
 
-    list_groups: () => "emails group list --json",
+    list_groups: () => `emails group list${flag(input, "limit")}${flag(input, "offset")} --json`,
     create_group: () => `emails group create ${arg(input, "name") ?? "<name>"} --json`,
     delete_group: () => `emails group delete ${id ?? "<group-id>"} --json`,
     add_group_member: () => `emails group add ${id ?? "<group-id>"} ${email ?? "<email>"} --json`,
     remove_group_member: () => `emails group remove-member ${id ?? "<group-id>"} ${email ?? "<email>"} --json`,
-    list_group_members: () => `emails group members ${id ?? "<group-id>"} --json`,
+    list_group_members: () => `emails group members ${arg(input, "group_name", "group_id", "id") ?? "<group-name>"}${flag(input, "limit")}${flag(input, "offset")} --json`,
     list_sandbox_emails: () => "emails sandbox list --json",
     get_sandbox_email: () => `emails sandbox show ${id ?? "<sandbox-id>"} --json`,
     clear_sandbox_emails: () => "emails sandbox clear --json",
     get_analytics: () => "emails analytics --json",
     run_doctor: () => "emails doctor --json",
-    export_emails: () => `emails export emails --format ${format ?? "json"}`,
-    export_events: () => `emails export events --format ${format ?? "json"}`,
+    storage_status: () => "emails storage status --json",
+    storage_push: () => `emails storage push${flag(input, "tables")}${flag(input, "batch_size", "batch-size")} --json`,
+    storage_pull: () => `emails storage pull${flag(input, "tables")}${flag(input, "batch_size", "batch-size")} --json`,
+    storage_sync: () => `emails storage sync${flag(input, "tables")}${flag(input, "batch_size", "batch-size")} --json`,
+    export_emails: () => `emails export emails${provider ? ` --provider ${provider}` : ""}${flag(input, "from_address", "from")}${flag(input, "since")}${flag(input, "until")}${flag(input, "limit")}${flag(input, "offset")} --format ${format ?? "json"}`,
+    export_events: () => `emails export events${provider ? ` --provider ${provider}` : ""}${flag(input, "since")}${flag(input, "until")}${flag(input, "limit")}${flag(input, "offset")} --format ${format ?? "json"}`,
     verify_email_address: () => `emails verify-email ${email ?? "<email>"} --json`,
     batch_send: () => "emails batch --json",
   };
@@ -219,9 +230,13 @@ function normalizeResult(toolName: string, input: unknown, result: ToolResult): 
 
   const obj = payload as Record<string, unknown>;
   if (!obj["cli_equivalent"]) obj["cli_equivalent"] = cliEquivalent;
+  const redacted = redactSecrets(obj);
+  if (toolName === "create_send_key" && typeof obj["token"] === "string") {
+    (redacted as Record<string, unknown>)["token"] = obj["token"];
+  }
   return {
     ...result,
-    content: [{ ...first, text: JSON.stringify(redactSecrets(obj), null, 2) }, ...rest],
+    content: [{ ...first, text: JSON.stringify(redacted, null, 2) }, ...rest],
   };
 }
 

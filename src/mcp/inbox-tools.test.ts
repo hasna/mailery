@@ -124,8 +124,7 @@ describe("search_inbound tool logic", () => {
     const { pid } = setupDb();
     seed(pid, 5);
     const db = getDatabase();
-    const results = listInboundEmails({ provider_id: pid, limit: 100 }, db)
-      .filter((e) => e.subject.toLowerCase().includes("subject 2"));
+    const results = listInboundEmails({ provider_id: pid, limit: 100, search: "subject 2" }, db);
     expect(results).toHaveLength(1);
   });
 
@@ -133,9 +132,58 @@ describe("search_inbound tool logic", () => {
     const { pid } = setupDb();
     seed(pid, 5);
     const db = getDatabase();
-    const results = listInboundEmails({ provider_id: pid, limit: 100 }, db)
-      .filter((e) => e.subject.includes("zzz-no-match"));
+    const results = listInboundEmails({ provider_id: pid, limit: 100, search: "zzz-no-match" }, db);
     expect(results).toHaveLength(0);
+  });
+
+  it("searches before applying the result limit", () => {
+    const { db, pid } = setupDb();
+    storeInboundEmail({
+      provider_id: pid, message_id: "recent", in_reply_to_email_id: null,
+      from_address: "recent@example.com", to_addresses: ["me@example.com"], cc_addresses: [],
+      subject: "recent unrelated", text_body: "body", html_body: null,
+      attachments: [], attachment_paths: [], headers: {}, raw_size: 80,
+      received_at: "2026-06-04T11:30:09.000Z",
+    }, db);
+    storeInboundEmail({
+      provider_id: pid, message_id: "older", in_reply_to_email_id: null,
+      from_address: "older@example.com", to_addresses: ["target@example.com"], cc_addresses: [],
+      subject: "older match", text_body: "needle body", html_body: null,
+      attachments: [], attachment_paths: [], headers: {}, raw_size: 80,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const results = listInboundEmails({ provider_id: pid, limit: 1, search: "needle" }, db);
+
+    expect(results.map((email) => email.subject)).toEqual(["older match"]);
+  });
+
+  it("filters sender and subject before applying the result limit", () => {
+    const { db, pid } = setupDb();
+    storeInboundEmail({
+      provider_id: pid, message_id: "recent-noise", in_reply_to_email_id: null,
+      from_address: "updates@example.com", to_addresses: ["me@example.com"], cc_addresses: [],
+      subject: "recent unrelated", text_body: "body", html_body: null,
+      attachments: [], attachment_paths: [], headers: {}, raw_size: 80,
+      received_at: "2026-06-04T11:30:09.000Z",
+    }, db);
+    storeInboundEmail({
+      provider_id: pid, message_id: "older-target", in_reply_to_email_id: null,
+      from_address: "security@example.com", to_addresses: ["me@example.com"], cc_addresses: [],
+      subject: "target login alert", text_body: "body", html_body: null,
+      attachments: [], attachment_paths: [], headers: {}, raw_size: 80,
+      received_at: "2026-06-04T11:29:09.000Z",
+    }, db);
+
+    const results = listInboundEmails({
+      provider_id: pid,
+      recipients: ["me@example.com"],
+      from: "security",
+      subject: "target",
+      limit: 1,
+    }, db);
+
+    expect(results.map((email) => email.subject)).toEqual(["target login alert"]);
   });
 });
 

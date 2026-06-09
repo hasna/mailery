@@ -6,17 +6,15 @@
  * owner owns or administers, so one caller can never act as another tenant.
  */
 import { verifySendKey, canOwnerSendFrom } from "../../db/send-keys.js";
-import { getOwner, assignAddressOwner, listAddressesByOwner, getAddressOwnership } from "../../db/owners.js";
+import { getOwner, assignAddressOwner, listAddressesByOwner, listAdministeredAddressesNotOwnedBy, getAddressOwnership } from "../../db/owners.js";
 import { getActiveProvider, getProvider } from "../../db/providers.js";
 import { createAddress, getAddressByEmail } from "../../db/addresses.js";
 import { createEmail } from "../../db/emails.js";
 import { storeEmailContent } from "../../db/email-content.js";
-import { listInboundEmails, getInboundEmail, setInboundRead } from "../../db/inbound.js";
-import { listAliases, CATCH_ALL } from "../../db/aliases.js";
+import { listInboundEmailSummariesForOwner, getInboundEmail, getInboundEmailSummary, setInboundReadFlag, inboundEmailBelongsToOwner } from "../../db/inbound.js";
 import { getAdapter } from "../../providers/index.js";
-import { sendWithFailover } from "../../lib/send.js";
-import { getDatabase, resolvePartialId } from "../../db/database.js";
-import { json, badRequest, notFound, internalError, parseBody, resolveId } from "./helpers.js";
+import { getDatabase } from "../../db/database.js";
+import { json, badRequest, notFound, internalError, parseBody, queryInteger, resolveIdStrict } from "./helpers.js";
 
 function unauthorized(msg = "Missing or invalid send key"): Response {
   return json({ error: msg }, 401);
@@ -35,30 +33,21 @@ function authOwner(req: Request) {
   return getOwner(key.owner_id);
 }
 
-/** Emails this owner owns or administers, de-duplicated by address. */
-function scopedEmails(ownerId: string): Set<string> {
-  const addrs = [...listAddressesByOwner(ownerId, "owner"), ...listAddressesByOwner(ownerId, "administrator")];
-  return new Set(addrs.map((a) => a.email.toLowerCase()));
+function queryBoolean(url: URL, key: string): boolean | undefined {
+  if (!url.searchParams.has(key)) return undefined;
+  const value = (url.searchParams.get(key) ?? "").trim().toLowerCase();
+  if (!value) return true;
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  return undefined;
 }
 
-/**
- * The full set of recipient addresses + domains whose inbound mail belongs to
- * this owner: their own addresses, plus alias sources and catch-all domains
- * that route TO one of their addresses.
- */
-function scopedRecipients(ownerId: string): { addresses: string[]; domains: string[] } {
-  const owned = scopedEmails(ownerId);
-  const addresses = new Set(owned);
-  const domains = new Set<string>();
-  for (const a of listAliases()) {
-    if (!owned.has(a.target_address.toLowerCase())) continue;
-    if (a.local_part === CATCH_ALL) domains.add(a.domain.toLowerCase());
-    else addresses.add(`${a.local_part}@${a.domain}`.toLowerCase());
-  }
-  return { addresses: [...addresses], domains: [...domains] };
+function queryText(url: URL, key: string): string | undefined {
+  const value = url.searchParams.get(key)?.trim();
+  return value ? value : undefined;
 }
 
-export async function handle(req: Request, _url: URL, path: string, method: string): Promise<Response | null> {
+export async function handle(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
   if (!path.startsWith("/api/v1/")) return null;
 
   const owner = authOwner(req);
@@ -71,7 +60,7 @@ export async function handle(req: Request, _url: URL, path: string, method: stri
       const email = String(body.email ?? "").trim();
       if (!email) return badRequest("email is required");
       const providerId = body.provider_id
-        ? resolveId("providers", String(body.provider_id))
+        ? resolveIdStrict("providers", String(body.provider_id))
         : getActiveProvider().id;
       if (!providerId) return notFound("Provider not found");
       const provider = getProvider(providerId);
@@ -97,8 +86,12 @@ export async function handle(req: Request, _url: URL, path: string, method: stri
   // GET /api/v1/addresses — addresses the caller owns/administers.
   if (path === "/api/v1/addresses" && method === "GET") {
     try {
-      const owned = listAddressesByOwner(owner.id, "owner");
-      const administered = listAddressesByOwner(owner.id, "administrator").filter((a) => !owned.some((o) => o.id === a.id));
+      const page = {
+        limit: queryInteger(url, "limit", 200, { min: 1, max: 1000 }),
+        offset: queryInteger(url, "offset", 0, { min: 0 }),
+      };
+      const owned = listAddressesByOwner(owner.id, "owner", undefined, page);
+      const administered = listAdministeredAddressesNotOwnedBy(owner.id, undefined, page);
       return json({ owner: { id: owner.id, name: owner.name, type: owner.type }, owned, administered });
     } catch (e) { return internalError(e); }
   }
@@ -117,7 +110,7 @@ export async function handle(req: Request, _url: URL, path: string, method: stri
         return forbidden(`Not authorized to send from ${from}`);
       }
       const providerId = body.provider_id
-        ? resolveId("providers", String(body.provider_id)) ?? ""
+        ? resolveIdStrict("providers", String(body.provider_id))
         : getActiveProvider().id;
       const sendOpts = {
         provider_id: providerId || undefined,
@@ -131,6 +124,7 @@ export async function handle(req: Request, _url: URL, path: string, method: stri
         text: body.text as string | undefined,
       };
       const db = getDatabase();
+      const { sendWithFailover } = await import("../../lib/send.js");
       const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, db);
       const email = createEmail(actual, sendOpts, messageId, db);
       storeEmailContent(email.id, { html: sendOpts.html, text: sendOpts.text }, db);
@@ -143,9 +137,18 @@ export async function handle(req: Request, _url: URL, path: string, method: stri
   // truncated by a global row cap.
   if (path === "/api/v1/inbox" && method === "GET") {
     try {
-      const { addresses, domains } = scopedRecipients(owner.id);
-      if (addresses.length === 0 && domains.length === 0) return json([]);
-      const mine = listInboundEmails({ limit: 200, recipients: addresses, recipientDomains: domains });
+      const mine = listInboundEmailSummariesForOwner(owner.id, {
+        limit: queryInteger(url, "limit", 200, { min: 1, max: 1000 }),
+        offset: queryInteger(url, "offset", 0, { min: 0 }),
+        since: queryText(url, "since"),
+        search: queryText(url, "search") ?? queryText(url, "q"),
+        from: queryText(url, "from"),
+        subject: queryText(url, "subject"),
+        unread: queryBoolean(url, "unread"),
+        read: queryBoolean(url, "read"),
+        starred: queryBoolean(url, "starred"),
+        archived: queryBoolean(url, "archived"),
+      });
       return json(mine);
     } catch (e) { return internalError(e); }
   }
@@ -155,18 +158,14 @@ export async function handle(req: Request, _url: URL, path: string, method: stri
   if (inboxMatch && method === "GET") {
     try {
       const db = getDatabase();
-      const id = resolvePartialId(db, "inbound_emails", inboxMatch[1]!) ?? inboxMatch[1]!;
+      const id = resolveIdStrict("inbound_emails", inboxMatch[1]!);
+      const summary = getInboundEmailSummary(id, db);
+      if (!summary) return notFound("Inbound email not found");
+      if (!inboundEmailBelongsToOwner(summary.id, owner.id, db)) return forbidden("This email is not addressed to one of your addresses");
+      if (!summary.is_read) setInboundReadFlag(id, true, db);
       const email = getInboundEmail(id, db);
       if (!email) return notFound("Inbound email not found");
-      const { addresses, domains } = scopedRecipients(owner.id);
-      const addrSet = new Set(addresses);
-      const mine = email.to_addresses.some((t) => {
-        const lt = t.toLowerCase();
-        return addrSet.has(lt) || domains.some((d) => lt.endsWith(`@${d}`));
-      });
-      if (!mine) return forbidden("This email is not addressed to one of your addresses");
-      const updated = email.is_read ? email : setInboundRead(id, true, db);
-      return json(updated);
+      return json(email);
     } catch (e) { return internalError(e); }
   }
 

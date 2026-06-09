@@ -1,9 +1,17 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { createProvider, listProviders, deleteProvider, getProvider, updateProvider } from "../../db/providers.js";
-import { getAdapter } from "../../providers/index.js";
-import { redactSecrets } from "../../lib/redaction.js";
-import { formatError, resolveId, ProviderNotFoundError } from "../helpers.js";
+
+type ProviderToolName =
+  | "list_providers"
+  | "add_provider"
+  | "update_provider"
+  | "authenticate_gmail_provider"
+  | "remove_provider";
+
+async function runProviderTool(name: ProviderToolName, input: Record<string, unknown>) {
+  const { runProviderTool: run } = await import("./providers-impl.js");
+  return run(name, input);
+}
 
 export function registerProviderTools(server: McpServer): void {
 // ─── PROVIDERS ────────────────────────────────────────────────────────────────
@@ -11,14 +19,12 @@ export function registerProviderTools(server: McpServer): void {
   server.tool(
   "list_providers",
   "List all configured email providers",
-  {},
-  async () => {
-    try {
-      const providers = listProviders();
-      return { content: [{ type: "text", text: JSON.stringify(redactSecrets(providers), null, 2) }] };
-    } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
-    }
+  {
+    limit: z.number().int().positive().max(1000).optional().describe("Maximum providers to return"),
+    offset: z.number().int().min(0).optional().describe("Number of providers to skip"),
+  },
+  async ({ limit, offset }) => {
+    return runProviderTool("list_providers", { limit, offset });
   },
 );
 
@@ -40,34 +46,7 @@ export function registerProviderTools(server: McpServer): void {
     skip_validation: z.boolean().optional().describe("Skip credential validation after adding (default: false)"),
   },
   async (input) => {
-    try {
-      const { skip_validation, ...providerInput } = input;
-      const provider = createProvider(providerInput);
-
-      if (!skip_validation && provider.type !== "sandbox") {
-        try {
-          const adapter = getAdapter(provider);
-          if (provider.type === "gmail") {
-            await adapter.listAddresses();
-          } else {
-            await adapter.listDomains();
-          }
-        } catch (validationErr) {
-          deleteProvider(provider.id);
-          return {
-            content: [{
-              type: "text",
-              text: `Error: Provider credentials are invalid: ${validationErr instanceof Error ? validationErr.message : String(validationErr)}. Provider was not saved.`,
-            }],
-            isError: true,
-          };
-        }
-      }
-
-      return { content: [{ type: "text", text: JSON.stringify(redactSecrets(provider), null, 2) }] };
-    } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
-    }
+    return runProviderTool("add_provider", input);
   },
 );
 
@@ -88,14 +67,7 @@ export function registerProviderTools(server: McpServer): void {
     oauth_token_expiry: z.string().optional().describe("Gmail OAuth token expiry (ISO 8601)"),
   },
   async (input) => {
-    try {
-      const resolvedId = resolveId("providers", input.id);
-      const { id: _, ...updates } = input;
-      const updated = updateProvider(resolvedId, updates);
-      return { content: [{ type: "text", text: JSON.stringify(redactSecrets(updated), null, 2) }] };
-    } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
-    }
+    return runProviderTool("update_provider", input);
   },
 );
 
@@ -106,36 +78,7 @@ export function registerProviderTools(server: McpServer): void {
     provider_id: z.string().describe("Gmail provider ID (or prefix)"),
   },
   async ({ provider_id }) => {
-    try {
-      const id = resolveId("providers", provider_id);
-      const provider = getProvider(id);
-      if (!provider) throw new Error(`Provider not found: ${provider_id}`);
-      if (provider.type !== "gmail") throw new Error("Only Gmail providers require OAuth authentication");
-      if (!provider.oauth_client_id || !provider.oauth_client_secret) {
-        throw new Error("Provider is missing oauth_client_id or oauth_client_secret");
-      }
-
-      const { startGmailOAuthFlow } = await import("../../lib/gmail-oauth.js");
-      const tokens = await startGmailOAuthFlow(provider.oauth_client_id, provider.oauth_client_secret);
-
-      const { updateProvider } = await import("../../db/providers.js");
-      const updated = updateProvider(id, {
-        oauth_refresh_token: tokens.refresh_token,
-        oauth_access_token: tokens.access_token,
-        oauth_token_expiry: tokens.expiry,
-      });
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(redactSecrets({ success: true, provider: updated }), null, 2),
-          },
-        ],
-      };
-    } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
-    }
+    return runProviderTool("authenticate_gmail_provider", { provider_id });
   },
 );
 
@@ -146,15 +89,7 @@ export function registerProviderTools(server: McpServer): void {
     provider_id: z.string().describe("Provider ID (or prefix)"),
   },
   async ({ provider_id }) => {
-    try {
-      const id = resolveId("providers", provider_id);
-      const provider = getProvider(id);
-      if (!provider) throw new ProviderNotFoundError(id);
-      deleteProvider(id);
-      return { content: [{ type: "text", text: `Provider removed: ${provider.name}` }] };
-    } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
-    }
+    return runProviderTool("remove_provider", { provider_id });
   },
 );
 

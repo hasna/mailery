@@ -4,11 +4,22 @@ import { getDatabase, resetDatabase, uuid } from "./database.js";
 import {
   storeInboundEmail,
   getInboundEmail,
+  getInboundEmailSummary,
+  getInboundAttachmentPaths,
+  listInboundSubjectsForRecipient,
   listInboundEmails,
+  listInboundEmailSummaries,
+  listReplySummaries,
   deleteInboundEmail,
   clearInboundEmails,
   getInboundCount,
+  getReceivedInboundCount,
+  getLatestInboundReceivedAt,
+  getLatestReceivedInboundAt,
+  addInboundLabel,
+  removeInboundLabel,
   listReplies,
+  listReplyPromptParts,
   getReplyCount,
 } from "./inbound.js";
 
@@ -55,6 +66,39 @@ describe("storeInboundEmail", () => {
     expect(email.created_at).toBeTruthy();
   });
 
+  it("returns newly stored inbound email without selecting the row back", () => {
+    const db = makeDb();
+    const queries: string[] = [];
+    const runs: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        if (prop === "run") return (sql: string, ...args: unknown[]) => {
+          runs.push(sql);
+          return target.run(sql, ...args);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    const email = storeInboundEmail({
+      ...sampleInput,
+      message_id: "no-select-back",
+      received_at: "2026-01-01T00:00:00.000Z",
+    }, recordingDb);
+
+    expect(email.message_id).toBe("no-select-back");
+    expect(email.received_at).toBe("2026-01-01T00:00:00.000Z");
+    expect(email.is_read).toBe(false);
+    expect(runs.filter((sql) => sql.includes("INSERT INTO inbound_emails"))).toHaveLength(1);
+    expect(queries.filter((sql) => sql.includes("SELECT * FROM inbound_emails WHERE id = ?"))).toHaveLength(0);
+    expect(getInboundEmail(email.id, db)?.created_at).toBe(email.created_at);
+  });
+
   it("stores email with null provider_id", () => {
     const db = makeDb();
     const email = storeInboundEmail({ ...sampleInput, provider_id: null }, db);
@@ -75,6 +119,121 @@ describe("getInboundEmail", () => {
   it("returns null for unknown id", () => {
     const db = makeDb();
     expect(getInboundEmail("nonexistent-id", db)).toBeNull();
+  });
+
+  it("tolerates malformed attachment path JSON", () => {
+    const db = makeDb();
+    const stored = storeInboundEmail(sampleInput, db);
+    db.run("UPDATE inbound_emails SET attachment_paths = ? WHERE id = ?", ["not-json", stored.id]);
+
+    expect(getInboundEmail(stored.id, db)?.attachment_paths).toEqual([]);
+    expect(listInboundEmails({}, db)[0]?.attachment_paths).toEqual([]);
+    expect(getInboundAttachmentPaths(stored.id, db)).toEqual([]);
+  });
+
+  it("reads attachment paths with a narrow projection", () => {
+    const db = makeDb();
+    const stored = storeInboundEmail({
+      ...sampleInput,
+      text_body: "large body ".repeat(1000),
+      html_body: `<p>${"large html ".repeat(1000)}</p>`,
+      headers: { "x-large": "header" },
+      attachments: [{ filename: "report.pdf", content_type: "application/pdf", size: 2048 }],
+      attachment_paths: [{ filename: "report.pdf", content_type: "application/pdf", size: 2048, local_path: "/tmp/report.pdf" }],
+    }, db);
+
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    const paths = getInboundAttachmentPaths(stored.id, recordingDb);
+
+    expect(paths).toEqual([{ filename: "report.pdf", content_type: "application/pdf", size: 2048, local_path: "/tmp/report.pdf" }]);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain("SELECT attachment_paths");
+    expect(queries[0]).not.toContain("SELECT *");
+    expect(queries[0]).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
+  });
+
+  it("returns null attachment paths for an unknown inbound id", () => {
+    const db = makeDb();
+    expect(getInboundAttachmentPaths("missing", db)).toBeNull();
+  });
+
+  it("lists recent received subjects for one recipient through the recipient index", () => {
+    const db = makeDb();
+    storeInboundEmail({
+      ...sampleInput,
+      subject: "old target",
+      to_addresses: ["Receiver@Example.com"],
+      text_body: "old body ".repeat(1000),
+      html_body: `<p>${"old html ".repeat(1000)}</p>`,
+      headers: { "x-hidden": "old" },
+      received_at: "2026-01-01T00:00:00.000Z",
+    }, db);
+    const archived = storeInboundEmail({
+      ...sampleInput,
+      subject: "archived target",
+      to_addresses: ["receiver@example.com"],
+      received_at: "2026-01-03T00:00:00.000Z",
+    }, db);
+    db.run("UPDATE inbound_emails SET is_archived = 1 WHERE id = ?", [archived.id]);
+    storeInboundEmail({
+      ...sampleInput,
+      subject: "synced sent target",
+      to_addresses: ["receiver@example.com"],
+      label_ids: ["SENT"],
+      received_at: "2026-01-04T00:00:00.000Z",
+    }, db);
+    storeInboundEmail({
+      ...sampleInput,
+      subject: "other recipient",
+      to_addresses: ["other@example.com"],
+      received_at: "2026-01-05T00:00:00.000Z",
+    }, db);
+    storeInboundEmail({
+      ...sampleInput,
+      subject: "new target",
+      to_addresses: ["receiver@example.com"],
+      text_body: "new body ".repeat(1000),
+      html_body: `<p>${"new html ".repeat(1000)}</p>`,
+      headers: { "x-hidden": "new" },
+      received_at: "2026-01-02T00:00:00.000Z",
+    }, db);
+
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    const subjects = listInboundSubjectsForRecipient(
+      "receiver@example.com",
+      { since: "2026-01-02T00:00:00.000Z", limit: 10 },
+      recordingDb,
+    );
+
+    expect(subjects.map((row) => row.subject)).toEqual(["new target"]);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain("FROM inbound_recipients recipient");
+    expect(queries[0]).toContain("recipient.address = ?");
+    expect(queries[0]).toContain("LIMIT ?");
+    expect(queries[0]).not.toContain("to_addresses LIKE");
+    expect(queries[0]).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
   });
 });
 
@@ -133,6 +292,125 @@ describe("listInboundEmails", () => {
   it("returns empty array when none exist", () => {
     const db = makeDb();
     expect(listInboundEmails({}, db)).toEqual([]);
+  });
+
+  it("filters recipient addresses and domains through display-name recipients", () => {
+    const db = makeDb();
+    storeInboundEmail({
+      ...sampleInput,
+      subject: "display recipient",
+      to_addresses: ['"Target User" <target@example.com>'],
+    }, db);
+
+    expect(listInboundEmails({ recipients: ["target@example.com"] }, db).map((email) => email.subject)).toEqual(["display recipient"]);
+    expect(listInboundEmails({ recipientDomains: ["example.com"] }, db).map((email) => email.subject)).toEqual(["display recipient"]);
+    expect(listInboundEmails({ recipients: ["not-an-email"] }, db)).toEqual([]);
+  });
+
+  it("searches in SQL before applying the result limit", () => {
+    const db = makeDb();
+    storeInboundEmail({
+      ...sampleInput,
+      subject: "recent unrelated",
+      to_addresses: ["recent@example.com"],
+      text_body: "nothing to see",
+      received_at: "2026-01-03T10:00:00.000Z",
+    }, db);
+    storeInboundEmail({
+      ...sampleInput,
+      subject: "older matching",
+      to_addresses: ["target@example.com"],
+      text_body: "needle body",
+      received_at: "2026-01-01T10:00:00.000Z",
+    }, db);
+
+    expect(listInboundEmails({ search: "needle", limit: 1 }, db).map((email) => email.subject)).toEqual(["older matching"]);
+    expect(listInboundEmails({ search: "target@example.com", limit: 1 }, db).map((email) => email.subject)).toEqual(["older matching"]);
+  });
+
+  it("lists summary rows without projecting bodies or headers", () => {
+    const db = makeDb();
+    storeInboundEmail({
+      ...sampleInput,
+      subject: "summary",
+      text_body: "large text body ".repeat(1000),
+      html_body: `<p>${"large html body ".repeat(1000)}</p>`,
+      headers: { "x-large": "header" },
+    }, db);
+
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    const [summary] = listInboundEmailSummaries({ limit: 1 }, recordingDb);
+
+    expect(summary?.subject).toBe("summary");
+    expect("text_body" in summary!).toBe(false);
+    expect("html_body" in summary!).toBe(false);
+    expect("headers" in summary!).toBe(false);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).not.toContain("SELECT *");
+    expect(queries[0]).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
+  });
+
+  it("reads one summary by id without projecting bodies or headers", () => {
+    const db = makeDb();
+    const email = storeInboundEmail({
+      ...sampleInput,
+      subject: "one summary",
+      text_body: "large text body ".repeat(1000),
+      html_body: `<p>${"large html body ".repeat(1000)}</p>`,
+      headers: { "x-large": "header" },
+    }, db);
+
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    const summary = getInboundEmailSummary(email.id, recordingDb);
+
+    expect(summary?.subject).toBe("one summary");
+    expect("text_body" in summary!).toBe(false);
+    expect("html_body" in summary!).toBe(false);
+    expect("headers" in summary!).toBe(false);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).not.toContain("SELECT *");
+    expect(queries[0]).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
+    expect(getInboundEmailSummary("missing", db)).toBeNull();
+  });
+
+  it("excludes Gmail SENT rows from received-mail lists by default", () => {
+    const db = makeDb();
+    storeInboundEmail({ ...sampleInput, subject: "received" }, db);
+    const sent = storeInboundEmail({
+      ...sampleInput,
+      subject: "synced sent",
+      from_address: "me@example.com",
+      to_addresses: ["recipient@example.com"],
+      label_ids: ["SENT"],
+    }, db);
+
+    expect(sent.is_sent).toBe(true);
+    expect(listInboundEmails({}, db).map((email) => email.subject)).toEqual(["received"]);
+    expect(listInboundEmailSummaries({}, db).map((email) => email.subject)).toEqual(["received"]);
+    expect(listInboundEmails({ sent: true }, db).map((email) => email.subject)).toEqual(["synced sent"]);
+    expect(listInboundEmails({ includeSent: true }, db).map((email) => email.subject).sort()).toEqual(["received", "synced sent"]);
   });
 });
 
@@ -194,6 +472,87 @@ describe("getInboundCount", () => {
     storeInboundEmail({ ...sampleInput, provider_id: provA }, db);
     storeInboundEmail(sampleInput, db);
     expect(getInboundCount(provA, db)).toBe(1);
+  });
+
+  it("keeps received-only counts separate from synced sent rows", () => {
+    const db = makeDb();
+    const provA = createProvider(db, "prov-a");
+    storeInboundEmail({ ...sampleInput, provider_id: provA, message_id: "received-count", subject: "received" }, db);
+    storeInboundEmail({
+      ...sampleInput,
+      provider_id: provA,
+      message_id: "sent-count",
+      subject: "synced sent",
+      from_address: "me@example.com",
+      to_addresses: ["client@example.com"],
+      label_ids: ["SENT"],
+    }, db);
+
+    expect(getInboundCount(undefined, db)).toBe(2);
+    expect(getInboundCount(provA, db)).toBe(2);
+    expect(getReceivedInboundCount(undefined, db)).toBe(1);
+    expect(getReceivedInboundCount(provA, db)).toBe(1);
+  });
+});
+
+describe("getLatestInboundReceivedAt", () => {
+  it("returns the newest inbound timestamp across archived and active mail", () => {
+    const db = makeDb();
+    const older = storeInboundEmail({ ...sampleInput, subject: "older", received_at: "2026-01-01T10:00:00.000Z" }, db);
+    db.run("UPDATE inbound_emails SET is_archived = 1 WHERE id = ?", [older.id]);
+    storeInboundEmail({ ...sampleInput, subject: "newer", received_at: "2026-01-02T10:00:00.000Z" }, db);
+
+    expect(getLatestInboundReceivedAt(db)).toBe("2026-01-02T10:00:00.000Z");
+  });
+
+  it("returns null when there is no inbound mail", () => {
+    const db = makeDb();
+    expect(getLatestInboundReceivedAt(db)).toBeNull();
+  });
+
+  it("keeps the received-only newest timestamp separate from synced sent rows", () => {
+    const db = makeDb();
+    storeInboundEmail({
+      ...sampleInput,
+      subject: "received",
+      received_at: "2026-01-01T10:00:00.000Z",
+    }, db);
+    storeInboundEmail({
+      ...sampleInput,
+      subject: "newer sent",
+      from_address: "me@example.com",
+      to_addresses: ["client@example.com"],
+      label_ids: ["SENT"],
+      received_at: "2026-01-02T10:00:00.000Z",
+    }, db);
+
+    expect(getLatestInboundReceivedAt(db)).toBe("2026-01-02T10:00:00.000Z");
+    expect(getLatestReceivedInboundAt(db)).toBe("2026-01-01T10:00:00.000Z");
+  });
+
+  it("returns null when there is no received mail", () => {
+    const db = makeDb();
+    storeInboundEmail({
+      ...sampleInput,
+      subject: "sent only",
+      from_address: "me@example.com",
+      to_addresses: ["client@example.com"],
+      label_ids: ["SENT"],
+      received_at: "2026-01-02T10:00:00.000Z",
+    }, db);
+
+    expect(getLatestReceivedInboundAt(db)).toBeNull();
+  });
+});
+
+describe("label mutations", () => {
+  it("recovers from malformed label JSON", () => {
+    const db = makeDb();
+    const stored = storeInboundEmail(sampleInput, db);
+    db.run("UPDATE inbound_emails SET label_ids_json = ? WHERE id = ?", ["not-json", stored.id]);
+
+    expect(addInboundLabel(stored.id, "work", db).label_ids).toEqual(["work"]);
+    expect(removeInboundLabel(stored.id, "work", db).label_ids).toEqual([]);
   });
 });
 
@@ -264,9 +623,112 @@ describe("listReplies", () => {
     expect(listReplies(sentId, db).length).toBe(2);
   });
 
+  it("paginates replies in received order when requested", () => {
+    const db = makeDb();
+    const sentId = insertSentEmail(db, "list-mid-paged");
+    storeInboundEmail({
+      ...sampleInput,
+      message_id: "reply-old",
+      subject: "Old reply",
+      in_reply_to_email_id: sentId,
+      received_at: "2026-01-01T00:00:00.000Z",
+    }, db);
+    storeInboundEmail({
+      ...sampleInput,
+      message_id: "reply-middle",
+      subject: "Middle reply",
+      in_reply_to_email_id: sentId,
+      received_at: "2026-01-02T00:00:00.000Z",
+    }, db);
+    storeInboundEmail({
+      ...sampleInput,
+      message_id: "reply-new",
+      subject: "New reply",
+      in_reply_to_email_id: sentId,
+      received_at: "2026-01-03T00:00:00.000Z",
+    }, db);
+
+    const page = listReplies(sentId, db, { limit: 1, offset: 1 });
+    expect(page.map((reply) => reply.subject)).toEqual(["Middle reply"]);
+  });
+
   it("returns empty array when no replies", () => {
     const db = makeDb();
     expect(listReplies("nonexistent-email-id", db)).toEqual([]);
+  });
+
+  it("lists reply summaries without projecting bodies or headers", () => {
+    const db = makeDb();
+    const sentId = insertSentEmail(db, "summary-replies");
+    storeInboundEmail({
+      ...sampleInput,
+      subject: "Summary reply",
+      text_body: "large reply body ".repeat(1000),
+      html_body: `<p>${"large reply html ".repeat(1000)}</p>`,
+      headers: { "x-large": "header" },
+      in_reply_to_email_id: sentId,
+      received_at: "2026-01-01T00:00:00.000Z",
+    }, db);
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    const [summary] = listReplySummaries(sentId, recordingDb, { limit: 1 });
+
+    expect(summary?.subject).toBe("Summary reply");
+    expect("text_body" in summary!).toBe(false);
+    expect("html_body" in summary!).toBe(false);
+    expect("headers" in summary!).toBe(false);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).not.toContain("SELECT *");
+    expect(queries[0]).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
+  });
+
+  it("lists reply prompt parts without projecting html, headers, or attachments", () => {
+    const db = makeDb();
+    const sentId = insertSentEmail(db, "prompt-replies");
+    storeInboundEmail({
+      ...sampleInput,
+      subject: "Prompt reply",
+      text_body: "short prompt body",
+      html_body: `<p>${"large reply html ".repeat(1000)}</p>`,
+      attachments: [{ filename: "big.zip", content_type: "application/zip", size: 50_000_000 }],
+      attachment_paths: [{ filename: "big.zip", content_type: "application/zip", size: 50_000_000, local_path: "/tmp/big.zip" }],
+      headers: { "x-large": "header" },
+      in_reply_to_email_id: sentId,
+      received_at: "2026-01-01T00:00:00.000Z",
+    }, db);
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    const [part] = listReplyPromptParts(sentId, recordingDb, { limit: 1 });
+
+    expect(part).toEqual({
+      from_address: "sender@example.com",
+      subject: "Prompt reply",
+      text_body: "short prompt body",
+    });
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain("SELECT from_address, subject, text_body");
+    expect(queries[0]).not.toContain("SELECT *");
+    expect(queries[0]).not.toMatch(/\b(html_body|headers_json|attachments_json|attachment_paths)\b/);
   });
 });
 

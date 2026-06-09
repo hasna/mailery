@@ -2,8 +2,12 @@ import { readFileSync } from "fs";
 import { getAdapter } from "../providers/index.js";
 import { getTemplateByName, renderTemplate } from "../db/templates.js";
 import { createEmail } from "../db/emails.js";
-import { isContactSuppressed, incrementSendCount, upsertContact } from "../db/contacts.js";
+import { getSuppressedEmailSet, incrementSendCounts } from "../db/contacts.js";
+import { getDatabase } from "../db/database.js";
+import { parseCsv } from "./csv.js";
 import type { Provider } from "../types/index.js";
+
+export { parseCsv } from "./csv.js";
 
 export interface BatchResult {
   total: number;
@@ -11,18 +15,6 @@ export interface BatchResult {
   failed: number;
   suppressed: number;
   errors: { email: string; error: string }[];
-}
-
-export function parseCsv(content: string): Record<string, string>[] {
-  const lines = content.trim().split("\n");
-  if (lines.length < 2) return [];
-  const headers = lines[0]!.split(",").map(h => h.trim());
-  return lines.slice(1).map(line => {
-    const values = line.split(",").map(v => v.trim());
-    const row: Record<string, string> = {};
-    headers.forEach((h, i) => { row[h] = values[i] || ""; });
-    return row;
-  });
 }
 
 export async function batchSend(opts: {
@@ -36,16 +28,19 @@ export async function batchSend(opts: {
   /** @internal for testing — inject CSV content instead of reading from file */
   _csvContent?: string;
 }): Promise<BatchResult> {
+  const db = getDatabase();
   const csvContent = opts._csvContent ?? readFileSync(opts.csvPath, "utf-8");
   const rows = parseCsv(csvContent);
 
-  const template = getTemplateByName(opts.templateName);
+  const template = getTemplateByName(opts.templateName, db);
   if (!template) {
     throw new Error(`Template not found: ${opts.templateName}`);
   }
 
   const adapter = opts._adapter ?? getAdapter(opts.provider);
   const result: BatchResult = { total: rows.length, sent: 0, failed: 0, suppressed: 0, errors: [] };
+  const suppressedEmailSet = opts.force ? new Set<string>() : getSuppressedEmailSet(rows.map((row) => row["email"] ?? ""), db);
+  const sentEmails: string[] = [];
 
   for (const row of rows) {
     const email = row["email"];
@@ -56,7 +51,7 @@ export async function batchSend(opts: {
     }
 
     // Check suppression
-    if (!opts.force && isContactSuppressed(email)) {
+    if (!opts.force && suppressedEmailSet.has(email)) {
       result.suppressed++;
       continue;
     }
@@ -76,11 +71,8 @@ export async function batchSend(opts: {
       };
 
       const messageId = await adapter.sendEmail(sendOpts);
-      createEmail(opts.provider.id, sendOpts, messageId);
-
-      // Track contact
-      upsertContact(email);
-      incrementSendCount(email);
+      createEmail(opts.provider.id, sendOpts, messageId, db);
+      sentEmails.push(email);
 
       result.sent++;
     } catch (err) {
@@ -88,6 +80,8 @@ export async function batchSend(opts: {
       result.errors.push({ email, error: err instanceof Error ? err.message : String(err) });
     }
   }
+
+  incrementSendCounts(sentEmails, db);
 
   return result;
 }

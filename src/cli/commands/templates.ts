@@ -1,10 +1,10 @@
 import type { Command } from "commander";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import { readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
-import { createTemplate, listTemplates, getTemplate, deleteTemplate, renderTemplate } from "../../db/templates.js";
+import { createTemplate, listTemplateSummaries, getTemplate, deleteTemplate, renderTemplate } from "../../db/templates.js";
 import { truncate } from "../../lib/format.js";
-import { handleError } from "../utils.js";
+import { handleError, parseCliPage } from "../utils.js";
 
 export function registerTemplateCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const templateCmd = program.command("template").description("Manage email templates");
@@ -44,17 +44,19 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
   templateCmd
     .command("list")
     .description("List all templates")
-    .action(() => {
+    .option("--limit <n>", "Maximum templates to show", "50")
+    .option("--offset <n>", "Number of templates to skip", "0")
+    .action((opts: { limit?: string; offset?: string }) => {
       try {
-        const templates = listTemplates();
+        const templates = listTemplateSummaries(undefined, parseCliPage(opts));
         if (templates.length === 0) {
           output([], chalk.dim("No templates configured. Use 'emails template add' to create one."));
           return;
         }
         const tplLines: string[] = [chalk.bold("\nTemplates:")];
         for (const t of templates) {
-          const hasHtml = t.html_template ? chalk.green("html") : chalk.dim("no-html");
-          const hasText = t.text_template ? chalk.green("text") : chalk.dim("no-text");
+          const hasHtml = t.has_html_template ? chalk.green("html") : chalk.dim("no-html");
+          const hasText = t.has_text_template ? chalk.green("text") : chalk.dim("no-text");
           tplLines.push(`  ${chalk.cyan(t.id.slice(0, 8))}  ${t.name}  subject="${truncate(t.subject_template, 30)}"  [${hasHtml}] [${hasText}]`);
         }
         tplLines.push("");

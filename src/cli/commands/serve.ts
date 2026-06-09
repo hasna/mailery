@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

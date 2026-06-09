@@ -1,5 +1,6 @@
 import type { Database } from "./database.js";
 import { getDatabase } from "./database.js";
+import { parseJsonObject } from "./json.js";
 
 export interface EmailContent {
   email_id: string;
@@ -46,6 +47,6 @@ export function getEmailContent(
     email_id: row.email_id,
     html: row.html,
     text_body: row.text_body,
-    headers: JSON.parse(row.headers_json || "{}") as Record<string, string>,
+    headers: parseJsonObject<Record<string, string>>(row.headers_json),
   };
 }

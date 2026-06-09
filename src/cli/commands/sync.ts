@@ -1,8 +1,7 @@
 import type { Command } from "commander";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import { listEmails } from "../../db/emails.js";
 import { getLocalStats, formatStatsTable } from "../../lib/stats.js";
-import { syncAll, syncProvider } from "../../lib/sync.js";
 import { getAnalytics, formatAnalytics } from "../../lib/analytics.js";
 import { colorStatus, truncate } from "../../lib/format.js";
 import { getDatabase } from "../../db/database.js";
@@ -19,6 +18,7 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
       .option("--provider <id>", "Specific provider ID")
       .action(async (opts: { provider?: string }) => {
         try {
+          const { syncAll, syncProvider } = await import("../../lib/sync.js");
           if (opts.provider) {
             const id = resolveId("providers", opts.provider);
             await syncProvider(id);
@@ -40,6 +40,7 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
     .option("--interval <duration>", "Watch interval (e.g. 30s, 5m, 1h)", "5m")
     .action(async (opts: { provider?: string; watch?: boolean; interval?: string }) => {
       try {
+        const { syncAll, syncProvider } = await import("../../lib/sync.js");
         const runSync = async () => {
           if (opts.provider) {
             const providerId = resolveId("providers", opts.provider);

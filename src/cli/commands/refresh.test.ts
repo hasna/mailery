@@ -40,6 +40,14 @@ describe("emails refresh", () => {
     expect(lastOpts).toMatchObject({ s3: true, gmail: true, limit: 50 });
   });
 
+  it("bounds invalid or oversized scan limits", async () => {
+    await runAsync(["refresh", "--limit", "-1"]);
+    expect(lastOpts).toMatchObject({ limit: 1000 });
+
+    await runAsync(["refresh", "--limit", "999999"]);
+    expect(lastOpts).toMatchObject({ limit: 10000 });
+  });
+
   it("reports up-to-date when nothing new", async () => {
     pullResult = { pulled: 0, ok: true, configured: true };
     const { out } = await runAsync(["refresh"]);

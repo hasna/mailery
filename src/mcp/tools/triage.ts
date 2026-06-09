@@ -1,8 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { getTriage, listTriaged, getTriageStats, deleteTriage } from "../../db/triage.js";
-import { triageEmail, triageBatch, generateDraftForEmail } from "../../lib/triage.js";
+import { getTriage, listTriagedSummaries, getTriageStats, deleteTriage } from "../../db/triage.js";
 import { formatError } from "../helpers.js";
+
+const MAX_MCP_TRIAGE_BATCH_LIMIT = 100;
+const MAX_MCP_TRIAGE_LIST_LIMIT = 1000;
 
 export function registerTriageTools(server: McpServer): void {
   server.tool(
@@ -16,6 +18,7 @@ export function registerTriageTools(server: McpServer): void {
     },
     async ({ email_id, type, model, skip_draft }) => {
       try {
+        const { triageEmail } = await import("../../lib/triage.js");
         const result = await triageEmail(email_id, type, { model, skip_draft });
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (e) {
@@ -29,12 +32,13 @@ export function registerTriageTools(server: McpServer): void {
     "Triage multiple untriaged emails in batch",
     {
       type: z.enum(["sent", "inbound"]).default("inbound").describe("Email type"),
-      limit: z.number().optional().default(10).describe("Max emails to triage"),
+      limit: z.number().int().positive().max(MAX_MCP_TRIAGE_BATCH_LIMIT).optional().default(10).describe("Max emails to triage (max 100)"),
       model: z.string().optional().describe("Cerebras model override"),
       skip_draft: z.boolean().optional().describe("Skip generating draft replies"),
     },
     async ({ type, limit, model, skip_draft }) => {
       try {
+        const { triageBatch } = await import("../../lib/triage.js");
         const result = await triageBatch(type, limit, { model, skip_draft });
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (e) {
@@ -66,13 +70,14 @@ export function registerTriageTools(server: McpServer): void {
     "List triaged emails with optional filters",
     {
       label: z.enum(["action-required", "fyi", "urgent", "follow-up", "spam", "newsletter", "transactional"]).optional(),
-      priority: z.number().min(1).max(5).optional(),
+      priority: z.number().int().min(1).max(5).optional(),
       sentiment: z.enum(["positive", "negative", "neutral"]).optional(),
-      limit: z.number().optional().default(20),
+      limit: z.number().int().positive().max(MAX_MCP_TRIAGE_LIST_LIMIT).optional().default(20),
+      offset: z.number().int().min(0).optional().default(0),
     },
-    async ({ label, priority, sentiment, limit }) => {
+    async ({ label, priority, sentiment, limit, offset }) => {
       try {
-        const results = listTriaged({ label, priority, sentiment, limit });
+        const results = listTriagedSummaries({ label, priority, sentiment, limit, offset });
         return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
       } catch (e) {
         return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -104,6 +109,7 @@ export function registerTriageTools(server: McpServer): void {
     },
     async ({ email_id, type, model }) => {
       try {
+        const { generateDraftForEmail } = await import("../../lib/triage.js");
         const draft = await generateDraftForEmail(email_id, type, { model });
         return { content: [{ type: "text", text: draft }] };
       } catch (e) {

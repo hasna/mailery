@@ -1,11 +1,10 @@
 import type { Command } from "commander";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import { execSync } from "node:child_process";
-import { listInboundEmails, getInboundEmail, clearInboundEmails, getInboundCount } from "../../db/inbound.js";
-import { createSmtpServer } from "../../lib/inbound.js";
+import { listInboundEmailSummaries, getInboundEmail, clearInboundEmails, getReceivedInboundCount } from "../../db/inbound.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { truncate, formatDate } from "../../lib/format.js";
-import { handleError, resolveId } from "../utils.js";
+import { handleError, parseCliPage, resolveId } from "../utils.js";
 
 export function registerInboundCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const inboundCmd = program.command("inbound").description("Receive and inspect inbound emails");
@@ -15,7 +14,8 @@ export function registerInboundCommands(program: Command, output: (data: unknown
     .description("Start a local SMTP listener to receive inbound emails")
     .option("--port <port>", "SMTP port to listen on", "2525")
     .option("--provider <id>", "Associate received emails with this provider ID")
-    .action((opts: { port?: string; provider?: string }) => {
+    .action(async (opts: { port?: string; provider?: string }) => {
+      const { createSmtpServer } = await import("../../lib/inbound.js");
       const port = parseInt(opts.port ?? "2525", 10);
       const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
       console.log(chalk.green(`✓ SMTP listener started on port ${port}`));
@@ -31,11 +31,12 @@ export function registerInboundCommands(program: Command, output: (data: unknown
     .description("List received inbound emails")
     .option("--provider <id>", "Filter by provider ID")
     .option("--limit <n>", "Max results", "20")
-    .action((opts: { provider?: string; limit?: string }) => {
+    .option("--offset <n>", "Skip first N emails", "0")
+    .action((opts: { provider?: string; limit?: string; offset?: string }) => {
       try {
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const limit = parseInt(opts.limit ?? "20", 10);
-        const emails = listInboundEmails({ provider_id: providerId, limit });
+        const page = parseCliPage(opts, 20);
+        const emails = listInboundEmailSummaries({ provider_id: providerId, limit: page.limit, offset: page.offset });
         if (emails.length === 0) {
           output([], chalk.dim("No inbound emails received yet."));
           return;
@@ -131,7 +132,7 @@ export function registerInboundCommands(program: Command, output: (data: unknown
       try {
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const db = getDatabase();
-        const count = getInboundCount(providerId, db);
+        const count = getReceivedInboundCount(providerId, db);
         output({ count }, `${count} inbound email(s) received`);
       } catch (e) {
         handleError(e);

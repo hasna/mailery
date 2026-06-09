@@ -1,13 +1,20 @@
 import type { Command } from "commander";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import {
   createSequence, getSequence, listSequences, updateSequence,
   addStep, listSteps, removeStep,
-  enroll, unenroll, listEnrollments,
+  enroll, unenroll, listEnrollments, countEnrollmentsByStatus,
+  type EnrollmentStatus,
 } from "../../db/sequences.js";
-import { handleError } from "../utils.js";
+import { handleError, parseCliPage } from "../utils.js";
 
-export function registerSequenceCommands(program: Command, _output: (data: unknown, formatted: string) => void): void {
+function parseEnrollmentStatus(value?: string): EnrollmentStatus | undefined {
+  if (!value) return undefined;
+  if (value === "active" || value === "completed" || value === "cancelled") return value;
+  throw new Error("status must be active, completed, or cancelled");
+}
+
+export function registerSequenceCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const sequenceCmd = program.command("sequence").description("Manage email drip sequences");
   const sequenceStepCmd = sequenceCmd.command("step").description("Manage steps in a sequence");
 
@@ -27,20 +34,24 @@ export function registerSequenceCommands(program: Command, _output: (data: unkno
   sequenceCmd
     .command("list")
     .description("List all sequences")
-    .action(() => {
+    .option("--limit <n>", "Maximum sequences to show", "50")
+    .option("--offset <n>", "Number of sequences to skip", "0")
+    .action((opts: { limit?: string; offset?: string }) => {
       try {
-        const seqs = listSequences();
+        const page = parseCliPage(opts);
+        const seqs = listSequences(undefined, page);
         if (seqs.length === 0) {
-          console.log(chalk.dim("No sequences. Use 'emails sequence create' to add one."));
+          output([], chalk.dim("No sequences. Use 'emails sequence create' to add one."));
           return;
         }
-        console.log(chalk.bold("\nSequences:"));
+        const lines: string[] = [chalk.bold("\nSequences:")];
         for (const s of seqs) {
           const statusColor = s.status === "active" ? chalk.green(s.status) : chalk.yellow(s.status);
           const desc = s.description ? chalk.dim(` — ${s.description}`) : "";
-          console.log(`  ${chalk.cyan(s.id.slice(0, 8))}  ${s.name}  [${statusColor}]${desc}`);
+          lines.push(`  ${chalk.cyan(s.id.slice(0, 8))}  ${s.name}  [${statusColor}]${desc}`);
         }
-        console.log();
+        lines.push("");
+        output(seqs, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }
@@ -54,13 +65,12 @@ export function registerSequenceCommands(program: Command, _output: (data: unkno
         const seq = getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
         const steps = listSteps(seq!.id);
-        const enrollments = listEnrollments({ sequence_id: seq!.id });
-        const activeCount = enrollments.filter(e => e.status === "active").length;
+        const enrollmentCounts = countEnrollmentsByStatus(seq!.id);
 
         console.log(chalk.bold(`\nSequence: ${seq!.name}`));
         if (seq!.description) console.log(chalk.dim(`  ${seq!.description}`));
         console.log(`  Status: ${seq!.status}`);
-        console.log(`  Enrollments: ${activeCount} active / ${enrollments.length} total`);
+        console.log(`  Enrollments: ${enrollmentCounts.active} active / ${enrollmentCounts.total} total`);
         console.log(`\n  Steps (${steps.length}):`);
         if (steps.length === 0) {
           console.log(chalk.dim("    No steps. Use 'emails sequence step add' to add some."));
@@ -170,24 +180,36 @@ export function registerSequenceCommands(program: Command, _output: (data: unkno
     });
 
   sequenceCmd
-    .command("enrollments <name>")
-    .description("List enrollments for a sequence")
-    .action((name: string) => {
+    .command("enrollments [name]")
+    .description("List enrollments, optionally filtered by sequence")
+    .option("--status <status>", "Filter by status: active|completed|cancelled")
+    .option("--limit <n>", "Maximum enrollments to show", "50")
+    .option("--offset <n>", "Number of enrollments to skip", "0")
+    .action((name: string | undefined, opts: { status?: string; limit?: string; offset?: string }) => {
       try {
-        const seq = getSequence(name);
-        if (!seq) handleError(new Error(`Sequence not found: ${name}`));
-        const enrollments = listEnrollments({ sequence_id: seq!.id });
+        const seq = name ? getSequence(name) : null;
+        if (name && !seq) handleError(new Error(`Sequence not found: ${name}`));
+        const page = parseCliPage(opts);
+        const status = parseEnrollmentStatus(opts.status);
+        const enrollments = listEnrollments({
+          ...(seq ? { sequence_id: seq.id } : {}),
+          ...(status ? { status } : {}),
+          ...page,
+        });
         if (enrollments.length === 0) {
-          console.log(chalk.dim("No enrollments."));
+          output([], chalk.dim("No enrollments."));
           return;
         }
-        console.log(chalk.bold(`\nEnrollments for '${name}':`));
+        const scope = seq ? `for '${seq.name}'` : "for all sequences";
+        const lines: string[] = [chalk.bold(`\nEnrollments ${scope}:`)];
         for (const e of enrollments) {
           const statusColor = e.status === "active" ? chalk.green(e.status) : chalk.dim(e.status);
           const next = e.next_send_at ? chalk.dim(` next: ${e.next_send_at}`) : "";
-          console.log(`  ${chalk.cyan(e.id.slice(0, 8))}  ${e.contact_email}  [${statusColor}]  step ${e.current_step}${next}`);
+          const sequence = seq ? "" : `  seq:${e.sequence_id.slice(0, 8)}`;
+          lines.push(`  ${chalk.cyan(e.id.slice(0, 8))}  ${e.contact_email}${sequence}  [${statusColor}]  step ${e.current_step}${next}`);
         }
-        console.log();
+        lines.push("");
+        output(enrollments, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }

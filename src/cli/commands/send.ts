@@ -1,15 +1,14 @@
 import type { Command } from "commander";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import { readFileSync } from "node:fs";
 import { createEmail, getEmail } from "../../db/emails.js";
 import { storeEmailContent } from "../../db/email-content.js";
-import { listProviders, getProvider } from "../../db/providers.js";
+import { getLatestActiveProviderId, getProvider } from "../../db/providers.js";
 import { getTemplate, renderTemplate } from "../../db/templates.js";
-import { isContactSuppressed, incrementSendCount } from "../../db/contacts.js";
+import { getSuppressedEmailSet, incrementSendCounts } from "../../db/contacts.js";
 import { createScheduledEmail } from "../../db/scheduled.js";
 import { getGroupByName, listMembers } from "../../db/groups.js";
 import { getDatabase } from "../../db/database.js";
-import { sendWithFailover } from "../../lib/send.js";
 import { log } from "../../lib/logger.js";
 import { handleError, resolveId } from "../utils.js";
 
@@ -77,7 +76,8 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
 
         // Check suppressed contacts
         const allRecipients = [...toAddresses, ...(opts.cc || []), ...(opts.bcc || [])];
-        const suppressedRecipients = allRecipients.filter((email) => isContactSuppressed(email, db));
+        const suppressedEmailSet = getSuppressedEmailSet(allRecipients, db);
+        const suppressedRecipients = allRecipients.filter((email) => suppressedEmailSet.has(email));
         if (suppressedRecipients.length > 0 && !opts.force) {
           console.log(chalk.yellow(`Warning: Suppressed recipients: ${suppressedRecipients.join(", ")}`));
           console.log(chalk.dim("  Use --force to send anyway."));
@@ -116,9 +116,9 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         if (opts.provider) {
           providerId = resolveId("providers", opts.provider);
         } else {
-          const providers = listProviders(db).filter((p) => p.active);
-          if (providers.length === 0) handleError(new Error("No active providers. Add one with 'emails provider add'"));
-          providerId = providers[0]!.id;
+          const activeProviderId = getLatestActiveProviderId(undefined, db);
+          if (!activeProviderId) handleError(new Error("No active providers. Add one with 'emails provider add'"));
+          providerId = activeProviderId!;
         }
 
         const provider = getProvider(providerId, db);
@@ -266,6 +266,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           return;
         }
 
+        const { sendWithFailover } = await import("../../lib/send.js");
         const { messageId, providerId: actualProviderId, usedFailover } = await sendWithFailover(providerId, sendOpts, db);
         if (usedFailover) log.info(chalk.yellow(`  (Used failover provider)`));
 
@@ -288,9 +289,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         storeEmailContent(email.id, { html: storedHtml, text: textBody }, db);
 
         // Track contacts
-        for (const recipientEmail of allRecipients) {
-          incrementSendCount(recipientEmail, db);
-        }
+        incrementSendCounts(allRecipients, db);
 
         console.log(chalk.green(`✓ Email sent to ${toAddresses.join(", ")}`));
         if (messageId) console.log(chalk.dim(`  Message ID: ${messageId}`));

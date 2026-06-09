@@ -19,6 +19,8 @@ export interface Provider {
   updated_at: string;
 }
 
+export type ProviderSummary = Pick<Provider, "id" | "name" | "type" | "region" | "active" | "created_at" | "updated_at">;
+
 export interface CreateProviderInput {
   name: string;
   type: ProviderType;
@@ -79,7 +81,7 @@ export interface DnsRecord {
   type: "TXT" | "CNAME" | "MX";
   name: string;
   value: string;
-  purpose: "DKIM" | "SPF" | "DMARC" | "MX";
+  purpose: "DKIM" | "SPF" | "DMARC" | "MX" | "SES_IDENTITY";
 }
 
 // Address lifecycle status. `active` can send/receive; `suspended` is blocked
@@ -206,6 +208,8 @@ export interface EmailEvent {
   created_at: string;
 }
 
+export type EventSummary = Omit<EmailEvent, "metadata">;
+
 export interface EventRow {
   id: string;
   email_id: string | null;
@@ -249,6 +253,7 @@ export interface EventFilter {
   provider_id?: string;
   type?: EventType | EventType[];
   since?: string;
+  until?: string;
   limit?: number;
   offset?: number;
 }

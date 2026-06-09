@@ -5,6 +5,7 @@ import type { Provider } from "../types/index.js";
 
 // Track the most-recent command sent to client.send()
 const mockSend = mock(async (_command: unknown) => ({}));
+const mockClassicSend = mock(async (_command: unknown) => ({}));
 
 // We track command instances via their constructor names
 class MockSESv2Client {
@@ -32,6 +33,27 @@ class MockBatchGetMetricDataCommand {
   constructor(public input: unknown) {}
 }
 
+class MockPutEmailIdentityMailFromAttributesCommand {
+  constructor(public input: unknown) {}
+}
+
+class MockSESClassicClient {
+  send = mockClassicSend;
+  constructor(_config: unknown) {}
+}
+
+class MockGetIdentityVerificationAttributesCommand {
+  constructor(public input: unknown) {}
+}
+
+class MockVerifyDomainIdentityCommand {
+  constructor(public input: unknown) {}
+}
+
+class MockVerifyDomainDkimCommand {
+  constructor(public input: unknown) {}
+}
+
 // Mock the entire @aws-sdk/client-sesv2 module
 mock.module("@aws-sdk/client-sesv2", () => ({
   SESv2Client: MockSESv2Client,
@@ -40,6 +62,14 @@ mock.module("@aws-sdk/client-sesv2", () => ({
   CreateEmailIdentityCommand: MockCreateEmailIdentityCommand,
   SendEmailCommand: MockSendEmailCommand,
   BatchGetMetricDataCommand: MockBatchGetMetricDataCommand,
+  PutEmailIdentityMailFromAttributesCommand: MockPutEmailIdentityMailFromAttributesCommand,
+}));
+
+mock.module("@aws-sdk/client-ses", () => ({
+  SESClient: MockSESClassicClient,
+  GetIdentityVerificationAttributesCommand: MockGetIdentityVerificationAttributesCommand,
+  VerifyDomainIdentityCommand: MockVerifyDomainIdentityCommand,
+  VerifyDomainDkimCommand: MockVerifyDomainDkimCommand,
 }));
 
 // Import after mock setup
@@ -67,6 +97,11 @@ function makeProvider(overrides: Partial<Provider> = {}): Provider {
     ...overrides,
   };
 }
+
+beforeEach(() => {
+  mockClassicSend.mockReset();
+  mockClassicSend.mockImplementation(async () => ({}));
+});
 
 // ─── Constructor ─────────────────────────────────────────────────────────────
 
@@ -272,6 +307,33 @@ describe("SESAdapter.getDnsRecords", () => {
     expect(cnames[0]!.purpose).toBe("DKIM");
   });
 
+  it("includes the SES identity verification TXT record when a token is available", async () => {
+    mockClassicSend.mockImplementation(async (cmd: unknown) => {
+      if (cmd instanceof MockGetIdentityVerificationAttributesCommand) {
+        return {
+          VerificationAttributes: {
+            "example.com": { VerificationToken: "identity-token" },
+          },
+        };
+      }
+      return {};
+    });
+    mockSend.mockImplementation(async () => ({
+      DkimAttributes: { Tokens: ["token1"] },
+    }));
+
+    const adapter = new SESAdapter(makeProvider());
+    const records = await adapter.getDnsRecords("example.com");
+
+    const identity = records.find((r) => r.purpose === "SES_IDENTITY");
+    expect(identity).toEqual({
+      type: "TXT",
+      name: "_amazonses.example.com",
+      value: "identity-token",
+      purpose: "SES_IDENTITY",
+    });
+  });
+
   it("always includes SPF TXT record", async () => {
     mockSend.mockImplementation(async () => ({
       DkimAttributes: { Tokens: ["token1"] },
@@ -329,6 +391,37 @@ describe("SESAdapter.getDnsRecords", () => {
   });
 });
 
+describe("SESAdapter.reinitiateDomainVerification", () => {
+  beforeEach(() => {
+    mockClassicSend.mockReset();
+  });
+
+  it("calls classic SES identity and DKIM verification and returns records to publish", async () => {
+    mockClassicSend.mockImplementation(async (cmd: unknown) => {
+      if (cmd instanceof MockVerifyDomainIdentityCommand) {
+        return { VerificationToken: "identity-token" };
+      }
+      if (cmd instanceof MockVerifyDomainDkimCommand) {
+        return { DkimTokens: ["abc123", "def456", "ghi789"] };
+      }
+      return {};
+    });
+
+    const adapter = new SESAdapter(makeProvider());
+    const records = await adapter.reinitiateDomainVerification("example.com");
+
+    expect(mockClassicSend).toHaveBeenCalledTimes(2);
+    expect((mockClassicSend.mock.calls[0]![0] as MockVerifyDomainIdentityCommand).input).toEqual({ Domain: "example.com" });
+    expect((mockClassicSend.mock.calls[1]![0] as MockVerifyDomainDkimCommand).input).toEqual({ Domain: "example.com" });
+    expect(records.map((r) => r.purpose)).toEqual(["SES_IDENTITY", "DKIM", "DKIM", "DKIM"]);
+    expect(records[0]!).toMatchObject({
+      type: "TXT",
+      name: "_amazonses.example.com",
+      value: "identity-token",
+    });
+  });
+});
+
 // ─── verifyDomain ─────────────────────────────────────────────────────────────
 
 describe("SESAdapter.verifyDomain", () => {
@@ -373,6 +466,20 @@ describe("SESAdapter.verifyDomain", () => {
     const result = await adapter.verifyDomain("example.com");
 
     expect(result.dkim).toBe("failed");
+  });
+
+  it("returns failed when SES identity verification status is FAILED", async () => {
+    mockSend.mockImplementation(async () => ({
+      VerifiedForSendingStatus: false,
+      VerificationStatus: "FAILED",
+      DkimAttributes: { Status: "SUCCESS" },
+    }));
+
+    const adapter = new SESAdapter(makeProvider());
+    const result = await adapter.verifyDomain("example.com");
+
+    expect(result.dkim).toBe("verified");
+    expect(result.spf).toBe("failed");
   });
 
   it("returns all pending when GetEmailIdentity throws", async () => {

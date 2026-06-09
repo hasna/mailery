@@ -52,11 +52,24 @@ export function registerWarmingTools(server: McpServer): void {
   server.tool(
     "list_warming_schedules",
     "List all domain warming schedules",
-    { status: z.enum(["active", "paused", "completed"]).optional().describe("Filter by status") },
-    async ({ status }) => {
+    {
+      status: z.enum(["active", "paused", "completed"]).optional().describe("Filter by status"),
+      limit: z.number().int().positive().max(1000).optional().describe("Maximum schedules to return"),
+      offset: z.number().int().min(0).optional().describe("Number of schedules to skip"),
+    },
+    async ({ status, limit, offset }) => {
       try {
-        const schedules = listWarmingSchedules(status);
-        return { content: [{ type: "text", text: JSON.stringify(schedules, null, 2) }] };
+        const effectiveLimit = limit ?? 100;
+        const effectiveOffset = offset ?? 0;
+        const rows = listWarmingSchedules(status, undefined, { limit: effectiveLimit + 1, offset: effectiveOffset });
+        const schedules = rows.slice(0, effectiveLimit);
+        return { content: [{ type: "text", text: JSON.stringify({
+          schedules,
+          limit: effectiveLimit,
+          offset: effectiveOffset,
+          truncated: rows.length > effectiveLimit,
+          cli_equivalent: `emails domain warm-list${status ? ` --status ${status}` : ""}${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
+        }, null, 2) }] };
       } catch (e) {
         return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
       }

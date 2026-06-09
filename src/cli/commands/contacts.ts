@@ -1,7 +1,7 @@
 import type { Command } from "commander";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import { listContacts, suppressContact, unsuppressContact } from "../../db/contacts.js";
-import { handleError } from "../utils.js";
+import { handleError, parseCliPage } from "../utils.js";
 
 export function registerContactCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   // `contact` is the canonical command; `contacts` kept as alias for backwards compat
@@ -12,9 +12,15 @@ export function registerContactCommands(program: Command, output: (data: unknown
       .command("list")
       .description("List contacts")
       .option("--suppressed", "Show only suppressed contacts")
-      .action((opts: { suppressed?: boolean }) => {
+      .option("--limit <n>", "Maximum contacts to show", "50")
+      .option("--offset <n>", "Number of contacts to skip", "0")
+      .action((opts: { suppressed?: boolean; limit?: string; offset?: string }) => {
         try {
-          const contacts = listContacts(opts.suppressed !== undefined ? { suppressed: opts.suppressed } : undefined);
+          const page = parseCliPage(opts);
+          const contacts = listContacts({
+            ...(opts.suppressed !== undefined ? { suppressed: opts.suppressed } : {}),
+            ...page,
+          });
           if (contacts.length === 0) {
             output([], chalk.dim("No contacts tracked yet."));
             return;

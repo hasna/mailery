@@ -1,12 +1,18 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import {
-  createSequence, getSequence, listSequences,
-  addStep, enroll, unenroll, listEnrollments,
-} from "../../db/sequences.js";
-import { listReplies, getReplyCount } from "../../db/inbound.js";
-import { getDatabase, resolvePartialId } from "../../db/database.js";
-import { formatError } from "../helpers.js";
+
+const DEFAULT_MCP_REPLY_LIMIT = 20;
+const MAX_MCP_REPLY_LIMIT = 100;
+
+type ToolResult = {
+  content: Array<{ type: "text"; text: string }>;
+  isError?: boolean;
+};
+
+async function toolError(error: unknown): Promise<ToolResult> {
+  const { formatError } = await import("../helpers.js");
+  return { content: [{ type: "text", text: `Error: ${formatError(error)}` }], isError: true };
+}
 
 export function registerSequenceTools(server: McpServer): void {
 // ─── SEQUENCES ────────────────────────────────────────────────────────────────
@@ -14,13 +20,17 @@ export function registerSequenceTools(server: McpServer): void {
   server.tool(
   "list_sequences",
   "List all email drip sequences",
-  {},
-  async () => {
+  {
+    limit: z.number().int().positive().max(1000).optional().describe("Maximum sequences to return"),
+    offset: z.number().int().min(0).optional().describe("Number of sequences to skip"),
+  },
+  async ({ limit, offset }) => {
     try {
-      const sequences = listSequences();
+      const { listSequences } = await import("../../db/sequences.js");
+      const sequences = listSequences(undefined, { limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(sequences, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
 );
@@ -34,10 +44,11 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ name, description }) => {
     try {
+      const { createSequence } = await import("../../db/sequences.js");
       const sequence = createSequence({ name, description });
       return { content: [{ type: "text", text: JSON.stringify(sequence, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
 );
@@ -55,6 +66,7 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ sequence_id, step_number, delay_hours, template_name, from_address, subject_override }) => {
     try {
+      const { getSequence, addStep } = await import("../../db/sequences.js");
       const seq = getSequence(sequence_id);
       if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
       const step = addStep({
@@ -67,7 +79,7 @@ export function registerSequenceTools(server: McpServer): void {
       });
       return { content: [{ type: "text", text: JSON.stringify(step, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
 );
@@ -82,12 +94,13 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ sequence_id, contact_email, provider_id }) => {
     try {
+      const { getSequence, enroll } = await import("../../db/sequences.js");
       const seq = getSequence(sequence_id);
       if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
       const enrollment = enroll({ sequence_id: seq.id, contact_email, provider_id });
       return { content: [{ type: "text", text: JSON.stringify(enrollment, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
 );
@@ -101,12 +114,13 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ sequence_id, contact_email }) => {
     try {
+      const { getSequence, unenroll } = await import("../../db/sequences.js");
       const seq = getSequence(sequence_id);
       if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
       const removed = unenroll(seq.id, contact_email);
       return { content: [{ type: "text", text: removed ? "Contact unenrolled" : "Contact was not actively enrolled" }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
 );
@@ -117,19 +131,27 @@ export function registerSequenceTools(server: McpServer): void {
   {
     sequence_id: z.string().optional().describe("Sequence ID or name to filter by"),
     status: z.enum(["active", "completed", "cancelled"]).optional().describe("Filter by enrollment status"),
+    limit: z.number().int().positive().max(1000).optional().describe("Maximum enrollments to return"),
+    offset: z.number().int().min(0).optional().describe("Number of enrollments to skip"),
   },
-  async ({ sequence_id, status }) => {
+  async ({ sequence_id, status, limit, offset }) => {
     try {
+      const { getSequence, listEnrollments } = await import("../../db/sequences.js");
       let resolvedSequenceId: string | undefined;
       if (sequence_id) {
         const seq = getSequence(sequence_id);
         if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
         resolvedSequenceId = seq.id;
       }
-      const enrollments = listEnrollments({ sequence_id: resolvedSequenceId, status });
+      const enrollments = listEnrollments({
+        sequence_id: resolvedSequenceId,
+        status,
+        limit: limit ?? 100,
+        offset: offset ?? 0,
+      });
       return { content: [{ type: "text", text: JSON.stringify(enrollments, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
 );
@@ -139,16 +161,36 @@ export function registerSequenceTools(server: McpServer): void {
   server.tool(
   "list_replies",
   "List inbound emails received as replies to a sent email",
-  { email_id: z.string().describe("ID of the sent email to find replies for") },
-  async ({ email_id }) => {
+  {
+    email_id: z.string().describe("ID of the sent email to find replies for"),
+    limit: z.number().int().positive().max(MAX_MCP_REPLY_LIMIT).optional().describe("Maximum replies to return (default 20, max 100)"),
+    offset: z.number().int().min(0).optional().describe("Number of replies to skip"),
+  },
+  async ({ email_id, limit, offset }) => {
     try {
+      const { getDatabase } = await import("../../db/database.js");
+      const { listReplySummaries, getReplyCount } = await import("../../db/inbound.js");
+      const { resolveId } = await import("../helpers.js");
       const db = getDatabase();
-      const resolvedId = resolvePartialId(db, "emails", email_id) ?? email_id;
-      const replies = listReplies(resolvedId, db);
+      const resolvedId = resolveId("emails", email_id);
+      const pageLimit = limit ?? DEFAULT_MCP_REPLY_LIMIT;
+      const pageOffset = offset ?? 0;
+      const replies = listReplySummaries(resolvedId, db, { limit: pageLimit, offset: pageOffset });
       const count = getReplyCount(resolvedId, db);
-      return { content: [{ type: "text", text: JSON.stringify({ count, replies }, null, 2) }] };
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            count,
+            replies,
+            limit: pageLimit,
+            offset: pageOffset,
+            truncated: pageOffset + pageLimit < count,
+          }, null, 2),
+        }],
+      };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
 );

@@ -5,6 +5,7 @@ import {
   getTemplate,
   getTemplateByName,
   listTemplates,
+  listTemplateSummaries,
   deleteTemplate,
   renderTemplate,
 } from "./templates.js";
@@ -58,6 +59,14 @@ describe("getTemplate", () => {
     expect(found?.id).toBe(t.id);
   });
 
+  it("tolerates malformed metadata JSON", () => {
+    const t = createTemplate({ name: "badmeta", subject_template: "Test" });
+    getDatabase().run("UPDATE templates SET metadata = ? WHERE id = ?", ["not-json", t.id]);
+
+    const found = getTemplate(t.id);
+    expect(found?.metadata).toEqual({});
+  });
+
   it("retrieves by name", () => {
     createTemplate({ name: "byname", subject_template: "Test" });
     const found = getTemplate("byname");
@@ -93,6 +102,77 @@ describe("listTemplates", () => {
     createTemplate({ name: "b", subject_template: "B" });
     const list = listTemplates();
     expect(list.length).toBe(2);
+  });
+
+  it("paginates templates after ordering newest first", () => {
+    const db = getDatabase();
+    for (let i = 0; i < 5; i++) {
+      const template = createTemplate({ name: `page-${i}`, subject_template: `Subject ${i}` });
+      const timestamp = `2026-01-0${i + 1}T00:00:00.000Z`;
+      db.run("UPDATE templates SET created_at = ?, updated_at = ? WHERE id = ?", [timestamp, timestamp, template.id]);
+    }
+
+    const page = listTemplates(undefined, { limit: 2, offset: 1 });
+
+    expect(page.map((template) => template.name)).toEqual(["page-3", "page-2"]);
+  });
+});
+
+describe("listTemplateSummaries", () => {
+  it("uses a lean projection and omits template body columns", () => {
+    const db = getDatabase();
+    createTemplate({
+      name: "large",
+      subject_template: "Large {{name}}",
+      html_template: `<main>${"large html body ".repeat(300)}</main>`,
+      text_template: "large text body ".repeat(300),
+    });
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") {
+          return (sql: string) => {
+            queries.push(sql);
+            return target.query(sql);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const [summary] = listTemplateSummaries(recordingDb, { limit: 1 });
+
+    expect(summary).toBeDefined();
+    expect(summary?.name).toBe("large");
+    expect(summary?.has_html_template).toBe(true);
+    expect(summary?.has_text_template).toBe(true);
+    expect("html_template" in summary!).toBe(false);
+    expect("text_template" in summary!).toBe(false);
+    expect(JSON.stringify(summary)).not.toContain("large html body");
+    expect(JSON.stringify(summary)).not.toContain("large text body");
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).not.toContain("SELECT *");
+    expect(queries[0]).toContain("has_html_template");
+    expect(queries[0]).toContain("has_text_template");
+    expect(queries[0]).not.toMatch(/\bsubject_template,\s*html_template,\s*text_template\b/);
+  });
+
+  it("paginates summaries after ordering newest first", () => {
+    const db = getDatabase();
+    for (let i = 0; i < 5; i++) {
+      const template = createTemplate({
+        name: `summary-${i}`,
+        subject_template: `Summary ${i}`,
+        html_template: i % 2 === 0 ? "<p>html</p>" : undefined,
+      });
+      const timestamp = `2026-01-0${i + 1}T00:00:00.000Z`;
+      db.run("UPDATE templates SET created_at = ?, updated_at = ? WHERE id = ?", [timestamp, timestamp, template.id]);
+    }
+
+    const page = listTemplateSummaries(undefined, { limit: 2, offset: 1 });
+
+    expect(page.map((template) => template.name)).toEqual(["summary-3", "summary-2"]);
+    expect(page.map((template) => template.has_html_template)).toEqual([false, true]);
   });
 });
 

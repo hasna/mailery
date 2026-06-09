@@ -8,6 +8,8 @@ import type { AddressStatus, EmailAddress } from "../types/index.js";
 import { AddressNotFoundError } from "../types/index.js";
 import { getDatabase, now } from "./database.js";
 import { getAddress } from "./addresses.js";
+import { sqlEmailAddress } from "./email-address-sql.js";
+import { canonicalSender } from "../lib/email-address.js";
 
 function setStatus(id: string, status: AddressStatus, db?: Database): EmailAddress {
   const d = db || getDatabase();
@@ -38,11 +40,37 @@ export function setAddressQuota(id: string, quota: number | null, db?: Database)
 /** Count emails sent from `email` so far during the current UTC day. */
 export function countSendsToday(email: string, db?: Database): number {
   const d = db || getDatabase();
+  const normalizedEmail = canonicalSender(email) ?? email.trim().toLowerCase();
   const today = now().slice(0, 10); // YYYY-MM-DD (ISO sorts lexicographically)
   const row = d.query(
-    "SELECT COUNT(*) AS c FROM emails WHERE LOWER(from_address) = LOWER(?) AND sent_at LIKE ?",
-  ).get(email, `${today}%`) as { c: number } | null;
+    `SELECT COUNT(*) AS c FROM emails WHERE ${sqlEmailAddress("from_address")} = ? AND sent_at LIKE ?`,
+  ).get(normalizedEmail, `${today}%`) as { c: number } | null;
   return row?.c ?? 0;
+}
+
+/** Count today's sends for many addresses with one grouped query. */
+export function countSendsTodayByAddress(emails: Iterable<string>, db?: Database): Map<string, number> {
+  const normalized = [...new Set(
+    [...emails]
+      .map((email) => canonicalSender(email) ?? email.trim().toLowerCase())
+      .filter(Boolean),
+  )];
+  const counts = new Map(normalized.map((email) => [email, 0]));
+  if (normalized.length === 0) return counts;
+
+  const d = db || getDatabase();
+  const today = now().slice(0, 10);
+  const addressSql = sqlEmailAddress("from_address");
+  const placeholders = normalized.map(() => "?").join(", ");
+  const rows = d.query(
+    `SELECT ${addressSql} AS from_email, COUNT(*) AS c
+       FROM emails
+      WHERE ${addressSql} IN (${placeholders})
+        AND sent_at LIKE ?
+      GROUP BY ${addressSql}`,
+  ).all(...normalized, `${today}%`) as Array<{ from_email: string; c: unknown }>;
+  for (const row of rows) counts.set(row.from_email, Number(row.c) || 0);
+  return counts;
 }
 
 export interface Sendability {
@@ -57,20 +85,21 @@ export interface Sendability {
  */
 export function getAddressSendability(email: string, db?: Database): Sendability {
   const d = db || getDatabase();
+  const normalizedEmail = canonicalSender(email) ?? email.trim().toLowerCase();
   // Case-insensitive: a suspended `Ceo@x` must still block a send as `ceo@x`.
   // A suspended row (any provider) takes precedence over an active one.
   const row = d.query(
     `SELECT status, daily_quota FROM addresses WHERE LOWER(email) = LOWER(?)
      ORDER BY CASE WHEN status = 'suspended' THEN 0 ELSE 1 END, created_at DESC LIMIT 1`,
-  ).get(email) as { status: AddressStatus | null; daily_quota: number | null } | null;
+  ).get(normalizedEmail) as { status: AddressStatus | null; daily_quota: number | null } | null;
   if (!row) return { sendable: true };
   if ((row.status ?? "active") === "suspended") {
-    return { sendable: false, reason: `Address ${email} is suspended` };
+    return { sendable: false, reason: `Address ${normalizedEmail} is suspended` };
   }
   if (row.daily_quota !== null) {
-    const used = countSendsToday(email, d);
+    const used = countSendsToday(normalizedEmail, d);
     if (used >= row.daily_quota) {
-      return { sendable: false, reason: `Address ${email} reached its daily quota (${used}/${row.daily_quota})` };
+      return { sendable: false, reason: `Address ${normalizedEmail} reached its daily quota (${used}/${row.daily_quota})` };
     }
   }
   return { sendable: true };

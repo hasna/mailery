@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, resetDatabase } from "../db/database.js";
+import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.js";
 import { createEmail } from "../db/emails.js";
 import { createEvent } from "../db/events.js";
@@ -103,6 +103,37 @@ describe("getAnalytics", () => {
     expect(data.deliveryTrend[0]!.bounced).toBe(1);
   });
 
+  it("builds delivery trend without duplicate sent/day or event scans", () => {
+    const db = getDatabase();
+    const email1 = seedEmail("a@test.com");
+    const email2 = seedEmail("b@test.com");
+    const email3 = seedEmail("c@test.com");
+    const ts = new Date().toISOString();
+
+    createEvent({ provider_id: providerId, email_id: email1.id, type: "delivered", occurred_at: ts });
+    createEvent({ provider_id: providerId, email_id: email2.id, type: "delivered", occurred_at: ts });
+    createEvent({ provider_id: providerId, email_id: email3.id, type: "bounced", occurred_at: ts });
+
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "query") return Reflect.get(target, prop, receiver);
+        return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+      },
+    }) as typeof db;
+
+    const data = getAnalytics(providerId, "30d", recordingDb);
+
+    expect(data.deliveryTrend[0]).toMatchObject({ sent: 3, delivered: 2, bounced: 1 });
+    expect(queries.filter((sql) => sql.includes("GROUP BY date(sent_at)"))).toHaveLength(1);
+    const eventQueries = queries.filter((sql) => sql.includes("FROM events ev"));
+    expect(eventQueries).toHaveLength(1);
+    expect(eventQueries[0]).toContain("ev.type IN ('delivered', 'bounced')");
+  });
+
   it("filters by provider", () => {
     const p2 = createProvider({ name: "Other", type: "ses" });
     seedEmail("a@test.com");
@@ -120,6 +151,69 @@ describe("getAnalytics", () => {
 
     const data = getAnalytics(providerId, "30d");
     expect(data.topRecipients.length).toBe(10);
+  });
+
+  it("aggregates top recipients for large histories in SQL", () => {
+    const db = getDatabase();
+    const timestamp = new Date().toISOString();
+    const total = 10025;
+    db.run("BEGIN");
+    try {
+      for (let i = 0; i < total; i++) {
+        const recipients = i % 2 === 0 ? ["bulk@test.com", `user${i}@test.com`] : ["bulk@test.com"];
+        db.run(
+          `INSERT INTO emails
+             (id, provider_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, sent_at, created_at, updated_at)
+           VALUES (?, ?, 'sender@test.com', ?, '[]', '[]', 'Bulk', ?, ?, ?)`,
+          [`bulk-${i}`, providerId, JSON.stringify(recipients), timestamp, timestamp, timestamp],
+        );
+      }
+      db.run("COMMIT");
+    } catch (error) {
+      db.run("ROLLBACK");
+      throw error;
+    }
+
+    const data = getAnalytics(providerId, "30d", db);
+    expect(data.topRecipients[0]).toEqual({ email: "bulk@test.com", count: total });
+    expect(data.dailyVolume[0]?.count).toBe(total);
+  });
+
+  it("ignores malformed and non-array recipient JSON in analytics", () => {
+    const db = getDatabase();
+    const timestamp = new Date().toISOString();
+    for (const [id, toAddresses] of [
+      ["valid", JSON.stringify(["valid@test.com"])],
+      ["malformed", "not-json"],
+      ["object", JSON.stringify({ email: "object@test.com" })],
+    ] as const) {
+      db.run(
+        `INSERT INTO emails
+           (id, provider_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, sent_at, created_at, updated_at)
+         VALUES (?, ?, 'sender@test.com', ?, '[]', '[]', 'JSON', ?, ?, ?)`,
+        [id, providerId, toAddresses, timestamp, timestamp, timestamp],
+      );
+    }
+
+    const data = getAnalytics(providerId, "30d", db);
+    expect(data.topRecipients).toEqual([{ email: "valid@test.com", count: 1 }]);
+  });
+
+  it("falls back to 30 days for invalid period strings", () => {
+    const db = getDatabase();
+    const old = new Date(Date.now() - 31 * 86400000).toISOString();
+    const recent = new Date().toISOString();
+    for (const [id, sentAt] of [["old", old], ["recent", recent]] as const) {
+      db.run(
+        `INSERT INTO emails
+           (id, provider_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, sent_at, created_at, updated_at)
+         VALUES (?, ?, 'sender@test.com', ?, '[]', '[]', 'Period', ?, ?, ?)`,
+        [id, providerId, JSON.stringify([`${id}@test.com`]), sentAt, sentAt, sentAt],
+      );
+    }
+
+    expect(getAnalytics(providerId, "broken", db).dailyVolume[0]?.count).toBe(1);
+    expect(getAnalytics(providerId, "-3d", db).dailyVolume[0]?.count).toBe(1);
   });
 
   it("works without provider filter (all providers)", () => {

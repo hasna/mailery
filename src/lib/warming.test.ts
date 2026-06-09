@@ -1,6 +1,17 @@
-import { describe, it, expect } from "bun:test";
-import { generateWarmingPlan, getTodayLimit, formatWarmingStatus } from "./warming.js";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { closeDatabase, resetDatabase } from "../db/database.js";
+import { createEmail } from "../db/emails.js";
+import { createProvider } from "../db/providers.js";
+import { generateWarmingPlan, getTodayLimit, formatWarmingStatus, getTodaySentCount } from "./warming.js";
 import type { WarmingSchedule } from "./warming.js";
+
+let providerId: string;
+beforeEach(() => {
+  process.env["EMAILS_DB_PATH"] = ":memory:";
+  resetDatabase();
+  providerId = createProvider({ name: "sandbox", type: "sandbox" }).id;
+});
+afterEach(() => { closeDatabase(); delete process.env["EMAILS_DB_PATH"]; });
 
 describe("generateWarmingPlan", () => {
   it("starts at 50 on day 1", () => {
@@ -105,6 +116,23 @@ describe("getTodayLimit", () => {
     });
     const limit = getTodayLimit(schedule);
     expect(limit).toBe(200);
+  });
+});
+
+describe("getTodaySentCount", () => {
+  it("counts display-name From rows by sender domain", () => {
+    createEmail(providerId, {
+      from: '"Warm Sender" <sender@warm.test>',
+      to: ["client@example.com"],
+      subject: "warm sent",
+    }, "warm-display");
+    createEmail(providerId, {
+      from: "sender@other.test",
+      to: ["client@example.com"],
+      subject: "other sent",
+    }, "other-domain");
+
+    expect(getTodaySentCount("warm.test")).toBe(1);
   });
 });
 

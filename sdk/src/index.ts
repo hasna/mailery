@@ -10,6 +10,7 @@ export interface Provider {
   id: string;
   name: string;
   type: string;
+  region: string | null;
   active: boolean;
   created_at: string;
   updated_at: string;
@@ -46,13 +47,44 @@ export interface Email {
   sent_at: string;
 }
 
-export interface EmailEvent {
+export interface EventSummary {
   id: string;
   email_id: string | null;
   provider_id: string;
+  provider_event_id: string | null;
   type: string;
   recipient: string | null;
   occurred_at: string;
+  created_at: string;
+}
+
+export interface EmailEvent extends EventSummary {
+  metadata: Record<string, unknown>;
+}
+
+export interface PageParams {
+  limit?: number;
+  offset?: number;
+}
+
+export interface ListProviderParams extends PageParams {}
+
+export interface ListDomainParams extends PageParams {
+  provider_id?: string;
+}
+
+export interface ListAddressParams extends PageParams {
+  provider_id?: string;
+}
+
+export interface ListEventParams {
+  email_id?: string;
+  provider_id?: string;
+  type?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
 }
 
 export interface Contact {
@@ -64,14 +96,27 @@ export interface Contact {
   suppressed: boolean;
 }
 
-export interface Template {
+export interface ListContactParams extends PageParams {
+  suppressed?: boolean;
+}
+
+export interface TemplateSummary {
   id: string;
   name: string;
   subject_template: string;
+  has_html_template: boolean;
+  has_text_template: boolean;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Template extends Omit<TemplateSummary, "has_html_template" | "has_text_template"> {
   html_template: string | null;
   text_template: string | null;
-  created_at: string;
 }
+
+export interface ListTemplateParams extends PageParams {}
 
 export interface Group {
   id: string;
@@ -80,16 +125,41 @@ export interface Group {
   created_at: string;
 }
 
-export interface GroupMember {
+export interface ListGroupParams extends PageParams {}
+
+export interface GroupMemberSummary {
+  group_id: string;
   email: string;
   name: string | null;
+  added_at: string;
 }
 
-export interface ScheduledEmail {
+export interface GroupMember extends GroupMemberSummary {
+  vars: Record<string, string>;
+}
+
+export interface ScheduledEmailSummary {
   id: string;
-  status: string;
-  scheduled_at: string;
+  provider_id: string;
+  from_address: string;
+  to_addresses: string[];
+  cc_addresses: string[];
+  bcc_addresses: string[];
+  reply_to: string | null;
   subject: string;
+  template_name: string | null;
+  scheduled_at: string;
+  status: string;
+  error: string | null;
+  created_at: string;
+}
+
+export type ScheduledEmail = ScheduledEmailSummary;
+
+export interface ListScheduledParams {
+  status?: string;
+  limit?: number;
+  offset?: number;
 }
 
 export interface Sequence {
@@ -98,6 +168,8 @@ export interface Sequence {
   status: string;
   created_at: string;
 }
+
+export interface ListSequenceParams extends PageParams {}
 
 export interface SequenceStep {
   id: string;
@@ -115,12 +187,20 @@ export interface Enrollment {
   status: string;
 }
 
+export interface ListEnrollmentParams extends PageParams {
+  status?: string;
+}
+
 export interface SandboxEmail {
   id: string;
   from_address: string;
   to_addresses: string[];
   subject: string;
   created_at: string;
+}
+
+export interface ListSandboxEmailParams extends PageParams {
+  provider_id?: string;
 }
 
 export interface InboundEmail {
@@ -132,12 +212,46 @@ export interface InboundEmail {
   received_at: string;
 }
 
+export interface ListInboundEmailParams extends PageParams {
+  provider_id?: string;
+  since?: string;
+  to?: string;
+  unread?: boolean;
+  read?: boolean;
+  archived?: boolean;
+}
+
 export interface WarmingSchedule {
   id: string;
   domain: string;
   target_daily_volume: number;
   start_date: string;
   status: string;
+}
+
+export interface ListWarmingScheduleParams extends PageParams {
+  status?: string;
+}
+
+export interface WarmingStatus {
+  schedule: WarmingSchedule;
+  today_limit: number;
+  today_sent: number;
+  current_day: number;
+}
+
+export interface ExportEmailParams extends PageParams {
+  provider_id?: string;
+  from_address?: string;
+  from?: string;
+  since?: string;
+  until?: string;
+}
+
+export interface ExportEventParams extends PageParams {
+  provider_id?: string;
+  since?: string;
+  until?: string;
 }
 
 export interface Stats {
@@ -187,6 +301,8 @@ export interface TriageResult {
   created_at: string;
 }
 
+export type TriageSummary = Omit<TriageResult, "draft_reply">;
+
 export interface TriageStats {
   total: number;
   by_label: Record<string, number>;
@@ -227,6 +343,10 @@ function qs(params?: Record<string, string | number | boolean | undefined>): str
   return "?" + sp.toString();
 }
 
+function pathSegment(value: string): string {
+  return encodeURIComponent(value);
+}
+
 // ── Client ─────────────────────────────────────────────────────────────────
 
 export class EmailsClient {
@@ -247,8 +367,8 @@ export class EmailsClient {
 
   // ── Providers ──
 
-  async listProviders(): Promise<Provider[]> {
-    return this.request("/api/providers");
+  async listProviders(params?: ListProviderParams): Promise<Provider[]> {
+    return this.request(`/api/providers${qs(params)}`);
   }
 
   async addProvider(body: {
@@ -278,8 +398,11 @@ export class EmailsClient {
 
   // ── Domains ──
 
-  async listDomains(providerId?: string): Promise<Domain[]> {
-    return this.request(`/api/domains${qs({ provider_id: providerId })}`);
+  async listDomains(providerId?: string): Promise<Domain[]>;
+  async listDomains(params?: ListDomainParams): Promise<Domain[]>;
+  async listDomains(providerIdOrParams?: string | ListDomainParams): Promise<Domain[]> {
+    const params = typeof providerIdOrParams === "string" ? { provider_id: providerIdOrParams } : providerIdOrParams;
+    return this.request(`/api/domains${qs(params)}`);
   }
 
   async addDomain(body: { provider_id: string; domain: string }): Promise<Domain> {
@@ -300,8 +423,8 @@ export class EmailsClient {
 
   // ── Addresses ──
 
-  async listAddresses(): Promise<EmailAddress[]> {
-    return this.request("/api/addresses");
+  async listAddresses(params?: ListAddressParams): Promise<EmailAddress[]> {
+    return this.request(`/api/addresses${qs(params)}`);
   }
 
   async addAddress(body: { provider_id: string; email: string; display_name?: string }): Promise<EmailAddress> {
@@ -327,7 +450,7 @@ export class EmailsClient {
     return this.request(`/api/emails/${id}`);
   }
 
-  async searchEmails(query: string, params?: { since?: string; limit?: number }): Promise<Email[]> {
+  async searchEmails(query: string, params?: { since?: string; limit?: number; offset?: number }): Promise<Email[]> {
     return this.request(`/api/emails/search${qs({ q: query, ...params })}`);
   }
 
@@ -341,8 +464,12 @@ export class EmailsClient {
 
   // ── Events ──
 
-  async listEvents(params?: { type?: string; limit?: number }): Promise<EmailEvent[]> {
+  async listEvents(params?: ListEventParams): Promise<EventSummary[]> {
     return this.request(`/api/events${qs(params as Record<string, string | number | undefined>)}`);
+  }
+
+  async getEvent(id: string): Promise<EmailEvent> {
+    return this.request(`/api/events/${encodeURIComponent(id)}`);
   }
 
   // ── Stats & Analytics ──
@@ -366,8 +493,11 @@ export class EmailsClient {
 
   // ── Contacts ──
 
-  async listContacts(suppressed?: boolean): Promise<Contact[]> {
-    return this.request(`/api/contacts${qs({ suppressed: suppressed !== undefined ? String(suppressed) : undefined })}`);
+  async listContacts(suppressed?: boolean): Promise<Contact[]>;
+  async listContacts(params?: ListContactParams): Promise<Contact[]>;
+  async listContacts(suppressedOrParams?: boolean | ListContactParams): Promise<Contact[]> {
+    const params = typeof suppressedOrParams === "boolean" ? { suppressed: suppressedOrParams } : suppressedOrParams;
+    return this.request(`/api/contacts${qs(params)}`);
   }
 
   async suppressContact(email: string): Promise<void> {
@@ -380,8 +510,12 @@ export class EmailsClient {
 
   // ── Templates ──
 
-  async listTemplates(): Promise<Template[]> {
-    return this.request("/api/templates");
+  async listTemplates(params?: ListTemplateParams): Promise<TemplateSummary[]> {
+    return this.request(`/api/templates${qs(params)}`);
+  }
+
+  async getTemplate(nameOrId: string): Promise<Template> {
+    return this.request(`/api/templates/${encodeURIComponent(nameOrId)}`);
   }
 
   async addTemplate(body: {
@@ -394,13 +528,13 @@ export class EmailsClient {
   }
 
   async removeTemplate(id: string): Promise<void> {
-    await this.request(`/api/templates/${id}`, { method: "DELETE" });
+    await this.request(`/api/templates/${pathSegment(id)}`, { method: "DELETE" });
   }
 
   // ── Groups ──
 
-  async listGroups(): Promise<Group[]> {
-    return this.request("/api/groups");
+  async listGroups(params?: ListGroupParams): Promise<Group[]> {
+    return this.request(`/api/groups${qs(params)}`);
   }
 
   async createGroup(body: { name: string; description?: string }): Promise<Group> {
@@ -408,25 +542,32 @@ export class EmailsClient {
   }
 
   async deleteGroup(id: string): Promise<void> {
-    await this.request(`/api/groups/${id}`, { method: "DELETE" });
+    await this.request(`/api/groups/${pathSegment(id)}`, { method: "DELETE" });
   }
 
-  async listGroupMembers(id: string): Promise<GroupMember[]> {
-    return this.request(`/api/groups/${id}/members`);
+  async listGroupMembers(id: string, params?: { limit?: number; offset?: number }): Promise<GroupMemberSummary[]> {
+    return this.request(`/api/groups/${pathSegment(id)}/members${qs(params)}`);
+  }
+
+  async getGroupMember(id: string, email: string): Promise<GroupMember> {
+    return this.request(`/api/groups/${pathSegment(id)}/members/${pathSegment(email)}`);
   }
 
   async addGroupMember(id: string, body: { email: string; name?: string }): Promise<void> {
-    await this.request(`/api/groups/${id}/members`, { method: "POST", body: JSON.stringify(body) });
+    await this.request(`/api/groups/${pathSegment(id)}/members`, { method: "POST", body: JSON.stringify(body) });
   }
 
   async removeGroupMember(id: string, email: string): Promise<void> {
-    await this.request(`/api/groups/${id}/members/${encodeURIComponent(email)}`, { method: "DELETE" });
+    await this.request(`/api/groups/${pathSegment(id)}/members/${pathSegment(email)}`, { method: "DELETE" });
   }
 
   // ── Scheduled ──
 
-  async listScheduled(status?: string): Promise<ScheduledEmail[]> {
-    return this.request(`/api/scheduled${qs({ status })}`);
+  async listScheduled(status?: string): Promise<ScheduledEmailSummary[]>;
+  async listScheduled(params?: ListScheduledParams): Promise<ScheduledEmailSummary[]>;
+  async listScheduled(statusOrParams?: string | ListScheduledParams): Promise<ScheduledEmailSummary[]> {
+    const params = typeof statusOrParams === "string" ? { status: statusOrParams } : statusOrParams;
+    return this.request(`/api/scheduled${qs(params)}`);
   }
 
   async cancelScheduled(id: string): Promise<void> {
@@ -435,8 +576,8 @@ export class EmailsClient {
 
   // ── Sequences ──
 
-  async listSequences(): Promise<Sequence[]> {
-    return this.request("/api/sequences");
+  async listSequences(params?: ListSequenceParams): Promise<Sequence[]> {
+    return this.request(`/api/sequences${qs(params)}`);
   }
 
   async createSequence(body: { name: string; description?: string }): Promise<Sequence> {
@@ -444,41 +585,41 @@ export class EmailsClient {
   }
 
   async deleteSequence(id: string): Promise<void> {
-    await this.request(`/api/sequences/${id}`, { method: "DELETE" });
+    await this.request(`/api/sequences/${pathSegment(id)}`, { method: "DELETE" });
   }
 
   async listSequenceSteps(id: string): Promise<SequenceStep[]> {
-    return this.request(`/api/sequences/${id}/steps`);
+    return this.request(`/api/sequences/${pathSegment(id)}/steps`);
   }
 
   async addSequenceStep(
     id: string,
     body: { step_number: number; delay_hours: number; template_name: string }
   ): Promise<SequenceStep> {
-    return this.request(`/api/sequences/${id}/steps`, { method: "POST", body: JSON.stringify(body) });
+    return this.request(`/api/sequences/${pathSegment(id)}/steps`, { method: "POST", body: JSON.stringify(body) });
   }
 
-  async listEnrollments(id: string): Promise<Enrollment[]> {
-    return this.request(`/api/sequences/${id}/enrollments`);
+  async listEnrollments(id: string, params?: ListEnrollmentParams): Promise<Enrollment[]> {
+    return this.request(`/api/sequences/${pathSegment(id)}/enrollments${qs(params)}`);
   }
 
   async enrollContact(
     id: string,
     body: { contact_email: string; provider_id?: string }
   ): Promise<Enrollment> {
-    return this.request(`/api/sequences/${id}/enroll`, { method: "POST", body: JSON.stringify(body) });
+    return this.request(`/api/sequences/${pathSegment(id)}/enroll`, { method: "POST", body: JSON.stringify(body) });
   }
 
   async unenrollContact(id: string, email: string): Promise<void> {
-    await this.request(`/api/sequences/${id}/enrollments/${encodeURIComponent(email)}`, {
+    await this.request(`/api/sequences/${pathSegment(id)}/enrollments/${pathSegment(email)}`, {
       method: "DELETE",
     });
   }
 
   // ── Sandbox ──
 
-  async listSandboxEmails(params?: { provider_id?: string; limit?: number }): Promise<SandboxEmail[]> {
-    return this.request(`/api/sandbox${qs(params as Record<string, string | number | undefined>)}`);
+  async listSandboxEmails(params?: ListSandboxEmailParams): Promise<SandboxEmail[]> {
+    return this.request(`/api/sandbox${qs(params)}`);
   }
 
   async getSandboxEmail(id: string): Promise<SandboxEmail> {
@@ -491,8 +632,8 @@ export class EmailsClient {
 
   // ── Inbound ──
 
-  async listInboundEmails(params?: { provider_id?: string; limit?: number }): Promise<InboundEmail[]> {
-    return this.request(`/api/inbound${qs(params as Record<string, string | number | undefined>)}`);
+  async listInboundEmails(params?: ListInboundEmailParams): Promise<InboundEmail[]> {
+    return this.request(`/api/inbound${qs(params)}`);
   }
 
   async getInboundEmail(id: string): Promise<InboundEmail> {
@@ -505,37 +646,38 @@ export class EmailsClient {
 
   // ── Warming ──
 
-  async listWarmingSchedules(): Promise<WarmingSchedule[]> {
-    return this.request("/api/warming");
+  async listWarmingSchedules(params?: ListWarmingScheduleParams): Promise<WarmingSchedule[]> {
+    return this.request(`/api/warming${qs(params)}`);
   }
 
   async createWarmingSchedule(body: {
     domain: string;
     target_daily_volume: number;
     start_date?: string;
+    provider_id?: string;
   }): Promise<WarmingSchedule> {
     return this.request("/api/warming", { method: "POST", body: JSON.stringify(body) });
   }
 
   async getWarmingStatus(
     domain: string
-  ): Promise<WarmingSchedule & { today_limit: number; today_sent: number; current_day: number }> {
-    return this.request(`/api/warming/${domain}`);
+  ): Promise<WarmingStatus> {
+    return this.request(`/api/warming/${pathSegment(domain)}`);
   }
 
   async updateWarmingStatus(domain: string, status: string): Promise<WarmingSchedule> {
-    return this.request(`/api/warming/${domain}`, { method: "PUT", body: JSON.stringify({ status }) });
+    return this.request(`/api/warming/${pathSegment(domain)}`, { method: "PUT", body: JSON.stringify({ status }) });
   }
 
   async deleteWarmingSchedule(domain: string): Promise<void> {
-    await this.request(`/api/warming/${domain}`, { method: "DELETE" });
+    await this.request(`/api/warming/${pathSegment(domain)}`, { method: "DELETE" });
   }
 
   // ── Export ──
 
   async exportEmails(
     format?: "csv" | "json",
-    params?: { provider_id?: string; since?: string }
+    params?: ExportEmailParams
   ): Promise<string> {
     const res = await fetch(
       this.baseUrl + `/api/export/emails${qs({ format: format || "json", ...params })}`
@@ -546,7 +688,7 @@ export class EmailsClient {
 
   async exportEvents(
     format?: "csv" | "json",
-    params?: { provider_id?: string; since?: string }
+    params?: ExportEventParams
   ): Promise<string> {
     const res = await fetch(
       this.baseUrl + `/api/export/events${qs({ format: format || "json", ...params })}`
@@ -590,8 +732,8 @@ export class EmailsClient {
   }
 
   async listTriaged(
-    params?: { label?: string; priority?: number; sentiment?: string; limit?: number }
-  ): Promise<TriageResult[]> {
+    params?: { label?: string; priority?: number; sentiment?: string; limit?: number; offset?: number }
+  ): Promise<TriageSummary[]> {
     return this.request(`/api/triage${qs(params || {})}`);
   }
 

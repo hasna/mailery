@@ -1,9 +1,10 @@
 import type { Command } from "commander";
-import chalk from "chalk";
-import { getTriage, listTriaged, getTriageStats, deleteTriageByEmail } from "../../db/triage.js";
-import { triageEmail, triageBatch, generateDraftForEmail } from "../../lib/triage.js";
+import chalk from "../../lib/chalk-lite.js";
+import { getTriage, listTriagedSummaries, getTriageStats, deleteTriageByEmail } from "../../db/triage.js";
 import { truncate, formatDate } from "../../lib/format.js";
-import { handleError } from "../utils.js";
+import { parseCliNonNegativeIntOption, parseCliPositiveIntOption, handleError } from "../utils.js";
+
+const MAX_TRIAGE_RUN_LIMIT = 100;
 
 const LABEL_COLORS: Record<string, (s: string) => string> = {
   "action-required": chalk.red,
@@ -41,9 +42,10 @@ export function registerTriageCommands(program: Command, output: (data: unknown,
     .action(async (opts: { type?: string; limit?: string; model?: string; skipDraft?: boolean }) => {
       try {
         const type = (opts.type === "sent" ? "sent" : "inbound") as "sent" | "inbound";
-        const limit = parseInt(opts.limit ?? "10", 10);
+        const limit = parseCliPositiveIntOption(opts.limit, 10, MAX_TRIAGE_RUN_LIMIT);
         console.log(chalk.dim(`Triaging up to ${limit} ${type} emails...`));
 
+        const { triageBatch } = await import("../../lib/triage.js");
         const { triaged, errors } = await triageBatch(type, limit, {
           model: opts.model,
           skip_draft: opts.skipDraft,
@@ -112,12 +114,14 @@ export function registerTriageCommands(program: Command, output: (data: unknown,
     .option("--label <label>", "Filter by label")
     .option("--priority <n>", "Filter by priority (1-5)")
     .option("--limit <n>", "Max results", "20")
-    .action((opts: { label?: string; priority?: string; limit?: string }) => {
+    .option("--offset <n>", "Skip first N results", "0")
+    .action((opts: { label?: string; priority?: string; limit?: string; offset?: string }) => {
       try {
-        const list = listTriaged({
+        const list = listTriagedSummaries({
           label: opts.label as any,
           priority: opts.priority ? parseInt(opts.priority, 10) : undefined,
-          limit: parseInt(opts.limit ?? "20", 10),
+          limit: parseCliPositiveIntOption(opts.limit, 20),
+          offset: parseCliNonNegativeIntOption(opts.offset),
         });
 
         if (list.length === 0) {
@@ -176,6 +180,7 @@ export function registerTriageCommands(program: Command, output: (data: unknown,
       try {
         const type = (opts.type === "sent" ? "sent" : "inbound") as "sent" | "inbound";
         console.log(chalk.dim("Generating draft reply..."));
+        const { generateDraftForEmail } = await import("../../lib/triage.js");
         const draft = await generateDraftForEmail(emailId, type, { model: opts.model });
         output({ draft }, `${chalk.bold("Draft Reply:")}\n\n${draft}`);
       } catch (e) {
@@ -201,6 +206,7 @@ export function registerTriageCommands(program: Command, output: (data: unknown,
 
         if (opts.retriage) {
           console.log(chalk.dim("Re-triaging..."));
+          const { triageEmail } = await import("../../lib/triage.js");
           const result = await triageEmail(emailId, type);
           output(result, `${chalk.green("Re-triaged:")} ${colorLabel(result.label)} ${colorPriority(result.priority)}`);
         }

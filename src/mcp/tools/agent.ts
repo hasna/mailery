@@ -1,13 +1,10 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { getAgentContext, getEmailSystemStatus, getNextEmailAction } from "../../lib/agent-context.js";
-import { diagnoseInboundDelivery } from "../../lib/delivery-doctor.js";
-import { createAddress, getAddressByEmail, listAddresses } from "../../db/addresses.js";
+import { createAddress, findAddressesByEmail, getAddressByEmail } from "../../db/addresses.js";
 import { getDomainByName } from "../../db/domains.js";
 import { getAddressProvisioning, setAddressProvisioning } from "../../db/provisioning.js";
 import { getDatabase } from "../../db/database.js";
 import { getProvider } from "../../db/providers.js";
-import { getAddressOwnershipDetail, setAddressOwnerByRef } from "../../lib/address-ownership.js";
 import { formatError, resolveId } from "../helpers.js";
 
 function json(data: unknown) {
@@ -29,6 +26,13 @@ export function registerAgentTools(server: McpServer): void {
     },
     async ({ email, provider_id, receive_strategy, forward_to, owner, administrator, create_missing }) => {
       try {
+        const [
+          { diagnoseInboundDelivery },
+          { getAddressOwnershipDetail, setAddressOwnerByRef },
+        ] = await Promise.all([
+          import("../../lib/delivery-doctor.js"),
+          import("../../lib/address-ownership.js"),
+        ]);
         const db = getDatabase();
         const normalized = email.trim().toLowerCase();
         if (!normalized.includes("@")) throw new Error("Expected a full email address");
@@ -37,7 +41,7 @@ export function registerAgentTools(server: McpServer): void {
         const blockers: string[] = [];
         const next_commands: string[] = [];
 
-        let matches = listAddresses(undefined, db).filter((address) => address.email.toLowerCase() === normalized);
+        let matches = findAddressesByEmail(normalized, db);
         if (matches.length === 0 && create_missing) {
           if (!provider_id) throw new Error("provider_id is required when create_missing=true");
           const providerId = resolveId("providers", provider_id);
@@ -100,6 +104,7 @@ export function registerAgentTools(server: McpServer): void {
     {},
     async () => {
       try {
+        const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
         return json({ ...getEmailSystemStatus(), cli_equivalent: "emails status --json" });
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
@@ -113,6 +118,7 @@ export function registerAgentTools(server: McpServer): void {
     {},
     async () => {
       try {
+        const { getAgentContext } = await import("../../lib/agent-context.js");
         return json({ ...getAgentContext(), cli_equivalent: "emails agent context --json" });
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
@@ -128,6 +134,7 @@ export function registerAgentTools(server: McpServer): void {
     },
     async ({ goal }) => {
       try {
+        const { getNextEmailAction } = await import("../../lib/agent-context.js");
         return json({ ...getNextEmailAction(goal), cli_equivalent: "emails status --json" });
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
@@ -143,6 +150,7 @@ export function registerAgentTools(server: McpServer): void {
     },
     async ({ address }) => {
       try {
+        const { diagnoseInboundDelivery } = await import("../../lib/delivery-doctor.js");
         return json(diagnoseInboundDelivery(address));
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };

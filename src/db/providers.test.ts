@@ -3,7 +3,14 @@ import { getDatabase, closeDatabase, resetDatabase } from "./database.js";
 import {
   createProvider,
   getProvider,
+  getProviderByNameAndType,
   listProviders,
+  listProviderSummaries,
+  listProviderNamesByIds,
+  listActiveProviders,
+  listActiveProviderSummaries,
+  getLatestActiveProvider,
+  getLatestActiveProviderId,
   updateProvider,
   deleteProvider,
   getActiveProvider,
@@ -61,6 +68,17 @@ describe("getProvider", () => {
   });
 });
 
+describe("getProviderByNameAndType", () => {
+  it("finds the exact provider by name and type", () => {
+    const resend = createProvider({ name: "Shared", type: "resend" });
+    const gmail = createProvider({ name: "Shared", type: "gmail" });
+
+    expect(getProviderByNameAndType("Shared", "gmail")?.id).toBe(gmail.id);
+    expect(getProviderByNameAndType("Shared", "resend")?.id).toBe(resend.id);
+    expect(getProviderByNameAndType("Missing", "gmail")).toBeNull();
+  });
+});
+
 describe("listProviders", () => {
   it("returns empty array when no providers", () => {
     expect(listProviders()).toEqual([]);
@@ -73,6 +91,175 @@ describe("listProviders", () => {
     expect(list.length).toBe(2);
     expect(list.map((p) => p.id)).toContain(p1.id);
     expect(list.map((p) => p.id)).toContain(p2.id);
+  });
+
+  it("paginates providers", () => {
+    const db = getDatabase();
+    for (let i = 1; i <= 4; i++) {
+      const provider = createProvider({ name: `Provider ${i}`, type: "sandbox" });
+      db.run("UPDATE providers SET created_at = ? WHERE id = ?", [`2026-01-0${i}T00:00:00.000Z`, provider.id]);
+    }
+
+    const page = listProviders(db, { limit: 2, offset: 1 });
+
+    expect(page.map((provider) => provider.name)).toEqual(["Provider 3", "Provider 2"]);
+  });
+});
+
+describe("listProviderSummaries", () => {
+  it("uses a credential-free projection for provider browse rows", () => {
+    const db = getDatabase();
+    createProvider({
+      name: "Secretful",
+      type: "gmail",
+      oauth_client_id: "client-id-secret",
+      oauth_client_secret: "client-secret-value",
+      oauth_refresh_token: "refresh-token-value",
+      oauth_access_token: "access-token-value",
+    }, db);
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") {
+          return (sql: string) => {
+            queries.push(sql);
+            return target.query(sql);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const [summary] = listProviderSummaries(recordingDb, { limit: 1 });
+
+    expect(summary).toBeDefined();
+    expect(summary?.name).toBe("Secretful");
+    expect(summary?.type).toBe("gmail");
+    expect("oauth_client_secret" in summary!).toBe(false);
+    expect("oauth_refresh_token" in summary!).toBe(false);
+    expect("oauth_access_token" in summary!).toBe(false);
+    expect("api_key" in summary!).toBe(false);
+    expect("secret_key" in summary!).toBe(false);
+    expect(JSON.stringify(summary)).not.toContain("secret");
+    expect(JSON.stringify(summary)).not.toContain("token");
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).not.toContain("SELECT *");
+    expect(queries[0]).not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_id|oauth_client_secret|oauth_refresh_token|oauth_access_token|oauth_token_expiry)\b/);
+  });
+
+  it("paginates provider summaries", () => {
+    const db = getDatabase();
+    for (let i = 1; i <= 4; i++) {
+      const provider = createProvider({ name: `Summary Provider ${i}`, type: "sandbox" }, db);
+      db.run("UPDATE providers SET created_at = ? WHERE id = ?", [`2026-01-0${i}T00:00:00.000Z`, provider.id]);
+    }
+
+    const page = listProviderSummaries(db, { limit: 2, offset: 1 });
+
+    expect(page.map((provider) => provider.name)).toEqual(["Summary Provider 3", "Summary Provider 2"]);
+  });
+});
+
+describe("listProviderNamesByIds", () => {
+  it("returns names for selected provider ids only", () => {
+    const first = createProvider({ name: "First", type: "resend" });
+    const second = createProvider({ name: "Second", type: "ses" });
+    createProvider({ name: "Other", type: "sandbox" });
+
+    expect([...listProviderNamesByIds([first.id, second.id, first.id]).entries()].sort()).toEqual([
+      [first.id, "First"],
+      [second.id, "Second"],
+    ].sort());
+    expect(listProviderNamesByIds([]).size).toBe(0);
+  });
+});
+
+describe("listActiveProviders", () => {
+  it("lists active providers with optional type filtering in newest-first order", () => {
+    const old = createProvider({ name: "Old", type: "resend" });
+    const inactive = createProvider({ name: "Inactive", type: "resend" });
+    const gmail = createProvider({ name: "Gmail", type: "gmail" });
+    getDatabase().run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-01T00:00:00.000Z", old.id]);
+    getDatabase().run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-02T00:00:00.000Z", inactive.id]);
+    getDatabase().run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-03T00:00:00.000Z", gmail.id]);
+    updateProvider(inactive.id, { active: false });
+
+    expect(listActiveProviders().map((provider) => provider.id)).toEqual([gmail.id, old.id]);
+    expect(listActiveProviders("resend").map((provider) => provider.id)).toEqual([old.id]);
+  });
+});
+
+describe("listActiveProviderSummaries", () => {
+  it("lists active providers without credential columns", () => {
+    const db = getDatabase();
+    const old = createProvider({ name: "Old", type: "resend", api_key: "re_secret" }, db);
+    const inactive = createProvider({ name: "Inactive", type: "gmail", oauth_refresh_token: "refresh-secret" }, db);
+    const gmail = createProvider({ name: "Gmail", type: "gmail", oauth_refresh_token: "gmail-secret" }, db);
+    db.run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-01T00:00:00.000Z", old.id]);
+    db.run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-02T00:00:00.000Z", inactive.id]);
+    db.run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-03T00:00:00.000Z", gmail.id]);
+    updateProvider(inactive.id, { active: false }, db);
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "query") return Reflect.get(target, prop, receiver);
+        return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+      },
+    }) as typeof db;
+
+    const all = listActiveProviderSummaries(undefined, recordingDb, { limit: 10 });
+    const gmailOnly = listActiveProviderSummaries("gmail", recordingDb);
+
+    expect(all.map((provider) => provider.id)).toEqual([gmail.id, old.id]);
+    expect(gmailOnly.map((provider) => provider.id)).toEqual([gmail.id]);
+    expect(JSON.stringify(all)).not.toContain("secret");
+    expect(all[0]).not.toHaveProperty("api_key");
+    expect(all[0]).not.toHaveProperty("oauth_refresh_token");
+    expect(queries.join("\n")).not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_id|oauth_client_secret|oauth_refresh_token|oauth_access_token|oauth_token_expiry)\b/);
+  });
+});
+
+describe("getLatestActiveProvider", () => {
+  it("returns the newest active provider, optionally by type", () => {
+    const old = createProvider({ name: "Old", type: "resend" });
+    const inactive = createProvider({ name: "Inactive", type: "gmail" });
+    const latest = createProvider({ name: "Latest", type: "gmail" });
+    getDatabase().run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-01T00:00:00.000Z", old.id]);
+    getDatabase().run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-02T00:00:00.000Z", inactive.id]);
+    getDatabase().run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-03T00:00:00.000Z", latest.id]);
+    updateProvider(inactive.id, { active: false });
+
+    expect(getLatestActiveProvider()?.id).toBe(latest.id);
+    expect(getLatestActiveProvider("resend")?.id).toBe(old.id);
+    expect(getLatestActiveProvider("ses")).toBeNull();
+  });
+
+  it("returns only the newest active provider id without loading credentials", () => {
+    const db = getDatabase();
+    const old = createProvider({ name: "Old", type: "resend", api_key: "re_secret" }, db);
+    const latest = createProvider({ name: "Latest", type: "gmail", oauth_refresh_token: "gmail-secret" }, db);
+    db.run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-01T00:00:00.000Z", old.id]);
+    db.run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-02T00:00:00.000Z", latest.id]);
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "query") return Reflect.get(target, prop, receiver);
+        return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+      },
+    }) as typeof db;
+
+    expect(getLatestActiveProviderId(undefined, recordingDb)).toBe(latest.id);
+    expect(getLatestActiveProviderId("resend", recordingDb)).toBe(old.id);
+
+    expect(queries).toHaveLength(2);
+    expect(queries.every((sql) => sql.startsWith("SELECT id FROM providers"))).toBe(true);
+    expect(queries.join("\n")).not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_id|oauth_client_secret|oauth_refresh_token|oauth_access_token|oauth_token_expiry)\b/);
   });
 });
 

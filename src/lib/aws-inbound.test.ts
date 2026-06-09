@@ -1,4 +1,6 @@
 import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 // ─── Mock AWS SDKs ────────────────────────────────────────────────────────────
 
@@ -23,9 +25,12 @@ mock.module("@aws-sdk/client-s3", () => ({
   PutPublicAccessBlockCommand: class { constructor(public input: unknown) {} },
   PutBucketVersioningCommand: class { constructor(public input: unknown) {} },
   PutBucketEncryptionCommand: class { constructor(public input: unknown) {} },
+  PutObjectCommand: class { constructor(public input: unknown) {} },
   HeadBucketCommand: class { constructor(public input: unknown) {} },
+  HeadObjectCommand: class { constructor(public input: unknown) {} },
   ListObjectsV2Command: class { constructor(public input: unknown) {} },
   GetObjectCommand: class { constructor(public input: unknown) {} },
+  CopyObjectCommand: class { constructor(public input: unknown) {} },
 }));
 
 const { setupInboundEmail, buildSesBucketPolicy } = await import("./aws-inbound.js");
@@ -63,6 +68,14 @@ function setupMocks(bucketExists = false) {
 
 describe("buildSesBucketPolicy — must not clobber other domains' grants", () => {
   type Pol = { Statement: { Resource: string; Condition?: unknown }[] };
+
+  it("keeps AWS clients behind setup-only dynamic imports", () => {
+    const source = readFileSync(join(import.meta.dir, "aws-inbound.ts"), "utf8");
+    expect(source).not.toMatch(/^\s*import\s+(?!type\b)[\s\S]*?from\s+["']@aws-sdk\/client-(?:s3|ses)["'];/m);
+    expect(source).toContain('import("@aws-sdk/client-s3")');
+    expect(source).toContain('import("@aws-sdk/client-ses")');
+  });
+
   it("grants the shared inbound base, not a single per-domain prefix", () => {
     const pol = buildSesBucketPolicy("buck", "inbound/elyratelier.com/", "111122223333") as Pol;
     // Must cover ALL inbound objects so a later adopt of another domain still works.

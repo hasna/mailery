@@ -1,19 +1,18 @@
 // MCP tool module: email-ops.ts
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { createEmail, listEmails, getEmail, searchEmails } from '../../db/emails.js';
-import { storeEmailContent, getEmailContent } from '../../db/email-content.js';
-import { getLocalStats } from '../../lib/stats.js';
-import { createTemplate, listTemplates, getTemplate, deleteTemplate, renderTemplate } from '../../db/templates.js';
-import { listContacts, suppressContact, unsuppressContact } from '../../db/contacts.js';
-import { createScheduledEmail, listScheduledEmails, cancelScheduledEmail } from '../../db/scheduled.js';
-import { getActiveProvider, getProvider } from '../../db/providers.js';
-import { getWarmingSchedule } from '../../db/warming.js';
-import { getTodayLimit, getTodaySentCount } from '../../lib/warming.js';
-import { syncProvider, syncAll } from '../../lib/sync.js';
-import { getDatabase } from '../../db/database.js';
-import { sendWithFailover } from '../../lib/send.js';
-import { formatError, resolveId, EmailNotFoundError, ProviderNotFoundError } from '../helpers.js';
+
+const MAX_MCP_EMAIL_LIST_LIMIT = 1000;
+
+type ToolResult = {
+  content: Array<{ type: "text"; text: string }>;
+  isError?: boolean;
+};
+
+async function toolError(error: unknown): Promise<ToolResult> {
+  const { formatError } = await import("../helpers.js");
+  return { content: [{ type: "text", text: `Error: ${formatError(error)}` }], isError: true };
+}
 
 export function registerEmailOpsTools(server: McpServer): void {
   // ─── SEND EMAIL ───────────────────────────────────────────────────────────────
@@ -51,6 +50,14 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async (input) => {
     try {
+      const { getDatabase } = await import('../../db/database.js');
+      const { createEmail } = await import('../../db/emails.js');
+      const { storeEmailContent } = await import('../../db/email-content.js');
+      const { getTemplate, renderTemplate } = await import('../../db/templates.js');
+      const { getActiveProvider, getProvider } = await import('../../db/providers.js');
+      const { getWarmingSchedule } = await import('../../db/warming.js');
+      const { getTodayLimit, getTodaySentCount } = await import('../../lib/warming.js');
+      const { resolveId, ProviderNotFoundError } = await import('../helpers.js');
       const db = getDatabase();
 
       // Resolve template
@@ -97,6 +104,7 @@ export function registerEmailOpsTools(server: McpServer): void {
       }
 
       const sendInput = { ...input, subject, html, text };
+      const { sendWithFailover } = await import('../../lib/send.js');
       const { messageId, providerId: actualProviderId } = await sendWithFailover(providerId, sendInput, db);
 
       const email = createEmail(actualProviderId, sendInput, messageId, db);
@@ -113,7 +121,7 @@ export function registerEmailOpsTools(server: McpServer): void {
         ],
       };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );
@@ -129,12 +137,15 @@ export function registerEmailOpsTools(server: McpServer): void {
       .enum(["sent", "delivered", "bounced", "complained", "failed"])
       .optional()
       .describe("Filter by status"),
+    from_address: z.string().optional().describe("Filter by sender address"),
     since: z.string().optional().describe("ISO timestamp — only show emails after this"),
-    limit: z.number().optional().describe("Max results (default 50)"),
-    offset: z.number().optional().describe("Pagination offset"),
+    limit: z.number().int().positive().max(MAX_MCP_EMAIL_LIST_LIMIT).optional().describe("Max results (default 50, max 1000)"),
+    offset: z.number().int().min(0).optional().describe("Pagination offset"),
   },
   async (input) => {
     try {
+      const { listEmails } = await import('../../db/emails.js');
+      const { resolveId } = await import('../helpers.js');
       const resolvedProviderId = input.provider_id
         ? resolveId("providers", input.provider_id)
         : undefined;
@@ -142,10 +153,11 @@ export function registerEmailOpsTools(server: McpServer): void {
         ...input,
         provider_id: resolvedProviderId,
         limit: input.limit ?? 50,
+        offset: input.offset ?? 0,
       });
       return { content: [{ type: "text", text: JSON.stringify(emails, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );
@@ -156,14 +168,16 @@ export function registerEmailOpsTools(server: McpServer): void {
   {
     query: z.string().describe("Search query (matches subject, from, or to)"),
     since: z.string().optional().describe("ISO timestamp — only show emails after this"),
-    limit: z.number().optional().describe("Max results (default 50)"),
+    limit: z.number().int().positive().max(MAX_MCP_EMAIL_LIST_LIMIT).optional().describe("Max results (default 50, max 1000)"),
+    offset: z.number().int().min(0).optional().describe("Pagination offset"),
   },
-  async ({ query, since, limit }) => {
+  async ({ query, since, limit, offset }) => {
     try {
-      const emails = searchEmails(query, { since, limit: limit ?? 50 });
+      const { searchEmails } = await import('../../db/emails.js');
+      const emails = searchEmails(query, { since, limit: limit ?? 50, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(emails, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );
@@ -176,12 +190,14 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ email_id }) => {
     try {
+      const { getEmail } = await import('../../db/emails.js');
+      const { resolveId, EmailNotFoundError } = await import('../helpers.js');
       const id = resolveId("emails", email_id);
       const email = getEmail(id);
       if (!email) throw new EmailNotFoundError(id);
       return { content: [{ type: "text", text: JSON.stringify(email, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );
@@ -194,6 +210,9 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ email_id }) => {
     try {
+      const { getEmail } = await import('../../db/emails.js');
+      const { getEmailContent } = await import('../../db/email-content.js');
+      const { resolveId, EmailNotFoundError } = await import('../helpers.js');
       const id = resolveId("emails", email_id);
       const email = getEmail(id);
       if (!email) throw new EmailNotFoundError(id);
@@ -205,7 +224,7 @@ export function registerEmailOpsTools(server: McpServer): void {
         }],
       };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );
@@ -220,6 +239,8 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ provider_id }) => {
     try {
+      const { syncProvider, syncAll } = await import('../../lib/sync.js');
+      const { resolveId } = await import('../helpers.js');
       let result: Record<string, number>;
       if (provider_id) {
         const id = resolveId("providers", provider_id);
@@ -230,7 +251,7 @@ export function registerEmailOpsTools(server: McpServer): void {
       }
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );
@@ -246,11 +267,13 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ provider_id, period }) => {
     try {
+      const { getLocalStats } = await import('../../lib/stats.js');
+      const { resolveId } = await import('../helpers.js');
       const resolvedId = provider_id ? resolveId("providers", provider_id) : undefined;
       const stats = getLocalStats(resolvedId, period ?? "30d");
       return { content: [{ type: "text", text: JSON.stringify(stats, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );
@@ -260,13 +283,35 @@ export function registerEmailOpsTools(server: McpServer): void {
   server.tool(
   "list_templates",
   "List all email templates",
-  {},
-  async () => {
+  {
+    limit: z.number().int().positive().max(1000).optional().describe("Maximum templates to return"),
+    offset: z.number().int().min(0).optional().describe("Number of templates to skip"),
+  },
+  async ({ limit, offset }) => {
     try {
-      const templates = listTemplates();
+      const { listTemplateSummaries } = await import('../../db/templates.js');
+      const templates = listTemplateSummaries(undefined, { limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(templates, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
+    }
+  },
+  );
+
+  server.tool(
+  "get_template",
+  "Get full email template details by name or ID",
+  {
+    name_or_id: z.string().describe("Template name or ID"),
+  },
+  async ({ name_or_id }) => {
+    try {
+      const { getTemplate } = await import('../../db/templates.js');
+      const template = getTemplate(name_or_id);
+      if (!template) throw new Error(`Template not found: ${name_or_id}`);
+      return { content: [{ type: "text", text: JSON.stringify(template, null, 2) }] };
+    } catch (e) {
+      return toolError(e);
     }
   },
   );
@@ -282,10 +327,11 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async (input) => {
     try {
+      const { createTemplate } = await import('../../db/templates.js');
       const template = createTemplate(input);
       return { content: [{ type: "text", text: JSON.stringify(template, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );
@@ -298,11 +344,12 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ name_or_id }) => {
     try {
+      const { deleteTemplate } = await import('../../db/templates.js');
       const deleted = deleteTemplate(name_or_id);
       if (!deleted) throw new Error(`Template not found: ${name_or_id}`);
       return { content: [{ type: "text", text: `Template removed: ${name_or_id}` }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );
@@ -314,13 +361,20 @@ export function registerEmailOpsTools(server: McpServer): void {
   "List tracked email contacts",
   {
     suppressed: z.boolean().optional().describe("Filter by suppression status"),
+    limit: z.number().int().positive().max(1000).optional().describe("Maximum contacts to return"),
+    offset: z.number().int().min(0).optional().describe("Number of contacts to skip"),
   },
-  async ({ suppressed }) => {
+  async ({ suppressed, limit, offset }) => {
     try {
-      const contacts = listContacts(suppressed !== undefined ? { suppressed } : undefined);
+      const { listContacts } = await import('../../db/contacts.js');
+      const contacts = listContacts({
+        ...(suppressed !== undefined ? { suppressed } : {}),
+        limit: limit ?? 100,
+        offset: offset ?? 0,
+      });
       return { content: [{ type: "text", text: JSON.stringify(contacts, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );
@@ -333,10 +387,11 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ email }) => {
     try {
+      const { suppressContact } = await import('../../db/contacts.js');
       suppressContact(email);
       return { content: [{ type: "text", text: `Contact suppressed: ${email}` }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );
@@ -349,10 +404,11 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ email }) => {
     try {
+      const { unsuppressContact } = await import('../../db/contacts.js');
       unsuppressContact(email);
       return { content: [{ type: "text", text: `Contact unsuppressed: ${email}` }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );
@@ -379,6 +435,11 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async (input) => {
     try {
+      const { getDatabase } = await import('../../db/database.js');
+      const { createScheduledEmail } = await import('../../db/scheduled.js');
+      const { getTemplate, renderTemplate } = await import('../../db/templates.js');
+      const { getActiveProvider } = await import('../../db/providers.js');
+      const { resolveId } = await import('../helpers.js');
       const db = getDatabase();
       let providerId: string;
       if (input.provider_id) {
@@ -422,7 +483,7 @@ export function registerEmailOpsTools(server: McpServer): void {
 
       return { content: [{ type: "text", text: JSON.stringify(scheduled, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );
@@ -432,13 +493,20 @@ export function registerEmailOpsTools(server: McpServer): void {
   "List scheduled emails",
   {
     status: z.enum(["pending", "sent", "cancelled", "failed"]).optional().describe("Filter by status"),
+    limit: z.number().int().positive().max(1000).optional().describe("Maximum scheduled emails to return"),
+    offset: z.number().int().min(0).optional().describe("Number of scheduled emails to skip"),
   },
-  async ({ status }) => {
+  async ({ status, limit, offset }) => {
     try {
-      const emails = listScheduledEmails(status ? { status } : undefined);
+      const { listScheduledEmailSummaries } = await import('../../db/scheduled.js');
+      const emails = listScheduledEmailSummaries({
+        ...(status ? { status } : {}),
+        limit: limit ?? 100,
+        offset: offset ?? 0,
+      });
       return { content: [{ type: "text", text: JSON.stringify(emails, null, 2) }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );
@@ -451,12 +519,14 @@ export function registerEmailOpsTools(server: McpServer): void {
   },
   async ({ id }) => {
     try {
+      const { cancelScheduledEmail } = await import('../../db/scheduled.js');
+      const { resolveId } = await import('../helpers.js');
       const resolvedId = resolveId("scheduled_emails", id);
       const cancelled = cancelScheduledEmail(resolvedId);
       if (!cancelled) throw new Error(`Cannot cancel email ${id} (may already be sent or cancelled)`);
       return { content: [{ type: "text", text: `Scheduled email cancelled: ${resolvedId}` }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+      return toolError(e);
     }
   },
   );

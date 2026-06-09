@@ -1,5 +1,6 @@
 import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
+import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import type { WarmingSchedule } from "../lib/warming.js";
 
 interface WarmingRow {
@@ -50,13 +51,25 @@ export function getWarmingSchedule(domain: string, db?: Database): WarmingSchedu
   return rowToSchedule(row);
 }
 
-export function listWarmingSchedules(status?: string, db?: Database): WarmingSchedule[] {
+export interface ListWarmingScheduleOptions {
+  limit?: number;
+  offset?: number;
+}
+
+export function listWarmingSchedules(status?: string, db?: Database, opts?: ListWarmingScheduleOptions): WarmingSchedule[] {
   const d = db || getDatabase();
+  const limit = safeOptionalLimit(opts?.limit);
+  const offset = safeOffset(opts?.offset);
+  const pageSql = limit !== null ? " LIMIT ? OFFSET ?" : "";
   if (status) {
-    const rows = d.query("SELECT * FROM warming_schedules WHERE status = ? ORDER BY created_at DESC").all(status) as WarmingRow[];
+    const rows = limit !== null
+      ? d.query(`SELECT * FROM warming_schedules WHERE status = ? ORDER BY created_at DESC${pageSql}`).all(status, limit, offset) as WarmingRow[]
+      : d.query("SELECT * FROM warming_schedules WHERE status = ? ORDER BY created_at DESC").all(status) as WarmingRow[];
     return rows.map(rowToSchedule);
   }
-  const rows = d.query("SELECT * FROM warming_schedules ORDER BY created_at DESC").all() as WarmingRow[];
+  const rows = limit !== null
+    ? d.query(`SELECT * FROM warming_schedules ORDER BY created_at DESC${pageSql}`).all(limit, offset) as WarmingRow[]
+    : d.query("SELECT * FROM warming_schedules ORDER BY created_at DESC").all() as WarmingRow[];
   return rows.map(rowToSchedule);
 }
 

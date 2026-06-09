@@ -1,16 +1,23 @@
 // API route handlers — inbound-sequences.ts
-import { listInboundEmails, getInboundEmail, clearInboundEmails, storeInboundEmail } from '../../db/inbound.js';
+import { listInboundEmailSummaries, getInboundEmail, clearInboundEmails, storeInboundEmail } from '../../db/inbound.js';
 import { parseResendInbound, parseMailgunInbound, parseMimeEmail } from '../../lib/inbound.js';
-import { createSequence, getSequence, listSequences, deleteSequence, addStep, listSteps, enroll, unenroll, listEnrollments } from '../../db/sequences.js';
+import { createSequence, getSequence, listSequences, deleteSequence, addStep, listSteps, enroll, unenroll, listEnrollments, type EnrollmentStatus } from '../../db/sequences.js';
 import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus, deleteWarmingSchedule } from '../../db/warming.js';
 import { getTodayLimit, getTodaySentCount } from '../../lib/warming.js';
-import { getTriage, listTriaged, getTriageStats } from '../../db/triage.js';
-import { triageEmail, triageBatch, generateDraftForEmail } from '../../lib/triage.js';
+import { getTriage, listTriagedSummaries, getTriageStats } from '../../db/triage.js';
 import { updateEmailStatus } from '../../db/emails.js';
 import { upsertEvent } from '../../db/events.js';
-import { runDiagnostics } from '../../lib/doctor.js';
-import { syncProvider, syncAll } from '../../lib/sync.js';
-import { json, notFound, badRequest, internalError, resolveId, parseBody, checkRateLimit, tooManyRequests } from './helpers.js';
+import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, checkRateLimit, tooManyRequests, parseInteger, queryInteger, optionalQueryInteger, queryPage } from './helpers.js';
+
+function parseEnrollmentStatus(value: string | null): EnrollmentStatus | undefined {
+  if (value === null || value === "") return undefined;
+  if (value === "active" || value === "completed" || value === "cancelled") return value;
+  throw new Error("status must be active, completed, or cancelled");
+}
+
+function resolveSequenceRef(raw: string) {
+  return getSequence(decodeURIComponent(raw));
+}
 
 export async function handle(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
 // ─── INBOUND EMAILS ────────────────────────────────────────────────────
@@ -18,17 +25,17 @@ export async function handle(req: Request, url: URL, path: string, method: strin
 // GET /api/inbound?provider_id=x&limit=50&since=...
 if (path === "/api/inbound" && method === "GET") {
   try {
-    const provider_id = url.searchParams.get("provider_id") ?? undefined;
+    const provider_id = resolveOptionalId("providers", url.searchParams.get("provider_id"));
     const since = url.searchParams.get("since") ?? undefined;
     const to = url.searchParams.get("to")?.trim().toLowerCase() || undefined;
     const unread = url.searchParams.get("unread") === "true" ? true : undefined;
     const read = url.searchParams.get("read") === "true" ? true : undefined;
     const archived = url.searchParams.get("archived") === "true" ? true : undefined;
-    const limit = url.searchParams.get("limit") ? parseInt(url.searchParams.get("limit")!, 10) : 50;
-    return json(listInboundEmails({
+    const page = queryPage(url, 50);
+    return json(listInboundEmailSummaries({
       provider_id,
       since,
-      limit,
+      ...page,
       unread,
       read,
       archived,
@@ -41,7 +48,7 @@ if (path === "/api/inbound" && method === "GET") {
 // DELETE /api/inbound?provider_id=x
 if (path === "/api/inbound" && method === "DELETE") {
   try {
-    const provider_id = url.searchParams.get("provider_id") ?? undefined;
+    const provider_id = resolveOptionalId("providers", url.searchParams.get("provider_id"));
     const count = clearInboundEmails(provider_id);
     return json({ ok: true, count });
   } catch (e) { return internalError(e); }
@@ -68,7 +75,7 @@ if (path === "/api/inbound" && method === "POST") {
       parsed = parseResendInbound(body);
     }
 
-    const provider_id = url.searchParams.get("provider_id") ?? undefined;
+    const provider_id = resolveOptionalId("providers", url.searchParams.get("provider_id"));
     const rawBody = JSON.stringify(body);
     const stored = storeInboundEmail({
       provider_id: provider_id ?? null,
@@ -107,7 +114,9 @@ if (inboundMatch && method === "GET") {
 // GET /api/doctor
 if (path === "/api/doctor" && method === "GET") {
   try {
-    const checks = await runDiagnostics();
+    const live = url.searchParams.get("live") === "true";
+    const { runDiagnostics } = await import('../../lib/doctor.js');
+    const checks = await runDiagnostics(undefined, { liveProviderChecks: live });
     return json(checks);
   } catch (e) { return internalError(e); }
 }
@@ -120,10 +129,12 @@ if (path === "/api/pull" && method === "POST") {
     const body = await parseBody(req) as Record<string, unknown>;
     let result: Record<string, number>;
     if (body.provider_id) {
-      const id = resolveId("providers", String(body.provider_id)) ?? String(body.provider_id);
+      const id = resolveIdStrict("providers", String(body.provider_id));
+      const { syncProvider } = await import('../../lib/sync.js');
       const count = await syncProvider(id);
       result = { [id]: count };
     } else {
+      const { syncAll } = await import('../../lib/sync.js');
       result = await syncAll();
     }
     return json(result);
@@ -134,7 +145,9 @@ if (path === "/api/pull" && method === "POST") {
 
 // GET /api/sequences
 if (path === "/api/sequences" && method === "GET") {
-  try { return json(listSequences()); } catch (e) { return internalError(e); }
+  try {
+    return json(listSequences(undefined, queryPage(url, 100)));
+  } catch (e) { return internalError(e); }
 }
 
 // POST /api/sequences
@@ -151,8 +164,7 @@ if (path === "/api/sequences" && method === "POST") {
 const seqDeleteMatch = path.match(/^\/api\/sequences\/([^/]+)$/);
 if (seqDeleteMatch && method === "DELETE") {
   try {
-    const id = seqDeleteMatch[1]!;
-    const seq = getSequence(id);
+    const seq = resolveSequenceRef(seqDeleteMatch[1]!);
     if (!seq) return notFound("Sequence not found");
     deleteSequence(seq.id);
     return json({ deleted: true });
@@ -163,8 +175,7 @@ if (seqDeleteMatch && method === "DELETE") {
 const seqStepsMatch = path.match(/^\/api\/sequences\/([^/]+)\/steps$/);
 if (seqStepsMatch && method === "GET") {
   try {
-    const id = seqStepsMatch[1]!;
-    const seq = getSequence(id);
+    const seq = resolveSequenceRef(seqStepsMatch[1]!);
     if (!seq) return notFound("Sequence not found");
     return json(listSteps(seq.id));
   } catch (e) { return internalError(e); }
@@ -173,8 +184,7 @@ if (seqStepsMatch && method === "GET") {
 // POST /api/sequences/:id/steps
 if (seqStepsMatch && method === "POST") {
   try {
-    const id = seqStepsMatch[1]!;
-    const seq = getSequence(id);
+    const seq = resolveSequenceRef(seqStepsMatch[1]!);
     if (!seq) return notFound("Sequence not found");
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.step_number || !body.template_name) return badRequest("step_number and template_name are required");
@@ -194,10 +204,19 @@ if (seqStepsMatch && method === "POST") {
 const seqEnrollmentsMatch = path.match(/^\/api\/sequences\/([^/]+)\/enrollments$/);
 if (seqEnrollmentsMatch && method === "GET") {
   try {
-    const id = seqEnrollmentsMatch[1]!;
-    const seq = getSequence(id);
+    const seq = resolveSequenceRef(seqEnrollmentsMatch[1]!);
     if (!seq) return notFound("Sequence not found");
-    return json(listEnrollments({ sequence_id: seq.id }));
+    let status: EnrollmentStatus | undefined;
+    try {
+      status = parseEnrollmentStatus(url.searchParams.get("status"));
+    } catch (error) {
+      return badRequest(error instanceof Error ? error.message : String(error));
+    }
+    return json(listEnrollments({
+      sequence_id: seq.id,
+      ...(status ? { status } : {}),
+      ...queryPage(url, 100),
+    }));
   } catch (e) { return internalError(e); }
 }
 
@@ -205,15 +224,14 @@ if (seqEnrollmentsMatch && method === "GET") {
 const seqEnrollMatch = path.match(/^\/api\/sequences\/([^/]+)\/enroll$/);
 if (seqEnrollMatch && method === "POST") {
   try {
-    const id = seqEnrollMatch[1]!;
-    const seq = getSequence(id);
+    const seq = resolveSequenceRef(seqEnrollMatch[1]!);
     if (!seq) return notFound("Sequence not found");
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.contact_email) return badRequest("contact_email is required");
     const enrollment = enroll({
       sequence_id: seq.id,
       contact_email: String(body.contact_email),
-      provider_id: body.provider_id ? String(body.provider_id) : undefined,
+      provider_id: body.provider_id ? resolveIdStrict("providers", String(body.provider_id)) : undefined,
     });
     return json(enrollment, 201);
   } catch (e) { return internalError(e); }
@@ -223,9 +241,8 @@ if (seqEnrollMatch && method === "POST") {
 const seqUnenrollMatch = path.match(/^\/api\/sequences\/([^/]+)\/enrollments\/(.+)$/);
 if (seqUnenrollMatch && method === "DELETE") {
   try {
-    const id = seqUnenrollMatch[1]!;
+    const seq = resolveSequenceRef(seqUnenrollMatch[1]!);
     const email = decodeURIComponent(seqUnenrollMatch[2]!);
-    const seq = getSequence(id);
     if (!seq) return notFound("Sequence not found");
     const removed = unenroll(seq.id, email);
     if (!removed) return notFound("Enrollment not found or already inactive");
@@ -240,7 +257,7 @@ if (path === "/api/warming" && method === "GET") {
   try {
     const url = new URL(req.url);
     const status = url.searchParams.get("status") ?? undefined;
-    return json(listWarmingSchedules(status));
+    return json(listWarmingSchedules(status, undefined, queryPage(url, 50)));
   } catch (e) { return internalError(e); }
 }
 
@@ -254,7 +271,7 @@ if (path === "/api/warming" && method === "POST") {
       domain: String(body.domain),
       target_daily_volume: Number(body.target_daily_volume),
       start_date: body.start_date ? String(body.start_date) : undefined,
-      provider_id: body.provider_id ? String(body.provider_id) : undefined,
+      provider_id: body.provider_id ? resolveIdStrict("providers", String(body.provider_id)) : undefined,
     });
     return json(schedule, 201);
   } catch (e) { return internalError(e); }
@@ -317,7 +334,9 @@ if (path === "/api/triage/batch" && method === "POST") {
   try {
     const body = await req.json() as { type?: string; limit?: number; model?: string; skip_draft?: boolean };
     const type = (body.type === "sent" ? "sent" : "inbound") as "sent" | "inbound";
-    const result = await triageBatch(type, body.limit || 10, { model: body.model, skip_draft: body.skip_draft });
+    const limit = parseInteger(body.limit, 10, { min: 1, max: 100 });
+    const { triageBatch } = await import('../../lib/triage.js');
+    const result = await triageBatch(type, limit, { model: body.model, skip_draft: body.skip_draft });
     return json(result);
   } catch (e) { return internalError(e); }
 }
@@ -328,6 +347,7 @@ if (triageDraftMatch && method === "POST") {
   try {
     const body = await req.json() as { type?: string; model?: string };
     const type = (body.type === "inbound" ? "inbound" : "sent") as "sent" | "inbound";
+    const { generateDraftForEmail } = await import('../../lib/triage.js');
     const draft = await generateDraftForEmail(triageDraftMatch[1]!, type, { model: body.model });
     return json({ draft });
   } catch (e) { return internalError(e); }
@@ -353,6 +373,7 @@ if (triageIdMatch && triageIdMatch[1] !== "batch" && triageIdMatch[1] !== "stats
     try {
       const body = await req.json() as { type?: string; model?: string; skip_draft?: boolean };
       const type = (body.type === "inbound" ? "inbound" : "sent") as "sent" | "inbound";
+      const { triageEmail } = await import('../../lib/triage.js');
       const result = await triageEmail(triageTargetId, type, { model: body.model, skip_draft: body.skip_draft });
       return json(result);
     } catch (e) { return internalError(e); }
@@ -371,10 +392,11 @@ if (triageIdMatch && triageIdMatch[1] !== "batch" && triageIdMatch[1] !== "stats
 if (path === "/api/triage" && method === "GET") {
   try {
     const label = url.searchParams.get("label") || undefined;
-    const priority = url.searchParams.get("priority") ? Number(url.searchParams.get("priority")) : undefined;
+    const priority = optionalQueryInteger(url, "priority", { min: 1 });
     const sentiment = url.searchParams.get("sentiment") || undefined;
-    const limit = url.searchParams.get("limit") ? Number(url.searchParams.get("limit")) : 20;
-    return json(listTriaged({ label: label as any, priority, sentiment: sentiment as any, limit }));
+    const limit = queryInteger(url, "limit", 20, { min: 1, max: 100 });
+    const offset = optionalQueryInteger(url, "offset", { min: 0 });
+    return json(listTriagedSummaries({ label: label as any, priority, sentiment: sentiment as any, limit, offset }));
   } catch (e) { return internalError(e); }
 }
 

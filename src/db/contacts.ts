@@ -1,5 +1,6 @@
 import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
+import { safeOffset, safeOptionalLimit } from "./pagination.js";
 
 export interface Contact {
   id: string;
@@ -26,6 +27,10 @@ interface ContactRow {
   created_at: string;
   updated_at: string;
 }
+
+const CONTACT_READ_CHUNK_SIZE = 500;
+const CONTACT_WRITE_CHUNK_SIZE = 200;
+type ContactCountColumn = "send_count" | "bounce_count" | "complaint_count";
 
 function rowToContact(row: ContactRow): Contact {
   return {
@@ -57,15 +62,29 @@ export function getContact(email: string, db?: Database): Contact | null {
   return rowToContact(row);
 }
 
-export function listContacts(opts?: { suppressed?: boolean }, db?: Database): Contact[] {
+export interface ListContactOptions {
+  suppressed?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export function listContacts(opts?: ListContactOptions, db?: Database): Contact[] {
   const d = db || getDatabase();
+  const conditions: string[] = [];
+  const params: Array<number> = [];
   if (opts?.suppressed !== undefined) {
-    const rows = d
-      .query("SELECT * FROM contacts WHERE suppressed = ? ORDER BY updated_at DESC")
-      .all(opts.suppressed ? 1 : 0) as ContactRow[];
-    return rows.map(rowToContact);
+    conditions.push("suppressed = ?");
+    params.push(opts.suppressed ? 1 : 0);
   }
-  const rows = d.query("SELECT * FROM contacts ORDER BY updated_at DESC").all() as ContactRow[];
+  const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
+  const limit = safeOptionalLimit(opts?.limit);
+  const offset = safeOffset(opts?.offset);
+  if (limit !== null) {
+    params.push(limit, offset);
+  }
+  const rows = d
+    .query(`SELECT * FROM contacts${where} ORDER BY updated_at DESC${limit !== null ? " LIMIT ? OFFSET ?" : ""}`)
+    .all(...params) as ContactRow[];
   return rows.map(rowToContact);
 }
 
@@ -82,39 +101,118 @@ export function unsuppressContact(email: string, db?: Database): void {
 }
 
 export function incrementSendCount(email: string, db?: Database): void {
-  const d = db || getDatabase();
-  upsertContact(email, d);
-  d.run(
-    "UPDATE contacts SET send_count = send_count + 1, last_sent_at = ?, updated_at = ? WHERE email = ?",
-    [now(), now(), email],
-  );
+  incrementSendCounts([email], db);
 }
 
-export function incrementBounceCount(email: string, db?: Database): void {
+export function incrementSendCounts(emails: Iterable<string>, db?: Database): void {
+  incrementContactCounts(emails, "send_count", { updateLastSentAt: true }, db);
+}
+
+function incrementContactCounts(
+  emails: Iterable<string>,
+  column: ContactCountColumn,
+  opts: { updateLastSentAt?: boolean; autoSuppressBounces?: boolean } = {},
+  db?: Database,
+): void {
+  const counts = new Map<string, number>();
+  for (const email of emails) {
+    counts.set(email, (counts.get(email) ?? 0) + 1);
+  }
+  if (counts.size === 0) return;
+
   const d = db || getDatabase();
-  upsertContact(email, d);
-  d.run(
-    "UPDATE contacts SET bounce_count = bounce_count + 1, updated_at = ? WHERE email = ?",
-    [now(), email],
-  );
-  // Auto-suppress on 3+ bounces
-  const contact = getContact(email, d);
-  if (contact && contact.bounce_count >= 3) {
-    d.run("UPDATE contacts SET suppressed = 1, updated_at = ? WHERE email = ?", [now(), email]);
+  const timestamp = now();
+  const entries = Array.from(counts.entries());
+
+  for (let i = 0; i < entries.length; i += CONTACT_WRITE_CHUNK_SIZE) {
+    const chunk = entries.slice(i, i + CONTACT_WRITE_CHUNK_SIZE);
+    const valuesSql = chunk.map(() => "(?, ?, NULL, 0, 0, 0, NULL, 0, ?, ?)").join(", ");
+    const insertParams: string[] = [];
+    for (const [email] of chunk) {
+      insertParams.push(uuid(), email, timestamp, timestamp);
+    }
+
+    d.run(
+      `INSERT INTO contacts (id, email, name, send_count, bounce_count, complaint_count, last_sent_at, suppressed, created_at, updated_at)
+       VALUES ${valuesSql}
+       ON CONFLICT(email) DO NOTHING`,
+      insertParams,
+    );
+
+    const caseSql = chunk.map(() => "WHEN ? THEN ?").join(" ");
+    const placeholders = chunk.map(() => "?").join(", ");
+    const updateParams: Array<string | number> = [];
+    for (const [email, count] of chunk) {
+      updateParams.push(email, count);
+    }
+    if (opts.updateLastSentAt) {
+      updateParams.push(timestamp);
+    }
+    updateParams.push(timestamp);
+    for (const [email] of chunk) {
+      updateParams.push(email);
+    }
+
+    d.run(
+      `UPDATE contacts
+          SET ${column} = ${column} + CASE email ${caseSql} ELSE 0 END,
+              ${opts.updateLastSentAt ? "last_sent_at = ?," : ""}
+              updated_at = ?
+        WHERE email IN (${placeholders})`,
+      updateParams,
+    );
+
+    if (opts.autoSuppressBounces) {
+      d.run(
+        `UPDATE contacts
+            SET suppressed = 1,
+                updated_at = ?
+          WHERE bounce_count >= 3
+            AND email IN (${placeholders})`,
+        [timestamp, ...chunk.map(([email]) => email)],
+      );
+    }
   }
 }
 
+export function incrementBounceCount(email: string, db?: Database): void {
+  incrementBounceCounts([email], db);
+}
+
+export function incrementBounceCounts(emails: Iterable<string>, db?: Database): void {
+  incrementContactCounts(emails, "bounce_count", { autoSuppressBounces: true }, db);
+}
+
 export function incrementComplaintCount(email: string, db?: Database): void {
-  const d = db || getDatabase();
-  upsertContact(email, d);
-  d.run(
-    "UPDATE contacts SET complaint_count = complaint_count + 1, updated_at = ? WHERE email = ?",
-    [now(), email],
-  );
+  incrementComplaintCounts([email], db);
+}
+
+export function incrementComplaintCounts(emails: Iterable<string>, db?: Database): void {
+  incrementContactCounts(emails, "complaint_count", {}, db);
 }
 
 export function isContactSuppressed(email: string, db?: Database): boolean {
   const d = db || getDatabase();
   const row = d.query("SELECT suppressed FROM contacts WHERE email = ?").get(email) as { suppressed: number } | null;
   return row?.suppressed === 1;
+}
+
+export function getSuppressedEmailSet(emails: Iterable<string>, db?: Database): Set<string> {
+  const uniqueEmails = Array.from(new Set(emails));
+  const suppressed = new Set<string>();
+  if (uniqueEmails.length === 0) return suppressed;
+
+  const d = db || getDatabase();
+  for (let i = 0; i < uniqueEmails.length; i += CONTACT_READ_CHUNK_SIZE) {
+    const chunk = uniqueEmails.slice(i, i + CONTACT_READ_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const rows = d
+      .query(`SELECT email FROM contacts WHERE suppressed = 1 AND email IN (${placeholders})`)
+      .all(...chunk) as Array<{ email: string }>;
+    for (const row of rows) {
+      suppressed.add(row.email);
+    }
+  }
+
+  return suppressed;
 }

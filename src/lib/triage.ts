@@ -7,8 +7,7 @@ import { promptJson } from "./cerebras.js";
 import { saveTriage, getUntriaged } from "../db/triage.js";
 import { getEmail } from "../db/emails.js";
 import { getEmailContent } from "../db/email-content.js";
-import { getInboundEmail } from "../db/inbound.js";
-import { listReplies } from "../db/inbound.js";
+import { getInboundEmail, getReplyCount, listReplyPromptParts } from "../db/inbound.js";
 import type { TriageLabel, TriageSentiment, TriageResult, SaveTriageInput } from "../db/triage.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -24,12 +23,21 @@ export interface TriageOptions {
   temperature?: number;
 }
 
-interface EmailContext {
+export interface EmailContext {
   from: string;
   to: string[];
   subject: string;
   body: string;
   thread?: string[];
+}
+
+const TRIAGE_EMAIL_BODY_CHAR_LIMIT = 8000;
+const TRIAGE_REPLY_HISTORY_LIMIT = 10;
+const TRIAGE_REPLY_BODY_CHAR_LIMIT = 1000;
+
+function truncateForPrompt(value: string, limit: number): string {
+  if (value.length <= limit) return value;
+  return `${value.slice(0, limit)}\n[truncated ${value.length - limit} characters]`;
 }
 
 // ─── Email context builders ──────────────────────────────────────────────────
@@ -38,11 +46,20 @@ function buildSentEmailContext(emailId: string): EmailContext | null {
   const email = getEmail(emailId);
   if (!email) return null;
   const content = getEmailContent(emailId);
-  const body = content?.text_body || content?.html || "";
-  const replies = listReplies(emailId);
+  const body = truncateForPrompt(content?.text_body || content?.html || "", TRIAGE_EMAIL_BODY_CHAR_LIMIT);
+  const replyCount = getReplyCount(emailId);
+  const replyOffset = Math.max(0, replyCount - TRIAGE_REPLY_HISTORY_LIMIT);
+  const replies = listReplyPromptParts(emailId, undefined, {
+    limit: TRIAGE_REPLY_HISTORY_LIMIT,
+    offset: replyOffset,
+  });
   const thread = replies.map(
-    (r) => `[${r.from_address}]: ${r.text_body || r.subject}`,
+    (r) => `[${r.from_address}]: ${truncateForPrompt(r.text_body || r.subject, TRIAGE_REPLY_BODY_CHAR_LIMIT)}`,
   );
+  const omittedReplyCount = Math.max(0, replyCount - replies.length);
+  if (omittedReplyCount > 0) {
+    thread.unshift(`[${omittedReplyCount} older replies omitted]`);
+  }
   return {
     from: email.from_address,
     to: email.to_addresses,
@@ -59,7 +76,7 @@ function buildInboundEmailContext(inboundId: string): EmailContext | null {
     from: email.from_address,
     to: email.to_addresses,
     subject: email.subject,
-    body: email.text_body || email.html_body || "",
+    body: truncateForPrompt(email.text_body || email.html_body || "", TRIAGE_EMAIL_BODY_CHAR_LIMIT),
   };
 }
 

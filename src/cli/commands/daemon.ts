@@ -1,12 +1,9 @@
 import type { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import { getDataDir, getDatabase } from "../../db/database.js";
-import { claimDueAddresses, claimDueDomains, getAddressProvisioning, getDomainProvisioning } from "../../db/provisioning.js";
-import { listAddresses } from "../../db/addresses.js";
-import { listDomains } from "../../db/domains.js";
-import { getEmailSystemStatus } from "../../lib/agent-context.js";
+import { getProvisioningWorkSummary } from "../../db/provisioning.js";
 import { handleError } from "../utils.js";
 
 type LogComponent = "daemon" | "sync" | "inbound" | "scheduler" | "nightly";
@@ -19,23 +16,19 @@ const LOG_FILES: Record<LogComponent, string[]> = {
   nightly: ["nightly-sync.log"],
 };
 
-function daemonStatus() {
+async function daemonStatus() {
   const db = getDatabase();
+  const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
   const now = new Date().toISOString();
-  const domains = listDomains(undefined, db);
-  const addresses = listAddresses(undefined, db);
-  const dueDomains = claimDueDomains(now, db);
-  const dueAddresses = claimDueAddresses(now, db);
-  const failedDomains = domains.filter((domain) => getDomainProvisioning(domain.id, db)?.provisioning_status === "failed");
-  const failedAddresses = addresses.filter((address) => getAddressProvisioning(address.id, db)?.provisioning_status === "failed");
+  const queue = getProvisioningWorkSummary(now, db);
   const system = getEmailSystemStatus(db);
   return {
     generated_at: now,
     queue: {
-      due_domains: dueDomains.length,
-      due_addresses: dueAddresses.length,
-      failed_domains: failedDomains.length,
-      failed_addresses: failedAddresses.length,
+      due_domains: queue.due_domains,
+      due_addresses: queue.due_addresses,
+      failed_domains: queue.failed_domains,
+      failed_addresses: queue.failed_addresses,
     },
     realtime: system.inbox.realtime,
     start_commands: {
@@ -46,7 +39,7 @@ function daemonStatus() {
   };
 }
 
-function formatDaemonStatus(status: ReturnType<typeof daemonStatus>): string {
+function formatDaemonStatus(status: Awaited<ReturnType<typeof daemonStatus>>): string {
   const lines = [chalk.bold("\nDaemon status:")];
   lines.push(`  Due work:   ${status.queue.due_domains} domain(s), ${status.queue.due_addresses} address(es)`);
   lines.push(`  Failed:     ${status.queue.failed_domains} domain(s), ${status.queue.failed_addresses} address(es)`);
@@ -78,9 +71,9 @@ export function registerDaemonCommands(program: Command, output: (data: unknown,
   daemon
     .command("status")
     .description("Show provisioning/realtime daemon queue status")
-    .action(() => {
+    .action(async () => {
       try {
-        const status = daemonStatus();
+        const status = await daemonStatus();
         output(status, formatDaemonStatus(status));
       } catch (e) {
         handleError(e);
@@ -90,9 +83,9 @@ export function registerDaemonCommands(program: Command, output: (data: unknown,
   daemon
     .command("restart")
     .description("Show restart guidance for configured email background workers")
-    .action(() => {
+    .action(async () => {
       try {
-        const status = daemonStatus();
+        const status = await daemonStatus();
         const result = {
           managed_process: false,
           reason: "No built-in supervisor or PID file is configured for this package.",

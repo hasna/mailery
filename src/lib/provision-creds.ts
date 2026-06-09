@@ -1,7 +1,7 @@
 /**
  * Provisioning credential status (open-emails) — reports whether usable
  * credentials are present for each provisioning provider, across all supported
- * auth modes incl. HASNAXYZ vault env names. Pure (env injected); surfaced by
+ * auth modes. Pure (env injected); surfaced by
  * `emails doctor`.
  */
 
@@ -31,11 +31,11 @@ export function checkProvisionCredentials(
   out.push({
     provider: "cloudflare",
     configured: !!cf,
-    detail: cf ? describeCloudflareAuth(cf) + (env["CLOUDFLARE_ACCOUNT_ID"] || env["HASNAXYZ_CLOUDFLARE_LIVE_ACCOUNT_ID"] ? " (+account)" : " (no account id — zone create needs it)") : "Set CLOUDFLARE_API_TOKEN or CLOUDFLARE_API_KEY+CLOUDFLARE_EMAIL",
+    detail: cf ? describeCloudflareAuth(cf) + (env["CLOUDFLARE_ACCOUNT_ID"] ? " (+account)" : " (no account id — zone create needs it)") : "Set CLOUDFLARE_API_TOKEN or CLOUDFLARE_API_KEY+CLOUDFLARE_EMAIL",
   });
 
   // Resend (optional secondary send + inbound webhook).
-  const resend = !!(env["RESEND_API_KEY"] || env["HASNATOOLS_TODOS_EMAIL_LIVE_RESEND_API_KEY"]);
+  const resend = !!env["RESEND_API_KEY"];
   out.push({
     provider: "resend",
     configured: resend,

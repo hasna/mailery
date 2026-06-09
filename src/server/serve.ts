@@ -6,7 +6,7 @@
  */
 
 import { existsSync, readFileSync } from "fs";
-import { join, dirname, extname } from "path";
+import { join, dirname, extname, isAbsolute, relative, resolve, sep } from "path";
 import { fileURLToPath } from "url";
 import { handleApiRequest } from "./api-routes.js";
 
@@ -47,6 +47,23 @@ function resolveDashboardDir(): string {
   }
 
   return join(process.cwd(), "dashboard");
+}
+
+export function resolveDashboardStaticPath(dashboardDir: string, requestPath: string): string | null {
+  const root = resolve(dashboardDir);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(requestPath);
+  } catch {
+    return null;
+  }
+  const requested = requestPath === "/" || requestPath === "/index.html"
+    ? "index.html"
+    : decoded.replace(/^\/+/, "");
+  const filePath = resolve(root, requested);
+  const rel = relative(root, filePath);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+  return filePath;
 }
 
 export async function startServer(port = 3900, hostname = "127.0.0.1"): Promise<void> {
@@ -91,14 +108,9 @@ export async function startServer(port = 3900, hostname = "127.0.0.1"): Promise<
 
       // ─── STATIC DASHBOARD ────────────────────────────────────────────────
       if (method === "GET") {
-        let filePath: string;
-        if (path === "/" || path === "/index.html") {
-          filePath = join(dashboardDir, "index.html");
-        } else {
-          filePath = join(dashboardDir, path.slice(1));
-        }
+        const filePath = resolveDashboardStaticPath(dashboardDir, path);
 
-        if (existsSync(filePath)) {
+        if (filePath && existsSync(filePath)) {
           const ext = extname(filePath);
           const mimeType = MIME_TYPES[ext] ?? "application/octet-stream";
           return new Response(readFileSync(filePath), {

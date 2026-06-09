@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, resetDatabase } from "./database.js";
+import { closeDatabase, getDatabase, resetDatabase } from "./database.js";
 import { createProvider } from "./providers.js";
 import { createAddress } from "./addresses.js";
 import { createOwner, assignAddressOwner } from "./owners.js";
 import {
-  createSendKey, verifySendKey, listSendKeys, revokeSendKey,
+  createSendKey, verifySendKey, listSendKeys, listSendKeysByOwners, listSendKeySummaries,
+  listSendKeySummariesByOwners, revokeSendKey,
   canOwnerSendFrom, assertSendAuthorized,
 } from "./send-keys.js";
 
@@ -40,6 +41,93 @@ describe("send keys — issue / verify", () => {
     revokeSendKey(key.id);
     expect(verifySendKey(token)).toBeNull();
     expect(listSendKeys(agent.id)[0]!.revoked_at).toBeTruthy();
+  });
+
+  it("lists keys for selected owners only", () => {
+    const first = createOwner({ type: "agent", name: "First" });
+    const second = createOwner({ type: "agent", name: "Second" });
+    const other = createOwner({ type: "agent", name: "Other" });
+    const firstKey = createSendKey(first.id, "first").key;
+    const secondKey = createSendKey(second.id, "second").key;
+    createSendKey(other.id, "other");
+
+    expect(listSendKeysByOwners([first.id, second.id, first.id]).map((key) => key.id).sort()).toEqual([
+      firstKey.id,
+      secondKey.id,
+    ].sort());
+    expect(listSendKeysByOwners([])).toEqual([]);
+  });
+
+  it("lists hash-free key summaries for selected owners only", () => {
+    const db = getDatabase();
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+    const first = createOwner({ type: "agent", name: "Summary First" }, db);
+    const second = createOwner({ type: "agent", name: "Summary Second" }, db);
+    const other = createOwner({ type: "agent", name: "Summary Other" }, db);
+    const firstKey = createSendKey(first.id, "first-summary", db).key;
+    const secondKey = createSendKey(second.id, "second-summary", db).key;
+    createSendKey(other.id, "other-summary", db);
+
+    const summaries = listSendKeySummariesByOwners([first.id, second.id, first.id], recordingDb);
+
+    expect(summaries.map((key) => key.id).sort()).toEqual([firstKey.id, secondKey.id].sort());
+    expect(summaries.every((key) => !("key_hash" in key))).toBe(true);
+    expect(JSON.stringify(summaries)).not.toContain(firstKey.key_hash);
+    expect(queries[0]).not.toContain("SELECT *");
+    expect(queries[0]).not.toMatch(/\bkey_hash\b/);
+    expect(listSendKeySummariesByOwners([], recordingDb)).toEqual([]);
+  });
+
+  it("paginates send keys after ordering newest first", () => {
+    const db = getDatabase();
+    const agent = createOwner({ type: "agent", name: "Paged" });
+    for (let i = 0; i < 5; i++) {
+      const key = createSendKey(agent.id, `key-${i}`).key;
+      db.run("UPDATE send_keys SET created_at = ? WHERE id = ?", [`2026-01-0${i + 1}T00:00:00.000Z`, key.id]);
+    }
+
+    const page = listSendKeys(agent.id, undefined, { limit: 2, offset: 1 });
+
+    expect(page.map((key) => key.label)).toEqual(["key-3", "key-2"]);
+  });
+
+  it("paginates hash-free send key summaries", () => {
+    const db = getDatabase();
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+    const agent = createOwner({ type: "agent", name: "Summary Paged" }, db);
+    const hashes: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const key = createSendKey(agent.id, `summary-${i}`, db).key;
+      hashes.push(key.key_hash);
+      db.run("UPDATE send_keys SET created_at = ? WHERE id = ?", [`2026-01-0${i + 1}T00:00:00.000Z`, key.id]);
+    }
+
+    const page = listSendKeySummaries(agent.id, recordingDb, { limit: 2, offset: 1 });
+
+    expect(page.map((key) => key.label)).toEqual(["summary-3", "summary-2"]);
+    expect(page.every((key) => !("key_hash" in key))).toBe(true);
+    expect(hashes.some((hash) => JSON.stringify(page).includes(hash))).toBe(false);
+    expect(queries[0]).not.toMatch(/\bkey_hash\b/);
   });
 });
 

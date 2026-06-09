@@ -2,10 +2,7 @@
 /**
  * emails MCP server entry point.
  */
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import pkg from "../../package.json" with { type: "json" };
-import { buildServer } from "./server.js";
-import { isStdioMode, resolveHttpPort, startHttpServer } from "./http.js";
 
 function printHelp(): void {
   console.log(`Usage: emails-mcp [options]
@@ -35,13 +32,19 @@ if (args.includes("--version") || args.includes("-V")) {
 }
 
 async function main(): Promise<void> {
+  const { isStdioMode, resolveHttpPort } = await import("./options.js");
   if (isStdioMode(args)) {
+    const [{ StdioServerTransport }, { buildServer }] = await Promise.all([
+      import("@modelcontextprotocol/sdk/server/stdio.js"),
+      import("./server.js"),
+    ]);
     const server = buildServer();
     const transport = new StdioServerTransport();
     await server.connect(transport);
     return;
   }
   // Default: shared Streamable HTTP server (one process per MCP, many agents).
+  const { startHttpServer } = await import("./http.js");
   startHttpServer({ port: resolveHttpPort(args) });
   await new Promise<never>(() => {});
 }

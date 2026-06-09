@@ -6,12 +6,22 @@ import { createAddress } from "./addresses.js";
 import {
   setDomainProvisioning,
   getDomainProvisioning,
+  listDomainProvisioningById,
+  listDomainProvisioningByIds,
   setAddressProvisioning,
   getAddressProvisioning,
+  listAddressProvisioningById,
+  listAddressProvisioningByIds,
+  listAddressProvisioningByDomain,
+  listAddressProvisioningByDomains,
+  listAddressProvisioningForDomain,
+  listReadyAddressCountsByDomain,
+  listReadyAddressCountsByDomains,
   recordProvisioningEvent,
   listProvisioningEvents,
   claimDueDomains,
   claimDueAddresses,
+  getProvisioningWorkSummary,
 } from "./provisioning.js";
 
 let providerId: string;
@@ -85,6 +95,33 @@ describe("setDomainProvisioning / getDomainProvisioning", () => {
     setDomainProvisioning(d.id, { last_error: null });
     expect(getDomainProvisioning(d.id)!.last_error).toBeNull();
   });
+
+  it("lists domain provisioning by id in one read", () => {
+    const d = createDomain(providerId, "example.com");
+    setDomainProvisioning(d.id, { provisioning_status: "ready", nameservers: ["a.ns.example"] });
+
+    const byId = listDomainProvisioningById();
+
+    expect(byId.get(d.id)).toMatchObject({
+      provisioning_status: "ready",
+      nameservers: ["a.ns.example"],
+    });
+  });
+
+  it("lists domain provisioning for selected ids only", () => {
+    const first = createDomain(providerId, "first.example.com");
+    const second = createDomain(providerId, "second.example.com");
+    createDomain(providerId, "other.example.com");
+    setDomainProvisioning(first.id, { provisioning_status: "ready", send_provider: "ses" });
+    setDomainProvisioning(second.id, { provisioning_status: "failed", last_error: "boom" });
+
+    const byId = listDomainProvisioningByIds([first.id, second.id, first.id]);
+
+    expect([...byId.keys()].sort()).toEqual([first.id, second.id].sort());
+    expect(byId.get(first.id)).toMatchObject({ provisioning_status: "ready", send_provider: "ses" });
+    expect(byId.get(second.id)).toMatchObject({ provisioning_status: "failed", last_error: "boom" });
+    expect(listDomainProvisioningByIds([]).size).toBe(0);
+  });
 });
 
 describe("setAddressProvisioning / getAddressProvisioning", () => {
@@ -105,6 +142,184 @@ describe("setAddressProvisioning / getAddressProvisioning", () => {
     expect(p.forward_to).toBe("me@gmail.com");
     expect(p.routing_rule_id).toBe("rule1");
     expect(p.provisioning_status).toBe("validating");
+  });
+
+  it("lists address provisioning by id in one read", () => {
+    const dom = createDomain(providerId, "example.com");
+    const a = createAddress({ provider_id: providerId, email: "andrew@example.com" });
+    setAddressProvisioning(a.id, { domain_id: dom.id, provisioning_status: "ready" });
+
+    const byId = listAddressProvisioningById();
+
+    expect(byId.get(a.id)).toMatchObject({
+      domain_id: dom.id,
+      provisioning_status: "ready",
+    });
+  });
+
+  it("lists address provisioning for selected ids only", () => {
+    const dom = createDomain(providerId, "example.com");
+    const first = createAddress({ provider_id: providerId, email: "first@example.com" });
+    const second = createAddress({ provider_id: providerId, email: "second@example.com" });
+    createAddress({ provider_id: providerId, email: "other@example.com" });
+    setAddressProvisioning(first.id, { domain_id: dom.id, provisioning_status: "ready" });
+    setAddressProvisioning(second.id, { domain_id: dom.id, provisioning_status: "validating" });
+
+    const byId = listAddressProvisioningByIds([first.id, second.id, first.id]);
+
+    expect([...byId.keys()].sort()).toEqual([first.id, second.id].sort());
+    expect(byId.get(first.id)).toMatchObject({ domain_id: dom.id, provisioning_status: "ready" });
+    expect(byId.get(second.id)).toMatchObject({ domain_id: dom.id, provisioning_status: "validating" });
+    expect(listAddressProvisioningByIds([]).size).toBe(0);
+  });
+
+  it("groups address provisioning rows by domain", () => {
+    const first = createDomain(providerId, "first.example.com");
+    const second = createDomain(providerId, "second.example.com");
+    const one = createAddress({ provider_id: providerId, email: "one@first.example.com" });
+    const two = createAddress({ provider_id: providerId, email: "two@first.example.com" });
+    const other = createAddress({ provider_id: providerId, email: "one@second.example.com" });
+    const loose = createAddress({ provider_id: providerId, email: "loose@example.com" });
+
+    setAddressProvisioning(one.id, { domain_id: first.id, provisioning_status: "ready" });
+    setAddressProvisioning(two.id, { domain_id: first.id, provisioning_status: "validating" });
+    setAddressProvisioning(other.id, { domain_id: second.id, provisioning_status: "ready" });
+    setAddressProvisioning(loose.id, { provisioning_status: "ready" });
+
+    const byDomain = listAddressProvisioningByDomain();
+
+    expect((byDomain.get(first.id) ?? []).map((row) => row.email).sort()).toEqual([
+      "one@first.example.com",
+      "two@first.example.com",
+    ]);
+    expect(byDomain.get(second.id)?.[0]).toMatchObject({
+      email: "one@second.example.com",
+      provisioning: { domain_id: second.id, provisioning_status: "ready" },
+    });
+    expect(byDomain.has(loose.id)).toBe(false);
+  });
+
+  it("groups address provisioning for selected domains only", () => {
+    const first = createDomain(providerId, "first.example.com");
+    const second = createDomain(providerId, "second.example.com");
+    const third = createDomain(providerId, "third.example.com");
+    const one = createAddress({ provider_id: providerId, email: "one@first.example.com" });
+    const two = createAddress({ provider_id: providerId, email: "two@first.example.com" });
+    const other = createAddress({ provider_id: providerId, email: "one@second.example.com" });
+    const excluded = createAddress({ provider_id: providerId, email: "one@third.example.com" });
+    const loose = createAddress({ provider_id: providerId, email: "loose@example.com" });
+
+    setAddressProvisioning(one.id, { domain_id: first.id, provisioning_status: "ready" });
+    setAddressProvisioning(two.id, { domain_id: first.id, provisioning_status: "validating" });
+    setAddressProvisioning(other.id, { domain_id: second.id, provisioning_status: "ready" });
+    setAddressProvisioning(excluded.id, { domain_id: third.id, provisioning_status: "ready" });
+    setAddressProvisioning(loose.id, { provisioning_status: "ready" });
+
+    const byDomain = listAddressProvisioningByDomains([first.id, second.id, first.id]);
+
+    expect((byDomain.get(first.id) ?? []).map((row) => row.email).sort()).toEqual([
+      "one@first.example.com",
+      "two@first.example.com",
+    ]);
+    expect(byDomain.get(second.id)?.map((row) => row.email)).toEqual(["one@second.example.com"]);
+    expect(byDomain.has(third.id)).toBe(false);
+    expect(listAddressProvisioningByDomains([]).size).toBe(0);
+  });
+
+  it("lists address provisioning for one domain", () => {
+    const first = createDomain(providerId, "first.example.com");
+    const second = createDomain(providerId, "second.example.com");
+    const one = createAddress({ provider_id: providerId, email: "one@first.example.com" });
+    const two = createAddress({ provider_id: providerId, email: "two@first.example.com" });
+    const other = createAddress({ provider_id: providerId, email: "one@second.example.com" });
+    const loose = createAddress({ provider_id: providerId, email: "loose@example.com" });
+
+    setAddressProvisioning(one.id, { domain_id: first.id, provisioning_status: "ready" });
+    setAddressProvisioning(two.id, { domain_id: first.id, provisioning_status: "validating" });
+    setAddressProvisioning(other.id, { domain_id: second.id, provisioning_status: "ready" });
+    setAddressProvisioning(loose.id, { provisioning_status: "ready" });
+
+    const rows = listAddressProvisioningForDomain(first.id);
+
+    expect(rows.map((row) => row.email).sort()).toEqual([
+      "one@first.example.com",
+      "two@first.example.com",
+    ]);
+    expect(rows.some((row) => row.email === "one@second.example.com")).toBe(false);
+    expect(rows.some((row) => row.email === "loose@example.com")).toBe(false);
+  });
+});
+
+describe("provisioning aggregate helpers", () => {
+  it("groups ready address counts by domain in one read", () => {
+    const first = createDomain(providerId, "first.example.com");
+    const second = createDomain(providerId, "second.example.com");
+    const readyOne = createAddress({ provider_id: providerId, email: "one@first.example.com" });
+    const readyTwo = createAddress({ provider_id: providerId, email: "two@first.example.com" });
+    const pending = createAddress({ provider_id: providerId, email: "pending@first.example.com" });
+    const readyOther = createAddress({ provider_id: providerId, email: "one@second.example.com" });
+    const noDomain = createAddress({ provider_id: providerId, email: "loose@example.com" });
+
+    setAddressProvisioning(readyOne.id, { domain_id: first.id, provisioning_status: "ready" });
+    setAddressProvisioning(readyTwo.id, { domain_id: first.id, provisioning_status: "ready" });
+    setAddressProvisioning(pending.id, { domain_id: first.id, provisioning_status: "validating" });
+    setAddressProvisioning(readyOther.id, { domain_id: second.id, provisioning_status: "ready" });
+    setAddressProvisioning(noDomain.id, { provisioning_status: "ready" });
+
+    const counts = listReadyAddressCountsByDomain();
+
+    expect(counts.get(first.id)).toBe(2);
+    expect(counts.get(second.id)).toBe(1);
+    expect(counts.has(noDomain.id)).toBe(false);
+  });
+
+  it("groups ready address counts for selected domains only", () => {
+    const first = createDomain(providerId, "first.example.com");
+    const second = createDomain(providerId, "second.example.com");
+    const third = createDomain(providerId, "third.example.com");
+    const readyOne = createAddress({ provider_id: providerId, email: "one@first.example.com" });
+    const readyTwo = createAddress({ provider_id: providerId, email: "two@first.example.com" });
+    const readyOther = createAddress({ provider_id: providerId, email: "one@second.example.com" });
+    const excluded = createAddress({ provider_id: providerId, email: "one@third.example.com" });
+
+    setAddressProvisioning(readyOne.id, { domain_id: first.id, provisioning_status: "ready" });
+    setAddressProvisioning(readyTwo.id, { domain_id: first.id, provisioning_status: "ready" });
+    setAddressProvisioning(readyOther.id, { domain_id: second.id, provisioning_status: "ready" });
+    setAddressProvisioning(excluded.id, { domain_id: third.id, provisioning_status: "ready" });
+
+    const counts = listReadyAddressCountsByDomains([first.id, second.id, first.id]);
+
+    expect(counts.get(first.id)).toBe(2);
+    expect(counts.get(second.id)).toBe(1);
+    expect(counts.has(third.id)).toBe(false);
+    expect(listReadyAddressCountsByDomains([]).size).toBe(0);
+  });
+
+  it("summarizes due and failed provisioning work without loading entities", () => {
+    const past = "2020-01-01T00:00:00.000Z";
+    const future = "2999-01-01T00:00:00.000Z";
+    const asOf = "2026-06-02T00:00:00.000Z";
+
+    const dueDomain = createDomain(providerId, "due.example.com");
+    setDomainProvisioning(dueDomain.id, { provisioning_status: "verifying", next_check_at: past });
+    const futureDomain = createDomain(providerId, "future.example.com");
+    setDomainProvisioning(futureDomain.id, { provisioning_status: "verifying", next_check_at: future });
+    const failedDomain = createDomain(providerId, "failed.example.com");
+    setDomainProvisioning(failedDomain.id, { provisioning_status: "failed", next_check_at: past });
+
+    const dueAddress = createAddress({ provider_id: providerId, email: "due@example.com" });
+    setAddressProvisioning(dueAddress.id, { provisioning_status: "validating", next_check_at: past });
+    const futureAddress = createAddress({ provider_id: providerId, email: "future@example.com" });
+    setAddressProvisioning(futureAddress.id, { provisioning_status: "validating", next_check_at: future });
+    const failedAddress = createAddress({ provider_id: providerId, email: "failed@example.com" });
+    setAddressProvisioning(failedAddress.id, { provisioning_status: "failed", next_check_at: past });
+
+    expect(getProvisioningWorkSummary(asOf)).toEqual({
+      due_domains: 1,
+      due_addresses: 1,
+      failed_domains: 1,
+      failed_addresses: 1,
+    });
   });
 });
 

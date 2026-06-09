@@ -4,9 +4,8 @@
  *   1. Scoped API token  → Authorization: Bearer <token>   (CLOUDFLARE_API_TOKEN)
  *   2. Global API key     → X-Auth-Key + X-Auth-Email       (CLOUDFLARE_API_KEY + CLOUDFLARE_EMAIL)
  *
- * Our secrets vault currently stores a Global API Key + email
- * (HASNAXYZ_CLOUDFLARE_LIVE_API_KEY / _EMAIL), not a scoped token, so global
- * mode must be supported. Scoped tokens are preferred when available.
+ * Scoped tokens are preferred when available. Global key auth is supported
+ * for accounts that still require it.
  *
  * Pure module: the environment is injected, so it is fully unit-testable.
  */
@@ -42,15 +41,6 @@ export function resolveCloudflareAuth(source: CloudflareAuthSource = {}): Cloudf
   // 4. Global key + email from the standard env vars.
   if (env["CLOUDFLARE_API_KEY"] && env["CLOUDFLARE_EMAIL"]) {
     return { kind: "global", apiKey: env["CLOUDFLARE_API_KEY"]!, email: env["CLOUDFLARE_EMAIL"]! };
-  }
-
-  // 5. Global key + email from the HASNAXYZ vault env names.
-  if (env["HASNAXYZ_CLOUDFLARE_LIVE_API_KEY"] && env["HASNAXYZ_CLOUDFLARE_LIVE_EMAIL"]) {
-    return {
-      kind: "global",
-      apiKey: env["HASNAXYZ_CLOUDFLARE_LIVE_API_KEY"]!,
-      email: env["HASNAXYZ_CLOUDFLARE_LIVE_EMAIL"]!,
-    };
   }
 
   return undefined;

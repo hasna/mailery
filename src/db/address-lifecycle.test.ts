@@ -4,7 +4,7 @@ import { createProvider } from "./providers.js";
 import { createAddress, getAddress } from "./addresses.js";
 import {
   suspendAddress, activateAddress, setAddressQuota,
-  getAddressSendability, countSendsToday,
+  getAddressSendability, countSendsToday, countSendsTodayByAddress,
 } from "./address-lifecycle.js";
 
 let providerId: string;
@@ -83,6 +83,46 @@ describe("address lifecycle — sendability", () => {
     const s = getAddressSendability("a@x.com");
     expect(s.sendable).toBe(false); // 2 >= 2
     expect(s.reason).toMatch(/quota/i);
+  });
+
+  it("counts display-name sent rows toward daily quota", () => {
+    const a = createAddress({ provider_id: providerId, email: "a@x.com" });
+    setAddressQuota(a.id, 1);
+    seedSend('"A Team" <a@x.com>', now());
+
+    expect(countSendsToday("a@x.com")).toBe(1);
+    expect(countSendsToday('"A Team" <a@x.com>')).toBe(1);
+    const s = getAddressSendability('"A Team" <a@x.com>');
+    expect(s.sendable).toBe(false);
+    expect(s.reason).toMatch(/quota/i);
+  });
+
+  it("counts today's sends for many addresses with one grouped query", () => {
+    seedSend('"A Team" <a@x.com>', now());
+    seedSend("b@x.com", now());
+    seedSend("b@x.com", now());
+    seedSend("c@x.com", "2020-01-01T10:00:00.000Z");
+
+    const db = getDatabase();
+    const originalQuery = db.query;
+    const queries: string[] = [];
+    db.query = ((sql: string) => {
+      queries.push(sql);
+      return originalQuery.call(db, sql);
+    }) as typeof db.query;
+
+    try {
+      const counts = countSendsTodayByAddress(["a@x.com", "b@x.com", "c@x.com"], db);
+      expect(counts.get("a@x.com")).toBe(1);
+      expect(counts.get("b@x.com")).toBe(2);
+      expect(counts.get("c@x.com")).toBe(0);
+    } finally {
+      db.query = originalQuery;
+    }
+
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain("GROUP BY");
+    expect(queries[0]).toContain("sent_at LIKE");
   });
 
   it("countSendsToday ignores yesterday's sends", () => {

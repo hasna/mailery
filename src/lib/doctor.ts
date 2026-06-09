@@ -1,31 +1,43 @@
-import chalk from "chalk";
 import { getDatabase } from "../db/database.js";
 import { listProviders } from "../db/providers.js";
-import { listDomains } from "../db/domains.js";
-import { listAddresses } from "../db/addresses.js";
-import { listContacts } from "../db/contacts.js";
-import { listTemplates } from "../db/templates.js";
+import { countValue } from "../db/scalars.js";
 import { checkAllProviders } from "./health.js";
 import { existsSync } from "fs";
 import { join } from "path";
 import type { Database } from "../db/database.js";
+import type { DoctorCheck } from "./diagnostics-format.js";
 
-export interface DoctorCheck {
-  name: string;
-  status: "pass" | "warn" | "fail";
-  message: string;
+export { formatDiagnostics } from "./diagnostics-format.js";
+export type { DoctorCheck } from "./diagnostics-format.js";
+
+interface GmailAuthCheckResult {
+  success: boolean;
+  stdout: string;
+  stderr?: string;
 }
 
-export async function runDiagnostics(db?: Database): Promise<DoctorCheck[]> {
+export interface DiagnosticsOptions {
+  liveProviderChecks?: boolean;
+  gmailAuthCheck?: () => Promise<GmailAuthCheckResult>;
+}
+
+async function runGmailAuthCheck(): Promise<GmailAuthCheckResult> {
+  const { runConnectorCommand } = await import("@hasna/connectors");
+  return runConnectorCommand("gmail", ["-f", "json", "me"]);
+}
+
+export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {}): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
+  let d: Database;
 
   // 1. DB accessible
   try {
-    const d = db || getDatabase();
+    d = db || getDatabase();
     d.query("SELECT 1").get();
     checks.push({ name: "Database", status: "pass", message: "SQLite database accessible" });
   } catch (e) {
     checks.push({ name: "Database", status: "fail", message: `Database error: ${e}` });
+    return checks;
   }
 
   // 2. Config file
@@ -38,7 +50,7 @@ export async function runDiagnostics(db?: Database): Promise<DoctorCheck[]> {
   );
 
   // 3. Providers
-  const providers = listProviders(db);
+  const providers = listProviders(d);
   checks.push(
     providers.length > 0
       ? { name: "Providers", status: "pass", message: `${providers.length} provider(s) configured` }
@@ -47,28 +59,37 @@ export async function runDiagnostics(db?: Database): Promise<DoctorCheck[]> {
 
   // 4. Provider health
   if (providers.length > 0) {
-    const health = await checkAllProviders(db);
+    const health = await checkAllProviders(d, { validateCredentials: opts.liveProviderChecks === true });
     for (const h of health) {
       checks.push({
         name: `Provider: ${h.provider.name}`,
         status: h.status === "healthy" ? "pass" : h.status === "warning" ? "warn" : "fail",
-        message: h.credentialsValid ? "Credentials valid" : `Credentials invalid: ${h.credentialError}`,
+        message: h.credentialsChecked
+          ? h.credentialsValid ? "Credentials valid" : `Credentials invalid: ${h.credentialError}`
+          : h.credentialsValid ? "Local provider configuration present; live credential check skipped" : `Local provider configuration incomplete: ${h.credentialError}`,
       });
     }
   }
 
   // 5. Domains
-  const domains = listDomains(undefined, db);
-  const verifiedDomains = domains.filter((d) => d.dkim_status === "verified");
+  const domainCounts = d.query(
+    `SELECT
+       COUNT(*) AS total,
+       COALESCE(SUM(CASE WHEN dkim_status = 'verified' THEN 1 ELSE 0 END), 0) AS verified
+     FROM domains`,
+  ).get() as { total: unknown; verified: unknown };
+  const domains = countValue(domainCounts.total);
+  const verifiedDomains = countValue(domainCounts.verified);
   checks.push({
     name: "Domains",
-    status: verifiedDomains.length === domains.length && domains.length > 0 ? "pass" : "warn",
-    message: `${verifiedDomains.length}/${domains.length} domains verified`,
+    status: verifiedDomains === domains && domains > 0 ? "pass" : "warn",
+    message: `${verifiedDomains}/${domains} domains verified`,
   });
 
   // 6. Addresses
-  const addresses = listAddresses(undefined, db);
-  checks.push({ name: "Addresses", status: addresses.length > 0 ? "pass" : "warn", message: `${addresses.length} sender address(es)` });
+  const addressCounts = d.query("SELECT COUNT(*) AS total FROM addresses").get() as { total: unknown };
+  const addresses = countValue(addressCounts.total);
+  checks.push({ name: "Addresses", status: addresses > 0 ? "pass" : "warn", message: `${addresses} sender address(es)` });
 
   // 6b. SES sandbox / production access (best-effort; needs AWS creds)
   if (process.env["AWS_ACCESS_KEY_ID"] || process.env["AWS_PROFILE"]) {
@@ -96,17 +117,24 @@ export async function runDiagnostics(db?: Database): Promise<DoctorCheck[]> {
   }
 
   // 7. Contacts
-  const contacts = listContacts(undefined, db);
-  const suppressed = listContacts({ suppressed: true }, db);
+  const contactCounts = d.query(
+    `SELECT
+       COUNT(*) AS total,
+       COALESCE(SUM(CASE WHEN suppressed = 1 THEN 1 ELSE 0 END), 0) AS suppressed
+     FROM contacts`,
+  ).get() as { total: unknown; suppressed: unknown };
+  const contacts = countValue(contactCounts.total);
+  const suppressed = countValue(contactCounts.suppressed);
   checks.push({
     name: "Contacts",
-    status: suppressed.length > 0 ? "warn" : "pass",
-    message: `${contacts.length} contacts (${suppressed.length} suppressed)`,
+    status: suppressed > 0 ? "warn" : "pass",
+    message: `${contacts} contacts (${suppressed} suppressed)`,
   });
 
   // 8. Templates
-  const templates = listTemplates(db);
-  checks.push({ name: "Templates", status: "pass", message: `${templates.length} template(s)` });
+  const templateCounts = d.query("SELECT COUNT(*) AS total FROM templates").get() as { total: unknown };
+  const templates = countValue(templateCounts.total);
+  checks.push({ name: "Templates", status: "pass", message: `${templates} template(s)` });
 
   // 9. Gmail OAuth status
   const gmailProviders = providers.filter((p) => p.type === "gmail");
@@ -125,10 +153,18 @@ export async function runDiagnostics(db?: Database): Promise<DoctorCheck[]> {
       return { status: "pass" as const, message: `Access token valid (~${minsLeft}min remaining)` };
     })();
 
+    if (opts.liveProviderChecks !== true) {
+      checks.push({
+        name: `Gmail: ${p.name}`,
+        status: expiryStatus.status,
+        message: `${expiryStatus.message}; live auth check skipped`,
+      });
+      continue;
+    }
+
     // Live check via connectors SDK
     try {
-      const { runConnectorCommand } = await import("@hasna/connectors");
-      const meResult = await runConnectorCommand("gmail", ["-f", "json", "me"]);
+      const meResult = await (opts.gmailAuthCheck ?? runGmailAuthCheck)();
       if (!meResult.success) throw new Error(meResult.stderr || meResult.stdout);
       let emailAddress = "";
       try {
@@ -153,20 +189,4 @@ export async function runDiagnostics(db?: Database): Promise<DoctorCheck[]> {
   }
 
   return checks;
-}
-
-export function formatDiagnostics(checks: DoctorCheck[]): string {
-  const icons = { pass: chalk.green("\u2713"), warn: chalk.yellow("\u26A0"), fail: chalk.red("\u2717") };
-  let output = chalk.bold("\n  Email System Diagnostics\n\n");
-  for (const check of checks) {
-    output += `  ${icons[check.status]} ${check.name}: ${check.message}\n`;
-  }
-  const passed = checks.filter((c) => c.status === "pass").length;
-  const warned = checks.filter((c) => c.status === "warn").length;
-  const failed = checks.filter((c) => c.status === "fail").length;
-  output += `\n  ${chalk.bold("Summary:")} ${chalk.green(passed + " passed")}`;
-  if (warned) output += ` ${chalk.yellow(warned + " warnings")}`;
-  if (failed) output += ` ${chalk.red(failed + " failed")}`;
-  output += "\n";
-  return output;
 }

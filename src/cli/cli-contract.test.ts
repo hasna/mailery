@@ -32,7 +32,7 @@ function runCli(args: string[], env: NodeJS.ProcessEnv) {
 }
 
 describe("CLI JSON contracts", () => {
-  it("prints valid redacted JSON for provider list", () => {
+  it("prints valid credential-free JSON for provider list", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
     tempDirs.push(dir);
     const dbPath = join(dir, "emails.db");
@@ -61,9 +61,10 @@ describe("CLI JSON contracts", () => {
     expect(parsed).toHaveLength(1);
     expect(parsed[0]).toMatchObject({
       name: "secret-ses",
-      access_key: "***",
-      secret_key: "***",
     });
+    expect(parsed[0]).not.toHaveProperty("access_key");
+    expect(parsed[0]).not.toHaveProperty("secret_key");
+    expect(parsed[0]).not.toHaveProperty("oauth_refresh_token");
     const providerId = String(parsed[0]!.id);
 
     const update = runCli(["provider", "update", providerId, "--name", "renamed-ses", "--skip-validation"], env);
@@ -115,6 +116,69 @@ describe("CLI JSON contracts", () => {
     expect(parsed.output.join("\n")).toContain("Sandbox provider created: dev");
     expect(parsed.output.join("\n")).not.toContain("undefined");
     expect(parsed.errors).toEqual([]);
+  });
+
+  it("reports remote storage status with canonical env names", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+
+    const result = runCli(["storage", "status", "--json"], env);
+    const stdout = new TextDecoder().decode(result.stdout);
+    expect(result.exitCode).toBe(0);
+
+    const parsed = JSON.parse(stdout) as {
+      configured: boolean;
+      mode: string;
+      env: string[];
+      canonical: {
+        cluster: string;
+        database: string;
+        runtimePath: string;
+        env: string;
+        fallbackEnv: string;
+      };
+      service: string;
+      tables: string[];
+    };
+    expect(parsed.configured).toBe(false);
+    expect(parsed.mode).toBe("local");
+    expect(parsed.env).toEqual(["HASNA_EMAILS_DATABASE_URL", "EMAILS_DATABASE_URL"]);
+    expect(parsed.canonical).toEqual({
+      cluster: "hasna-xyz-infra-apps-prod-postgres",
+      database: "emails",
+      runtimePath: "hasna/xyz/opensource/emails/prod/rds",
+      env: "HASNA_EMAILS_DATABASE_URL",
+      fallbackEnv: "EMAILS_DATABASE_URL",
+    });
+    expect(parsed.service).toBe("emails");
+    expect(parsed.tables).toContain("providers");
+  });
+
+  it("prints canonical RDS setup instructions without a secret value", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+
+    const result = runCli(["storage", "setup"], env);
+    const stdout = new TextDecoder().decode(result.stdout);
+    expect(result.exitCode).toBe(0);
+    expect(stdout).toContain("hasna-xyz-infra-apps-prod-postgres/emails");
+    expect(stdout).toContain("hasna/xyz/opensource/emails/prod/rds");
+    expect(stdout).toContain("HASNA_EMAILS_DATABASE_URL");
+    expect(stdout).not.toContain("postgres://");
+  });
+
+  it("documents storage command without legacy cloud wording", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+
+    const result = runCli(["storage", "--help"], env);
+    const stdout = new TextDecoder().decode(result.stdout);
+    expect(result.exitCode).toBe(0);
+    expect(stdout).toContain("remote PostgreSQL storage");
+    expect(stdout).not.toContain("cloud");
   });
 
   it("prints structured JSON errors with fix commands", () => {

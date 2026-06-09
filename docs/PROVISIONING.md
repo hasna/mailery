@@ -53,8 +53,7 @@ emails logs tail --component daemon
 ## Credentials (`emails doctor`)
 - **AWS** (SES send/inbound, Route53 buy): `AWS_PROFILE` or keys, region us-east-1.
 - **Cloudflare** (DNS + Email Routing): `CLOUDFLARE_API_TOKEN` *or*
-  `CLOUDFLARE_API_KEY`+`CLOUDFLARE_EMAIL` (vault `HASNAXYZ_CLOUDFLARE_LIVE_*`) +
-  `CLOUDFLARE_ACCOUNT_ID`.
+  `CLOUDFLARE_API_KEY`+`CLOUDFLARE_EMAIL` + `CLOUDFLARE_ACCOUNT_ID`.
 - **Resend** (optional): `RESEND_API_KEY`.
 - **SES sandbox**: new accounts send only to verified identities (200/day, 1/sec);
   request production access with the `ses-sandbox` helper (PutAccountDetails).
@@ -67,12 +66,12 @@ received (SES→S3→SQLite). See `docs/PLAN-PROVISIONING.md` for the architectu
 ## AWS account architecture (this app)
 | Concern | AWS account | Notes |
 |---|---|---|
-| **SES** (send + inbound) | **hasna-studio-alumia** (638389534677) | Production access (50k/day). All domain identities, MAIL FROM, receipt rules → S3 live here. Inbound bucket `hasna-emails-prod-inbound-638389534677` (set as `inbound_s3_bucket`). |
+| **SES** (send + inbound) | **hasna-studio-alumia** (638389534677) | Production access (50k/day). All domain identities, MAIL FROM, receipt rules → operator-configured S3 live here (`inbound_s3_bucket` / `inbound_s3_buckets`). |
 | **Domain purchase** (Route53 Domains) | **hasna-xyz-infra** (789877399345) | Run `domains domain buy` with `AWS_PROFILE=hasna-xyz-infra`. |
 | **DNS** | Cloudflare (account `4f59afea…`) | Always Cloudflare — DKIM/SPF/DMARC/MAIL-FROM/inbound-MX + Email Routing. |
 | **Send (secondary)** | Resend | Provider integrated; sends proven. Free plan caps Resend-verified domains at 1. |
 
-`emails config set inbound_s3_bucket <bucket>` makes `emails inbox sync-s3` default to the alumia inbound bucket (no `--bucket` needed). `emails doctor` reports SES sandbox/production + provisioning creds.
+`emails config set inbound_s3_bucket <bucket>` makes `emails inbox sync-s3` default to that inbound bucket (no `--bucket` needed). Durable Gmail archive uploads default to `s3://hasna-xyz-opensource-emails-prod/gmail/`, with overrides through `gmail_archive_s3_bucket`, `gmail_archive_s3_region`, and `gmail_archive_s3_prefix`. `emails doctor` reports SES sandbox/production + provisioning creds.
 
 ### Integration status (priority: SES, Resend, Cloudflare — not Gmail)
 - **SES (alumia)**: ✅ all 3 domains verified + send/receive tested (6/6 round-trip).

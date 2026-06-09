@@ -99,6 +99,121 @@ describe("address ownership commands", () => {
   });
 });
 
+describe("address list command", () => {
+  it("paginates enriched address output", async () => {
+    const provider = createProvider({ name: "sandbox", type: "sandbox" });
+    const db = getDatabase();
+    for (let i = 1; i <= 4; i++) {
+      const address = createAddress({ provider_id: provider.id, email: `addr-${i}@example.com` });
+      db.run("UPDATE addresses SET created_at = ? WHERE id = ?", [`2026-01-0${i} 00:00:00`, address.id]);
+    }
+
+    const result = await runAddressCommand([
+      "address", "list",
+      "--provider", provider.id,
+      "--limit", "2",
+      "--offset", "1",
+    ]);
+
+    expect(result.out).toContain("addr-3@example.com");
+    expect(result.out).toContain("addr-2@example.com");
+    expect(result.out).not.toContain("addr-4@example.com");
+    expect(result.data).toMatchObject([
+      { email: "addr-3@example.com" },
+      { email: "addr-2@example.com" },
+    ]);
+  });
+
+  it("batches daily quota send counts for listed addresses", async () => {
+    const provider = createProvider({ name: "sandbox", type: "sandbox" });
+    const db = getDatabase();
+    const today = new Date().toISOString();
+    const first = createAddress({ provider_id: provider.id, email: "quota-a@example.com" });
+    const second = createAddress({ provider_id: provider.id, email: "quota-b@example.com" });
+    const third = createAddress({ provider_id: provider.id, email: "quota-c@example.com" });
+    db.run("UPDATE addresses SET daily_quota = 5 WHERE id IN (?, ?, ?)", [first.id, second.id, third.id]);
+    db.run(
+      `INSERT INTO emails (id, provider_id, from_address, subject, status, sent_at, created_at, updated_at)
+       VALUES ('sent-a-1', ?, ?, 'a', 'sent', ?, ?, ?)`,
+      [provider.id, '"Quota A" <quota-a@example.com>', today, today, today],
+    );
+    db.run(
+      `INSERT INTO emails (id, provider_id, from_address, subject, status, sent_at, created_at, updated_at)
+       VALUES ('sent-b-1', ?, ?, 'b', 'sent', ?, ?, ?), ('sent-b-2', ?, ?, 'b', 'sent', ?, ?, ?)`,
+      [provider.id, "quota-b@example.com", today, today, today, provider.id, "quota-b@example.com", today, today, today],
+    );
+
+    const originalQuery = db.query;
+    const queries: string[] = [];
+    db.query = ((sql: string) => {
+      queries.push(sql);
+      return originalQuery.call(db, sql);
+    }) as typeof db.query;
+
+    try {
+      const result = await runAddressCommand(["address", "list", "--provider", provider.id, "--limit", "10"]);
+
+      expect(result.out).toContain("quota 1/5/day");
+      expect(result.out).toContain("quota 2/5/day");
+      expect(result.out).toContain("quota 0/5/day");
+    } finally {
+      db.query = originalQuery;
+    }
+
+    const countQueries = queries.filter((sql) => sql.includes("COUNT(*) AS c") && sql.includes("FROM emails"));
+    expect(countQueries).toHaveLength(1);
+    expect(countQueries[0]).toContain(" IN (");
+    expect(countQueries[0]).toContain("GROUP BY");
+  });
+});
+
+describe("address verify command", () => {
+  it("checks one exact address without loading every provider address", async () => {
+    const provider = createProvider({ name: "sandbox", type: "sandbox" });
+    const target = createAddress({ provider_id: provider.id, email: "target@example.com" });
+    for (let i = 0; i < 120; i++) {
+      createAddress({ provider_id: provider.id, email: `filler-${String(i).padStart(3, "0")}@example.com` });
+    }
+
+    const db = getDatabase();
+    const originalQuery = db.query;
+    const queries: string[] = [];
+    db.query = ((sql: string) => {
+      queries.push(sql);
+      return originalQuery.call(db, sql);
+    }) as typeof db.query;
+
+    try {
+      await runAddressCommand(["address", "verify", "target@example.com", "--provider", provider.id]);
+    } finally {
+      db.query = originalQuery;
+    }
+
+    const row = db.query("SELECT verified FROM addresses WHERE id = ?").get(target.id) as { verified: number };
+    expect(row.verified).toBe(1);
+    expect(queries.some((sql) => sql.includes("WHERE email = ? COLLATE NOCASE"))).toBe(true);
+    expect(queries.some((sql) => sql.includes("FROM addresses WHERE provider_id = ? ORDER BY created_at DESC"))).toBe(false);
+  });
+});
+
+describe("address suggest command", () => {
+  it("suggests unused local parts for a domain", async () => {
+    const provider = createProvider({ name: "sandbox", type: "sandbox" });
+    createAddress({ provider_id: provider.id, email: "hello@example.com" });
+    createAddress({ provider_id: provider.id, email: "support@example.com" });
+
+    const result = await runAddressCommand(["address", "suggest", "--domain", "Example.com"]);
+
+    expect(result.out).not.toContain("hello@example.com");
+    expect(result.out).not.toContain("support@example.com");
+    expect(result.out).toContain("hi@example.com");
+    expect(result.data).toMatchObject({
+      domain: "example.com",
+      suggestions: expect.arrayContaining(["hi@example.com"]),
+    });
+  });
+});
+
 describe("address provision command", () => {
   it("supports dry-run without mutating address or provisioning state", async () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox" });

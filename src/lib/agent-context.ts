@@ -1,14 +1,18 @@
 import { getDatabase, getDataDir } from "../db/database.js";
 import type { Database } from "../db/database.js";
-import { listProviders } from "../db/providers.js";
-import { listDomains } from "../db/domains.js";
-import { listAddresses } from "../db/addresses.js";
-import { getInboundCount, getUnreadCount, listInboundEmails } from "../db/inbound.js";
-import { getGmailSyncState } from "../db/gmail-sync-state.js";
-import { getAddressProvisioning, getDomainProvisioning } from "../db/provisioning.js";
+import { listProviderSummaries } from "../db/providers.js";
+import { getDomain, listDomains } from "../db/domains.js";
+import { listUsableSendingAddresses } from "../db/addresses.js";
+import { listGmailSyncStatesByProviderIds } from "../db/gmail-sync-state.js";
+import { listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../db/provisioning.js";
+import { countValue } from "../db/scalars.js";
+import type { Domain } from "../types/index.js";
 import { assessDomainReadiness } from "./domain-readiness.js";
 import { getInboundBuckets, getGmailSyncConfig, loadConfig } from "./config.js";
-import { listEnrichedAddresses, type EnrichedAddress } from "./address-ownership.js";
+import { enrichAddresses, type EnrichedAddress } from "./address-ownership.js";
+
+const USABLE_FROM_LIMIT = 25;
+const DOMAIN_READINESS_LIMIT = 25;
 
 export interface EmailSystemStatus {
   generated_at: string;
@@ -44,6 +48,8 @@ export interface EmailSystemStatus {
       issues: string[];
       fix_commands: string[];
     }>;
+    usable_limit: number;
+    usable_truncated: boolean;
   };
   addresses: {
     total: number;
@@ -52,6 +58,8 @@ export interface EmailSystemStatus {
     owned: number;
     ready_to_receive: number;
     usable_from: EnrichedAddress[];
+    usable_from_limit: number;
+    usable_from_truncated: boolean;
   };
   inbox: {
     total: number;
@@ -76,36 +84,201 @@ export interface EmailSystemStatus {
   cli_equivalents: Record<string, string>;
 }
 
-function countByType(providers: ReturnType<typeof listProviders>): Record<string, number> {
+type AgentProviderSummary = ReturnType<typeof listProviderSummaries>[number];
+
+function countByType(providers: AgentProviderSummary[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const provider of providers) counts[provider.type] = (counts[provider.type] ?? 0) + 1;
   return counts;
 }
 
-export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemStatus {
-  const providers = listProviders(db);
-  const domains = listDomains(undefined, db);
-  const addresses = listAddresses(undefined, db);
-  const enrichedAddresses = listEnrichedAddresses(undefined, db);
-  const config = loadConfig();
-  const inboundBuckets = getInboundBuckets();
-  const latest = listInboundEmails({ limit: 1, archived: true }, db)[0]
-    ?? listInboundEmails({ limit: 1 }, db)[0]
-    ?? null;
+function gmailProviderStatuses(providers: AgentProviderSummary[], db: Database): EmailSystemStatus["providers"]["gmail"] {
+  const gmailProviders = providers.filter((provider) => provider.type === "gmail");
+  const providerIds = gmailProviders.map((provider) => provider.id);
+  const states = listGmailSyncStatesByProviderIds(providerIds, db);
+  const counts = new Map<string, { synced_count: number; unread_count: number }>(
+    providerIds.map((providerId) => [providerId, { synced_count: 0, unread_count: 0 }]),
+  );
 
-  const domainReadiness = domains.map((domain) => {
-    const readyAddresses = addresses.filter((address) => {
-      const provisioning = getAddressProvisioning(address.id, db);
-      return provisioning?.domain_id === domain.id && provisioning.provisioning_status === "ready";
-    }).length;
-    const readiness = assessDomainReadiness(domain, getDomainProvisioning(domain.id, db), {
-      ready_addresses: readyAddresses,
+  if (providerIds.length > 0) {
+    const placeholders = providerIds.map(() => "?").join(", ");
+    const rows = db.query(
+      `SELECT
+         provider_id,
+         COUNT(*) AS synced_count,
+         COALESCE(SUM(CASE WHEN is_sent = 0 AND is_read = 0 AND is_archived = 0 THEN 1 ELSE 0 END), 0) AS unread_count
+       FROM inbound_emails
+       WHERE provider_id IN (${placeholders})
+       GROUP BY provider_id`,
+    ).all(...providerIds) as Array<{ provider_id: string; synced_count: unknown; unread_count: unknown }>;
+    for (const row of rows) {
+      counts.set(row.provider_id, {
+        synced_count: countValue(row.synced_count),
+        unread_count: countValue(row.unread_count),
+      });
+    }
+  }
+
+  return gmailProviders.map((provider) => {
+    const state = states.get(provider.id);
+    const providerCounts = counts.get(provider.id) ?? { synced_count: 0, unread_count: 0 };
+    return {
+      id: provider.id,
+      name: provider.name,
+      synced_count: providerCounts.synced_count,
+      unread_count: providerCounts.unread_count,
+      last_synced_at: state?.last_synced_at ?? null,
+      last_message_id: state?.last_message_id ?? null,
+    };
+  });
+}
+
+interface AddressSummaryRow {
+  total: unknown;
+  active: unknown;
+  verified: unknown;
+  owned: unknown;
+  ready_to_receive: unknown;
+}
+
+function addressSummary(db: Database): { total: number; active: number; verified: number; owned: number; ready_to_receive: number } {
+  const row = db
+    .query(
+      `SELECT
+         COUNT(*) AS total,
+         COALESCE(SUM(CASE WHEN COALESCE(status, 'active') != 'suspended' THEN 1 ELSE 0 END), 0) AS active,
+         COALESCE(SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END), 0) AS verified,
+         COALESCE(SUM(CASE WHEN owner_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS owned,
+         COALESCE(SUM(CASE WHEN provisioning_status = 'ready' THEN 1 ELSE 0 END), 0) AS ready_to_receive
+       FROM addresses`,
+    )
+    .get() as AddressSummaryRow | null;
+  return {
+    total: countValue(row?.total),
+    active: countValue(row?.active),
+    verified: countValue(row?.verified),
+    owned: countValue(row?.owned),
+    ready_to_receive: countValue(row?.ready_to_receive),
+  };
+}
+
+interface ProvisioningSummaryRow {
+  domains_pending: unknown;
+  domains_failed: unknown;
+  addresses_pending: unknown;
+  addresses_failed: unknown;
+}
+
+function provisioningSummary(db: Database): EmailSystemStatus["provisioning"] {
+  const domainRow = db
+    .query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN provisioning_status NOT IN ('ready', 'failed', 'none') THEN 1 ELSE 0 END), 0) AS domains_pending,
+         COALESCE(SUM(CASE WHEN provisioning_status = 'failed' THEN 1 ELSE 0 END), 0) AS domains_failed
+       FROM domains`,
+    )
+    .get() as Pick<ProvisioningSummaryRow, "domains_pending" | "domains_failed"> | null;
+  const addressRow = db
+    .query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN provisioning_status NOT IN ('ready', 'failed', 'none') THEN 1 ELSE 0 END), 0) AS addresses_pending,
+         COALESCE(SUM(CASE WHEN provisioning_status = 'failed' THEN 1 ELSE 0 END), 0) AS addresses_failed
+       FROM addresses`,
+    )
+    .get() as Pick<ProvisioningSummaryRow, "addresses_pending" | "addresses_failed"> | null;
+  return {
+    domains_pending: countValue(domainRow?.domains_pending),
+    domains_failed: countValue(domainRow?.domains_failed),
+    addresses_pending: countValue(addressRow?.addresses_pending),
+    addresses_failed: countValue(addressRow?.addresses_failed),
+  };
+}
+
+interface DomainSummaryRow {
+  total: unknown;
+  send_ready: unknown;
+  receive_ready: unknown;
+}
+
+function domainSummary(db: Database): { total: number; send_ready: number; receive_ready: number } {
+  const row = db
+    .query(
+      `WITH ready_counts AS (
+         SELECT domain_id, COUNT(*) AS ready_addresses
+         FROM addresses
+         WHERE domain_id IS NOT NULL AND provisioning_status = 'ready'
+         GROUP BY domain_id
+       )
+       SELECT
+         COUNT(*) AS total,
+         COALESCE(SUM(CASE
+           WHEN d.dkim_status = 'verified'
+            AND d.spf_status = 'verified'
+            AND COALESCE(d.dmarc_status, 'pending') != 'failed'
+            AND NULLIF(d.last_error, '') IS NULL
+           THEN 1 ELSE 0 END), 0) AS send_ready,
+         COALESCE(SUM(CASE
+           WHEN COALESCE(rc.ready_addresses, 0) > 0
+             OR (
+               d.provisioning_status IN ('ready', 'inbound_ready')
+               AND d.dkim_status != 'failed'
+               AND d.spf_status != 'failed'
+               AND d.dmarc_status != 'failed'
+               AND NULLIF(d.last_error, '') IS NULL
+             )
+           THEN 1 ELSE 0 END), 0) AS receive_ready
+       FROM domains d
+       LEFT JOIN ready_counts rc ON rc.domain_id = d.id`,
+    )
+    .get() as DomainSummaryRow | null;
+  return {
+    total: countValue(row?.total),
+    send_ready: countValue(row?.send_ready),
+    receive_ready: countValue(row?.receive_ready),
+  };
+}
+
+interface InboxSummaryRow {
+  total: unknown;
+  unread: unknown;
+  latest_received_at: string | null;
+}
+
+function inboxSummary(db: Database): { total: number; unread: number; latest_received_at: string | null } {
+  const row = db
+    .query(
+      `SELECT
+         COUNT(*) AS total,
+         COALESCE(SUM(CASE WHEN is_read = 0 AND is_archived = 0 THEN 1 ELSE 0 END), 0) AS unread,
+         MAX(received_at) AS latest_received_at
+       FROM inbound_emails
+       WHERE is_sent = 0`,
+    )
+    .get() as InboxSummaryRow | null;
+  return {
+    total: countValue(row?.total),
+    unread: countValue(row?.unread),
+    latest_received_at: row?.latest_received_at ?? null,
+  };
+}
+
+function buildDomainReadiness(
+  domains: Domain[],
+  providersById: Map<string, AgentProviderSummary>,
+  db: Database,
+): EmailSystemStatus["domains"]["usable"] {
+  const domainIds = domains.map((domain) => domain.id);
+  const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
+  const readyAddressesByDomain = listReadyAddressCountsByDomains(domainIds, db);
+  return domains.map((domain) => {
+    const readiness = assessDomainReadiness(domain, domainProvisioning.get(domain.id) ?? null, {
+      ready_addresses: readyAddressesByDomain.get(domain.id) ?? 0,
     });
     return {
       id: domain.id,
       domain: domain.domain,
       provider_id: domain.provider_id,
-      provider_name: providers.find((provider) => provider.id === domain.provider_id)?.name ?? null,
+      provider_name: providersById.get(domain.provider_id)?.name ?? null,
       state: readiness.state,
       send_ready: readiness.send_ready,
       receive_ready: readiness.receive_ready,
@@ -114,39 +287,75 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
       fix_commands: readiness.fix_commands,
     };
   });
+}
 
-  const gmail = providers.filter((provider) => provider.type === "gmail").map((provider) => {
-    const state = getGmailSyncState(provider.id, db);
-    return {
-      id: provider.id,
-      name: provider.name,
-      synced_count: getInboundCount(provider.id, db),
-      unread_count: getUnreadCount(provider.id, db),
-      last_synced_at: state?.last_synced_at ?? null,
-      last_message_id: state?.last_message_id ?? null,
-    };
-  });
+function firstDomainFixCommand(
+  providersById: Map<string, AgentProviderSummary>,
+  db: Database,
+): string | null {
+  const row = db
+    .query(
+      `WITH ready_counts AS (
+         SELECT domain_id, COUNT(*) AS ready_addresses
+         FROM addresses
+         WHERE domain_id IS NOT NULL AND provisioning_status = 'ready'
+         GROUP BY domain_id
+       )
+       SELECT d.id
+       FROM domains d
+       LEFT JOIN ready_counts rc ON rc.domain_id = d.id
+       WHERE
+         d.dkim_status = 'failed'
+         OR d.spf_status = 'failed'
+         OR d.dmarc_status = 'failed'
+         OR NULLIF(d.last_error, '') IS NOT NULL
+         OR NOT (d.dkim_status = 'verified' AND d.spf_status = 'verified')
+         OR NOT (
+           COALESCE(rc.ready_addresses, 0) > 0
+           OR (
+             d.provisioning_status IN ('ready', 'inbound_ready')
+             AND d.dkim_status != 'failed'
+             AND d.spf_status != 'failed'
+             AND d.dmarc_status != 'failed'
+             AND NULLIF(d.last_error, '') IS NULL
+           )
+         )
+       ORDER BY d.created_at DESC
+       LIMIT 1`,
+    )
+    .get() as { id: string } | null;
+  if (!row) return null;
+  const domain = getDomain(row.id, db);
+  if (!domain) return null;
+  return buildDomainReadiness([domain], providersById, db)[0]?.fix_commands[0] ?? null;
+}
 
-  const provisioningRows = {
-    domains_pending: domains.filter((domain) => {
-      const p = getDomainProvisioning(domain.id, db);
-      return p && p.provisioning_status !== "ready" && p.provisioning_status !== "failed" && p.provisioning_status !== "none";
-    }).length,
-    domains_failed: domains.filter((domain) => getDomainProvisioning(domain.id, db)?.provisioning_status === "failed").length,
-    addresses_pending: addresses.filter((address) => {
-      const p = getAddressProvisioning(address.id, db);
-      return p && p.provisioning_status !== "ready" && p.provisioning_status !== "failed" && p.provisioning_status !== "none";
-    }).length,
-    addresses_failed: addresses.filter((address) => getAddressProvisioning(address.id, db)?.provisioning_status === "failed").length,
-  };
+export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemStatus {
+  const providers = listProviderSummaries(db);
+  const providersById = new Map(providers.map((provider) => [provider.id, provider]));
+  const config = loadConfig();
+  const inboundBuckets = getInboundBuckets();
+  const inboxCounts = inboxSummary(db);
+  const domainCounts = domainSummary(db);
+  const addressCounts = addressSummary(db);
+  const usableSenderRows = listUsableSendingAddresses(db, { limit: USABLE_FROM_LIMIT + 1 });
+  const usableFromTruncated = usableSenderRows.length > USABLE_FROM_LIMIT;
+  const usableFrom = enrichAddresses(usableSenderRows.slice(0, USABLE_FROM_LIMIT), db);
+  const domainRows = listDomains(undefined, db, { limit: DOMAIN_READINESS_LIMIT + 1, offset: 0 });
+  const domainReadinessTruncated = domainRows.length > DOMAIN_READINESS_LIMIT;
+  const domainReadiness = buildDomainReadiness(domainRows.slice(0, DOMAIN_READINESS_LIMIT), providersById, db);
+
+  const gmail = gmailProviderStatuses(providers, db);
+
+  const provisioningRows = provisioningSummary(db);
 
   const nextActions: string[] = [];
   if (providers.length === 0) nextActions.push("emails provider add --help");
-  if (domains.length === 0) nextActions.push("emails domain add --help");
-  if (addresses.length === 0) nextActions.push("emails address add --help");
+  if (domainCounts.total === 0) nextActions.push("emails domain add --help");
+  if (addressCounts.total === 0) nextActions.push("emails address add --help");
   if (inboundBuckets.length === 0 && gmail.length === 0) nextActions.push("emails inbox sync-status");
-  const firstBrokenDomain = domainReadiness.find((domain) => domain.fix_commands.length > 0);
-  if (firstBrokenDomain?.fix_commands[0]) nextActions.push(firstBrokenDomain.fix_commands[0]);
+  const domainFixCommand = firstDomainFixCommand(providersById, db);
+  if (domainFixCommand) nextActions.push(domainFixCommand);
   if (provisioningRows.addresses_failed > 0 || provisioningRows.domains_failed > 0) nextActions.push("emails provision status");
 
   return {
@@ -161,23 +370,27 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
       gmail,
     },
     domains: {
-      total: domains.length,
-      send_ready: domainReadiness.filter((domain) => domain.send_ready).length,
-      receive_ready: domainReadiness.filter((domain) => domain.receive_ready).length,
+      total: domainCounts.total,
+      send_ready: domainCounts.send_ready,
+      receive_ready: domainCounts.receive_ready,
       usable: domainReadiness,
+      usable_limit: DOMAIN_READINESS_LIMIT,
+      usable_truncated: domainReadinessTruncated,
     },
     addresses: {
-      total: addresses.length,
-      active: addresses.filter((address) => address.status !== "suspended").length,
-      verified: addresses.filter((address) => address.verified).length,
-      owned: addresses.filter((address) => address.owner_id).length,
-      ready_to_receive: addresses.filter((address) => getAddressProvisioning(address.id, db)?.provisioning_status === "ready").length,
-      usable_from: enrichedAddresses.filter((address) => address.status !== "suspended" && address.verified),
+      total: addressCounts.total,
+      active: addressCounts.active,
+      verified: addressCounts.verified,
+      owned: addressCounts.owned,
+      ready_to_receive: addressCounts.ready_to_receive,
+      usable_from: usableFrom,
+      usable_from_limit: USABLE_FROM_LIMIT,
+      usable_from_truncated: usableFromTruncated,
     },
     inbox: {
-      total: getInboundCount(undefined, db),
-      unread: getUnreadCount(undefined, db),
-      latest_received_at: latest?.received_at ?? null,
+      total: inboxCounts.total,
+      unread: inboxCounts.unread,
+      latest_received_at: inboxCounts.latest_received_at,
       inbound_buckets: inboundBuckets,
       realtime: {
         queue_configured: typeof config["inbound_realtime_queue_url"] === "string",
@@ -204,7 +417,10 @@ export function formatEmailSystemStatus(status: EmailSystemStatus): string {
   lines.push("Email system status");
   lines.push(`  Providers: ${status.providers.active}/${status.providers.total} active`);
   lines.push(`  Domains:   ${status.domains.send_ready} send-ready, ${status.domains.receive_ready} receive-ready, ${status.domains.total} total`);
-  lines.push(`  Addresses: ${status.addresses.active}/${status.addresses.total} active, ${status.addresses.owned} owned, ${status.addresses.usable_from.length} verified senders`);
+  const usableFromLabel = status.addresses.usable_from_truncated
+    ? `${status.addresses.usable_from.length}+ listed`
+    : `${status.addresses.usable_from.length} listed`;
+  lines.push(`  Addresses: ${status.addresses.active}/${status.addresses.total} active, ${status.addresses.owned} owned, ${status.addresses.verified} verified, ${usableFromLabel} usable sender(s)`);
   lines.push(`  Inbox:     ${status.inbox.total} total, ${status.inbox.unread} unread${status.inbox.latest_received_at ? `, latest ${status.inbox.latest_received_at}` : ""}`);
   lines.push(`  Sources:   ${status.inbox.inbound_buckets.length} S3 bucket(s), ${status.providers.gmail.length} Gmail provider(s), realtime ${status.inbox.realtime.queue_configured ? "configured" : "not configured"}`);
   if (status.inbox.realtime.last_error) lines.push(`  Last realtime error: ${status.inbox.realtime.last_error}`);

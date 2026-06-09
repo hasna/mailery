@@ -15,6 +15,17 @@ export function getGmailSyncState(providerId: string, db?: Database): GmailSyncS
   return d.query("SELECT * FROM gmail_sync_state WHERE provider_id = ?").get(providerId) as GmailSyncState | null;
 }
 
+export function listGmailSyncStatesByProviderIds(providerIds: Iterable<string>, db?: Database): Map<string, GmailSyncState> {
+  const ids = [...new Set([...providerIds].map((id) => id.trim()).filter(Boolean))];
+  if (ids.length === 0) return new Map();
+  const d = db ?? getDatabase();
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = d
+    .query(`SELECT * FROM gmail_sync_state WHERE provider_id IN (${placeholders})`)
+    .all(...ids) as GmailSyncState[];
+  return new Map(rows.map((row) => [row.provider_id, row]));
+}
+
 export function setGmailSyncState(
   providerId: string,
   state: Partial<Omit<GmailSyncState, "provider_id" | "updated_at">>,

@@ -1,16 +1,19 @@
 import type { Command } from "commander";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import { getProvider } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
 import { getAdapter } from "../../providers/index.js";
-import { createDomain, getDomainByName, listDomains } from "../../db/domains.js";
-import { createAddress, getAddressByEmail, listAddresses } from "../../db/addresses.js";
+import { createDomain, findDomainsByName, getDomainByName, listDomains } from "../../db/domains.js";
+import { createAddress, getAddressByEmail } from "../../db/addresses.js";
+import { listInboundSubjectsForRecipient } from "../../db/inbound.js";
 import {
-  setDomainProvisioning, getDomainProvisioning,
+  setDomainProvisioning, listDomainProvisioningByIds,
   setAddressProvisioning, getAddressProvisioning,
+  listAddressProvisioningByDomains,
   listProvisioningEvents,
 } from "../../db/provisioning.js";
-import { handleError, resolveId } from "../utils.js";
+import { handleError, parseCliPage, resolveId } from "../utils.js";
+import { normalizeRoute53RegistrationContact } from "../../lib/route53-contact.js";
 
 type ReceiveStrategy = "ses-s3" | "cf-routing" | "resend-webhook";
 
@@ -21,21 +24,24 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
   cmd
     .command("status [domain]")
     .description("Show provisioning status of domains and addresses")
-    .action((domainName?: string) => {
+    .option("--limit <n>", "Maximum domains to show", "50")
+    .option("--offset <n>", "Number of domains to skip", "0")
+    .action((domainName: string | undefined, opts: { limit?: string; offset?: string }) => {
       const db = getDatabase();
-      const domains = listDomains(undefined, db).filter((d) => !domainName || d.domain === domainName);
+      const domains = domainName ? findDomainsByName(domainName, db) : listDomains(undefined, db, parseCliPage(opts));
+      const domainIds = domains.map((domain) => domain.id);
+      const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
+      const addressProvisioning = listAddressProvisioningByDomains(domainIds, db);
       const lines: string[] = [];
       for (const d of domains) {
-        const p = getDomainProvisioning(d.id, db);
+        const p = domainProvisioning.get(d.id) ?? null;
         lines.push(`${chalk.bold(d.domain)}  ${chalk.cyan(p?.provisioning_status ?? "none")}  dns=${p?.dns_provider ?? "?"}  send=${p?.send_provider ?? "-"}${p?.last_error ? chalk.red(" err=" + p.last_error) : ""}`);
-        const addrs = listAddresses(undefined, db).filter((a) => getAddressProvisioning(a.id, db)?.domain_id === d.id);
-        for (const a of addrs) {
-          const ap = getAddressProvisioning(a.id, db);
-          lines.push(`  ${a.email}  ${chalk.cyan(ap?.provisioning_status ?? "none")}  recv=${ap?.receive_strategy ?? "-"}`);
+        for (const a of addressProvisioning.get(d.id) ?? []) {
+          lines.push(`  ${a.email}  ${chalk.cyan(a.provisioning.provisioning_status)}  recv=${a.provisioning.receive_strategy ?? "-"}`);
         }
       }
       const text = lines.length ? lines.join("\n") : "No provisioned domains.";
-      output({ domains: domains.map((d) => ({ domain: d.domain, provisioning: getDomainProvisioning(d.id, db) })) }, text);
+      output({ domains: domains.map((d) => ({ domain: d.domain, provisioning: domainProvisioning.get(d.id) ?? null })) }, text);
     });
 
   // ── address create ─────────────────────────────────────────────────────────
@@ -261,8 +267,9 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
             if (avail.available) {
               const { readFileSync } = await import("node:fs");
               const { homedir } = await import("node:os");
-              const contact = JSON.parse(readFileSync(`${homedir()}/.hasna/domains/config.json`, "utf-8")).contact;
-              if (!contact?.first_name) throw new Error("No registrant contact configured (domains config set contact.*)");
+              const rawContact = JSON.parse(readFileSync(`${homedir()}/.hasna/domains/config.json`, "utf-8")).contact;
+              if (!rawContact?.first_name) throw new Error("No registrant contact configured (domains config set contact.*)");
+              const contact = normalizeRoute53RegistrationContact(rawContact);
               const reg = await (dom as any).r53RegisterDomain(domain, contact, 1);
               console.log(chalk.dim(`  registering ${domain} (op ${reg.operationId})...`));
               const res = await (dom as any).pollRegistrationUntilDone(reg.operationId, { getStatus: (id: string) => (dom as any).r53GetRegistrationStatus(id) });
@@ -331,6 +338,8 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
           const { sendWithFailover } = await import("../../lib/send.js");
           const { syncS3Inbox } = await import("../../lib/s3-sync.js");
           const { runRoundtrip } = await import("../../lib/provision/roundtrip.js");
+          const roundtripStartedAt = new Date().toISOString();
+          const subjectLimit = Math.max(100, count * locals.length * 2);
           const report = await runRoundtrip(
             {
               send: async ({ from, to, subject, text }) => {
@@ -340,10 +349,10 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
               },
               fetchReceived: async (mailbox) => {
                 await syncS3Inbox({ bucket: bucket!, prefix: `inbound/${domain}/`, providerId, limit: 1000, region: cfg.region, db });
-                return db.query("SELECT subject FROM inbound_emails WHERE to_addresses LIKE ?").all(`%${mailbox}%`) as { subject: string }[];
+                return listInboundSubjectsForRecipient(mailbox, { since: roundtripStartedAt, limit: subjectLimit }, db);
               },
             },
-            { addresses: locals.map((l) => `${l}@${domain}`), count, tokenPrefix: `UP-${domain.split(".")[0]}`, pollAttempts: 10, pollIntervalMs: 9000 },
+            { addresses: locals.map((l) => `${l}@${domain}`), count, tokenPrefix: `UP-${domain.split(".")[0]}-${Date.now()}`, pollAttempts: 10, pollIntervalMs: 9000 },
           );
           rtSuccess = report.success;
           console.log(report.success ? chalk.green(`  ✓ ${report.totalReceived}/${report.totalSent} delivered`) : chalk.red(`  ✗ ${report.totalReceived}/${report.totalSent}`));
@@ -385,6 +394,9 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
         const { sendWithFailover } = await import("../../lib/send.js");
         const { syncS3Inbox } = await import("../../lib/s3-sync.js");
         const { runRoundtrip } = await import("../../lib/provision/roundtrip.js");
+        const count = parseInt(opts.count, 10);
+        const roundtripStartedAt = new Date().toISOString();
+        const subjectLimit = Math.max(100, count * addresses.length * 2);
 
         const report = await runRoundtrip(
           {
@@ -396,14 +408,13 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
             fetchReceived: async (mailbox) => {
               const domain = mailbox.split("@")[1]!;
               await syncS3Inbox({ bucket: bucket!, prefix: `inbound/${domain}/`, providerId, limit: 1000, db });
-              const rows = db.query("SELECT subject FROM inbound_emails WHERE to_addresses LIKE ?").all(`%${mailbox}%`) as { subject: string }[];
-              return rows;
+              return listInboundSubjectsForRecipient(mailbox, { since: roundtripStartedAt, limit: subjectLimit }, db);
             },
           },
           {
             addresses,
-            count: parseInt(opts.count, 10),
-            tokenPrefix: `RT-${opts.domain.split(".")[0]}`,
+            count,
+            tokenPrefix: `RT-${opts.domain.split(".")[0]}-${Date.now()}`,
             pollAttempts: parseInt(opts.pollAttempts, 10),
             pollIntervalMs: parseInt(opts.pollInterval, 10),
           },
@@ -472,7 +483,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .action((domain: string, opts: { provider?: string }) => {
       const db = getDatabase();
       const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-      const rec = providerId ? getDomainByName(providerId, domain, db) : listDomains(undefined, db).find((d) => d.domain === domain);
+      const rec = providerId ? getDomainByName(providerId, domain, db) : findDomainsByName(domain, db)[0];
       if (!rec) return handleError(new Error(`Domain not found: ${domain}`));
       setDomainProvisioning(rec.id, { last_error: null, next_check_at: new Date().toISOString() }, db);
       const events = listProvisioningEvents("domain", rec.id, db);

@@ -1,7 +1,14 @@
 import { beforeEach, afterEach, describe, expect, it, mock } from "bun:test";
 import { closeDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.js";
-import { parseDuration, resolveId } from "./utils.js";
+import {
+  MAX_CLI_PAGE_LIMIT,
+  parseCliNonNegativeIntOption,
+  parseCliPage,
+  parseCliPositiveIntOption,
+  parseDuration,
+  resolveId,
+} from "./utils.js";
 
 describe("cli/utils", () => {
   beforeEach(() => {
@@ -19,6 +26,29 @@ describe("cli/utils", () => {
     expect(parseDuration("5m")).toBe(300000);
     expect(parseDuration("2h")).toBe(7200000);
     expect(parseDuration("bad")).toBe(300000);
+  });
+
+  it("parses bounded positive integer options", () => {
+    expect(parseCliPositiveIntOption("25", 50)).toBe(25);
+    expect(parseCliPositiveIntOption(undefined, 50)).toBe(50);
+    expect(parseCliPositiveIntOption("bad", 50)).toBe(50);
+    expect(parseCliPositiveIntOption("0", 50)).toBe(50);
+    expect(parseCliPositiveIntOption("-5", 50)).toBe(50);
+    expect(parseCliPositiveIntOption("5000", 50, 1000)).toBe(1000);
+  });
+
+  it("parses non-negative integer options", () => {
+    expect(parseCliNonNegativeIntOption("25")).toBe(25);
+    expect(parseCliNonNegativeIntOption(undefined)).toBe(0);
+    expect(parseCliNonNegativeIntOption("bad", 10)).toBe(10);
+    expect(parseCliNonNegativeIntOption("-5", 10)).toBe(10);
+  });
+
+  it("parses bounded pagination options", () => {
+    expect(parseCliPage({ limit: "25", offset: "2" })).toEqual({ limit: 25, offset: 2 });
+    expect(parseCliPage({ limit: "-1", offset: "-2" })).toEqual({ limit: 50, offset: 0 });
+    expect(parseCliPage({ limit: "100000", offset: "3" })).toEqual({ limit: MAX_CLI_PAGE_LIMIT, offset: 3 });
+    expect(parseCliPage({}, 20, 30)).toEqual({ limit: 20, offset: 0 });
   });
 
   it("resolveId prints table-aware guidance when lookup fails", () => {

@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { registerCloudTools } from "@hasna/cloud";
 import { registerTriageTools } from "./tools/triage.js";
 import { registerWarmingTools } from "./tools/warming.js";
+import { registerEmailStorageTools } from "./tools/storage.js";
 import { registerProviderTools } from "./tools/providers.js";
 import { registerInboxTools } from "./tools/inbox.js";
 import { registerSequenceTools } from "./tools/sequences.js";
@@ -12,10 +12,10 @@ import { registerInfrastructureTools } from "./tools/infrastructure.js";
 import { registerAgentTools } from "./tools/agent.js";
 import { registerEmailResources } from "./resources.js";
 import { installMcpToolContracts } from "./contracts.js";
+import { DEFAULT_MCP_HTTP_PORT, MCP_NAME } from "./options.js";
 import pkg from "../../package.json" with { type: "json" };
 
-export const MCP_NAME = "emails";
-export const DEFAULT_MCP_HTTP_PORT = 8861;
+export { DEFAULT_MCP_HTTP_PORT, MCP_NAME };
 
 export interface EmailAgent {
   id: string;
@@ -34,7 +34,7 @@ export function buildServer(): McpServer {
   });
 
   registerEmailResources(server);
-  registerCloudTools(server, MCP_NAME);
+  registerEmailStorageTools(server);
   installMcpToolContracts(server);
   registerAgentTools(server);
   registerProviderTools(server);

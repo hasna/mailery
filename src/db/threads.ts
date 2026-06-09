@@ -4,17 +4,13 @@
  */
 import type { Database } from "./database.js";
 import { getDatabase, now } from "./database.js";
+import { parseJsonArray } from "./json.js";
 
 export interface EmailThreading {
   message_id: string | null;
   thread_id: string | null;
   in_reply_to: string | null;
   references: string[];
-}
-
-function parseJsonArray(s: string | null | undefined): string[] {
-  if (!s) return [];
-  try { const v = JSON.parse(s); return Array.isArray(v) ? v as string[] : []; } catch { return []; }
 }
 
 export function setEmailThreading(emailId: string, t: Partial<EmailThreading>, db?: Database): void {
@@ -33,7 +29,7 @@ export function getEmailThreading(emailId: string, db?: Database): EmailThreadin
   const row = d.query("SELECT message_id, thread_id, in_reply_to, references_json FROM emails WHERE id = ?").get(emailId) as
     { message_id: string | null; thread_id: string | null; in_reply_to: string | null; references_json: string | null } | null;
   if (!row) return null;
-  return { message_id: row.message_id, thread_id: row.thread_id, in_reply_to: row.in_reply_to, references: parseJsonArray(row.references_json) };
+  return { message_id: row.message_id, thread_id: row.thread_id, in_reply_to: row.in_reply_to, references: parseJsonArray<string>(row.references_json) };
 }
 
 /**
@@ -51,7 +47,7 @@ export function getEmailByMessageId(messageId: string, db?: Database): { id: str
      WHERE message_id = ? OR message_id = ? OR provider_message_id = ? OR provider_message_id = ? LIMIT 1`,
   ).get(messageId, `<${bare}>`, bare, localPart) as { id: string; thread_id: string | null; references_json: string | null; message_id: string | null } | null;
   if (!row) return null;
-  return { id: row.id, thread_id: row.thread_id, references: parseJsonArray(row.references_json), message_id: row.message_id };
+  return { id: row.id, thread_id: row.thread_id, references: parseJsonArray<string>(row.references_json), message_id: row.message_id };
 }
 
 export function setInboundThreadId(inboundId: string, threadId: string, db?: Database): void {

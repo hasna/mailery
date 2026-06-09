@@ -1,5 +1,6 @@
 import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
+import { safeLimit, safeOffset } from "./pagination.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -20,6 +21,8 @@ export interface TriageResult {
   triaged_at: string;
   created_at: string;
 }
+
+export type TriageSummary = Omit<TriageResult, "draft_reply">;
 
 export interface SaveTriageInput {
   email_id?: string | null;
@@ -68,6 +71,48 @@ function rowToTriage(row: Record<string, unknown>): TriageResult {
     created_at: row.created_at as string,
   };
 }
+
+function rowToTriageSummary(row: Record<string, unknown>): TriageSummary {
+  const { draft_reply: _draftReply, ...summary } = rowToTriage(row);
+  return summary;
+}
+
+function triageWhere(filter?: TriageFilter): { where: string; params: (string | number)[] } {
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (filter?.label) {
+    conditions.push("label = ?");
+    params.push(filter.label);
+  }
+  if (filter?.priority) {
+    conditions.push("priority = ?");
+    params.push(filter.priority);
+  }
+  if (filter?.sentiment) {
+    conditions.push("sentiment = ?");
+    params.push(filter.sentiment);
+  }
+
+  return {
+    where: conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "",
+    params,
+  };
+}
+
+const TRIAGE_SUMMARY_COLS = [
+  "id",
+  "email_id",
+  "inbound_email_id",
+  "label",
+  "priority",
+  "summary",
+  "sentiment",
+  "confidence",
+  "model",
+  "triaged_at",
+  "created_at",
+].join(", ");
 
 // ─── CRUD ────────────────────────────────────────────────────────────────────
 
@@ -131,30 +176,26 @@ export function getTriageById(id: string, db?: Database): TriageResult | null {
 
 export function listTriaged(filter?: TriageFilter, db?: Database): TriageResult[] {
   const d = db || getDatabase();
-  const conditions: string[] = [];
-  const params: (string | number)[] = [];
-
-  if (filter?.label) {
-    conditions.push("label = ?");
-    params.push(filter.label);
-  }
-  if (filter?.priority) {
-    conditions.push("priority = ?");
-    params.push(filter.priority);
-  }
-  if (filter?.sentiment) {
-    conditions.push("sentiment = ?");
-    params.push(filter.sentiment);
-  }
-
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-  const limit = filter?.limit ?? 50;
-  const offset = filter?.offset ?? 0;
+  const { where, params } = triageWhere(filter);
+  const limit = safeLimit(filter?.limit);
+  const offset = safeOffset(filter?.offset);
 
   const rows = d
     .query(`SELECT * FROM email_triage ${where} ORDER BY triaged_at DESC LIMIT ? OFFSET ?`)
     .all(...params, limit, offset) as Record<string, unknown>[];
   return rows.map(rowToTriage);
+}
+
+export function listTriagedSummaries(filter?: TriageFilter, db?: Database): TriageSummary[] {
+  const d = db || getDatabase();
+  const { where, params } = triageWhere(filter);
+  const limit = safeLimit(filter?.limit);
+  const offset = safeOffset(filter?.offset);
+
+  const rows = d
+    .query(`SELECT ${TRIAGE_SUMMARY_COLS} FROM email_triage ${where} ORDER BY triaged_at DESC LIMIT ? OFFSET ?`)
+    .all(...params, limit, offset) as Record<string, unknown>[];
+  return rows.map(rowToTriageSummary);
 }
 
 export function getUntriaged(
@@ -163,6 +204,7 @@ export function getUntriaged(
   db?: Database,
 ): { id: string; subject: string; from_address: string }[] {
   const d = db || getDatabase();
+  const normalizedLimit = safeLimit(limit, 20);
 
   if (type === "inbound") {
     return d
@@ -174,7 +216,7 @@ export function getUntriaged(
          ORDER BY ie.received_at DESC
          LIMIT ?`,
       )
-      .all(limit) as { id: string; subject: string; from_address: string }[];
+      .all(normalizedLimit) as { id: string; subject: string; from_address: string }[];
   }
 
   return d
@@ -186,7 +228,7 @@ export function getUntriaged(
        ORDER BY e.sent_at DESC
        LIMIT ?`,
     )
-    .all(limit) as { id: string; subject: string; from_address: string }[];
+    .all(normalizedLimit) as { id: string; subject: string; from_address: string }[];
 }
 
 export function deleteTriage(id: string, db?: Database): boolean {

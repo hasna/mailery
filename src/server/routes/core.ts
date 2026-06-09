@@ -1,21 +1,21 @@
 // API route handlers — core.ts
-import { createProvider, listProviders, deleteProvider, getProvider, updateProvider } from '../../db/providers.js';
+import { createProvider, listProviderSummaries, deleteProvider, getProvider, updateProvider } from '../../db/providers.js';
 import { createDomain, listDomains, deleteDomain, getDomain, updateDnsStatus } from '../../db/domains.js';
 import { createAddress, deleteAddress } from '../../db/addresses.js';
 import { listEmails, getEmail, searchEmails } from '../../db/emails.js';
-import { listSandboxEmails, getSandboxEmail, clearSandboxEmails } from '../../db/sandbox.js';
-import { getDatabase, resolvePartialId } from '../../db/database.js';
-import { listEvents } from '../../db/events.js';
+import { listSandboxEmailSummaries, getSandboxEmail, clearSandboxEmails } from '../../db/sandbox.js';
+import { getDatabase } from '../../db/database.js';
+import { getEvent, listEventSummaries } from '../../db/events.js';
 import { getAdapter } from '../../providers/index.js';
 import { getLocalStats } from '../../lib/stats.js';
 import { listEnrichedAddresses } from '../../lib/address-ownership.js';
-import { json, notFound, badRequest, internalError, resolveId, parseBody, sanitizeProvider, checkRateLimit, tooManyRequests } from './helpers.js';
+import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, sanitizeProvider, checkRateLimit, tooManyRequests, queryInteger, optionalQueryInteger, queryPage } from './helpers.js';
 
 export async function handle(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
 // GET /api/providers
 if (path === "/api/providers" && method === "GET") {
   try {
-    return json(listProviders().map(p => sanitizeProvider(p as unknown as Record<string, unknown>)));
+    return json(listProviderSummaries(undefined, queryPage(url, 50)));
   } catch (e) { return internalError(e); }
 }
 
@@ -99,9 +99,9 @@ if (providerAuthMatch && method === "POST") {
 // GET /api/domains
 if (path === "/api/domains" && method === "GET") {
   try {
-    const providerId = url.searchParams.get("provider_id") ?? undefined;
-    const resolvedId = providerId ? resolveId("providers", providerId) ?? providerId : undefined;
-    return json(listDomains(resolvedId));
+    const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
+    const page = queryPage(url, 100);
+    return json(listDomains(resolvedId, getDatabase(), page));
   } catch (e) { return internalError(e); }
 }
 
@@ -109,8 +109,7 @@ if (path === "/api/domains" && method === "GET") {
 if (path === "/api/domains" && method === "POST") {
   try {
     const body = await parseBody(req) as Record<string, unknown>;
-    const providerId = resolveId("providers", String(body.provider_id ?? ""));
-    if (!providerId) return notFound("Provider not found");
+    const providerId = resolveIdStrict("providers", String(body.provider_id ?? ""));
 
     const provider = getProvider(providerId);
     if (!provider) return notFound("Provider not found");
@@ -179,9 +178,9 @@ if (domainMatch && method === "DELETE") {
 // GET /api/addresses
 if (path === "/api/addresses" && method === "GET") {
   try {
-    const providerId = url.searchParams.get("provider_id") ?? undefined;
-    const resolvedId = providerId ? resolveId("providers", providerId) ?? providerId : undefined;
-    return json(listEnrichedAddresses(resolvedId));
+    const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
+    const page = queryPage(url, 100);
+    return json(listEnrichedAddresses(resolvedId, getDatabase(), page));
   } catch (e) { return internalError(e); }
 }
 
@@ -189,8 +188,7 @@ if (path === "/api/addresses" && method === "GET") {
 if (path === "/api/addresses" && method === "POST") {
   try {
     const body = await parseBody(req) as Record<string, unknown>;
-    const providerId = resolveId("providers", String(body.provider_id ?? ""));
-    if (!providerId) return notFound("Provider not found");
+    const providerId = resolveIdStrict("providers", String(body.provider_id ?? ""));
 
     const provider = getProvider(providerId);
     if (!provider) return notFound("Provider not found");
@@ -225,11 +223,12 @@ if (addressMatch && method === "DELETE") {
 if (path === "/api/emails" && method === "GET") {
   try {
     const filter = {
-      provider_id: url.searchParams.get("provider_id") ?? undefined,
+      provider_id: resolveOptionalId("providers", url.searchParams.get("provider_id")),
       status: url.searchParams.get("status") as "sent" | "delivered" | "bounced" | "complained" | "failed" | undefined,
+      from_address: url.searchParams.get("from_address") ?? url.searchParams.get("from") ?? undefined,
       since: url.searchParams.get("since") ?? undefined,
-      limit: url.searchParams.has("limit") ? parseInt(url.searchParams.get("limit")!, 10) : 50,
-      offset: url.searchParams.has("offset") ? parseInt(url.searchParams.get("offset")!, 10) : undefined,
+      limit: queryInteger(url, "limit", 50, { min: 1, max: 1000 }),
+      offset: optionalQueryInteger(url, "offset", { min: 0 }),
     };
     return json(listEmails(filter));
   } catch (e) { return internalError(e); }
@@ -241,8 +240,9 @@ if (path === "/api/emails/search" && method === "GET") {
     const q = url.searchParams.get("q") ?? "";
     if (!q) return badRequest("q parameter is required");
     const since = url.searchParams.get("since") ?? undefined;
-    const limit = url.searchParams.has("limit") ? parseInt(url.searchParams.get("limit")!, 10) : 50;
-    return json(searchEmails(q, { since, limit }));
+    const limit = queryInteger(url, "limit", 50, { min: 1, max: 1000 });
+    const offset = optionalQueryInteger(url, "offset", { min: 0 });
+    return json(searchEmails(q, { since, limit, offset }));
   } catch (e) { return internalError(e); }
 }
 
@@ -263,21 +263,34 @@ if (path === "/api/events" && method === "GET") {
   try {
     const filter = {
       email_id: url.searchParams.get("email_id") ?? undefined,
-      provider_id: url.searchParams.get("provider_id") ?? undefined,
+      provider_id: resolveOptionalId("providers", url.searchParams.get("provider_id")),
       type: url.searchParams.get("type") as "delivered" | "bounced" | "complained" | "opened" | "clicked" | "unsubscribed" | undefined,
       since: url.searchParams.get("since") ?? undefined,
-      limit: url.searchParams.has("limit") ? parseInt(url.searchParams.get("limit")!, 10) : 100,
+      until: url.searchParams.get("until") ?? undefined,
+      limit: queryInteger(url, "limit", 100, { min: 1, max: 1000 }),
+      offset: queryInteger(url, "offset", 0, { min: 0 }),
     };
-    return json(listEvents(filter));
+    return json(listEventSummaries(filter));
+  } catch (e) { return internalError(e); }
+}
+
+// GET /api/events/:id
+const eventMatch = path.match(/^\/api\/events\/([^/]+)$/);
+if (eventMatch && method === "GET") {
+  const id = resolveId("events", eventMatch[1]!);
+  if (!id) return notFound("Event not found");
+  try {
+    const event = getEvent(id);
+    if (!event) return notFound("Event not found");
+    return json(event);
   } catch (e) { return internalError(e); }
 }
 
 // GET /api/stats
 if (path === "/api/stats" && method === "GET") {
   try {
-    const providerId = url.searchParams.get("provider_id") ?? undefined;
     const period = url.searchParams.get("period") ?? "30d";
-    const resolvedId = providerId ? resolveId("providers", providerId) ?? providerId : undefined;
+    const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
     const stats = getLocalStats(resolvedId, period);
     return json(stats);
   } catch (e) { return internalError(e); }
@@ -286,10 +299,9 @@ if (path === "/api/stats" && method === "GET") {
 // GET /api/sandbox
 if (path === "/api/sandbox" && method === "GET") {
   try {
-    const providerId = url.searchParams.get("provider_id") ?? undefined;
-    const limit = url.searchParams.get("limit") ? parseInt(url.searchParams.get("limit")!, 10) : 50;
-    const resolvedId = providerId ? resolveId("providers", providerId) ?? providerId : undefined;
-    return json(listSandboxEmails(resolvedId, limit));
+    const page = queryPage(url, 50);
+    const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
+    return json(listSandboxEmailSummaries(resolvedId, page.limit, page.offset));
   } catch (e) { return internalError(e); }
 }
 
@@ -298,8 +310,7 @@ const sandboxGetMatch = path.match(/^\/api\/sandbox\/([^/]+)$/);
 if (sandboxGetMatch && method === "GET") {
   try {
     const db = getDatabase();
-    const id = resolvePartialId(db, "sandbox_emails", sandboxGetMatch[1]!);
-    if (!id) return notFound("Sandbox email not found");
+    const id = resolveIdStrict("sandbox_emails", sandboxGetMatch[1]!);
     const email = getSandboxEmail(id, db);
     if (!email) return notFound("Sandbox email not found");
     return json(email);
@@ -309,8 +320,7 @@ if (sandboxGetMatch && method === "GET") {
 // DELETE /api/sandbox
 if (path === "/api/sandbox" && method === "DELETE") {
   try {
-    const providerId = url.searchParams.get("provider_id") ?? undefined;
-    const resolvedId = providerId ? resolveId("providers", providerId) ?? providerId : undefined;
+    const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
     const db = getDatabase();
     const count = clearSandboxEmails(resolvedId, db);
     return json({ deleted: count });

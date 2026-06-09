@@ -6,10 +6,15 @@ import { getProvider } from '../../db/providers.js';
 import { getAdapter } from '../../providers/index.js';
 import { getDatabase } from '../../db/database.js';
 import { loadConfig, getConfigValue, setConfigValue } from '../../lib/config.js';
+import { normalizeRoute53RegistrationContact } from '../../lib/route53-contact.js';
 import { formatError, resolveId, ProviderNotFoundError } from '../helpers.js';
 
 interface EmailAgent { id: string; name: string; session_id?: string; last_seen_at: string; project_id?: string; }
 const emailAgents = new Map<string, EmailAgent>();
+const MAX_MCP_S3_SYNC_LIMIT = 10000;
+const MAX_MCP_PROVISION_WAIT_SECONDS = 300;
+const MAX_MCP_PROVISION_INTERVAL_SECONDS = 60;
+const MAX_DOMAIN_REGISTRATION_YEARS = 10;
 
 export function registerInfrastructureTools(server: McpServer): void {
   // ─── DOMAIN PURCHASING (via @hasna/domains / Route 53) ───────────────────────
@@ -34,22 +39,23 @@ export function registerInfrastructureTools(server: McpServer): void {
     domain: z.string(),
     first_name: z.string(), last_name: z.string(),
     email: z.string(), phone: z.string().describe("E.164 format, e.g. +1.5551234567"),
-    address_line_1: z.string(), city: z.string(), state: z.string(),
+    address_line_1: z.string(), city: z.string(), state: z.string().optional(),
     country_code: z.string().describe("Two-letter country code, e.g. US"),
     zip_code: z.string(),
     organization_name: z.string().optional(),
-    duration_years: z.number().optional().describe("Registration years (default: 1)"),
+    duration_years: z.number().int().positive().max(MAX_DOMAIN_REGISTRATION_YEARS).optional().describe("Registration years (default: 1, max: 10)"),
   },
   async (params) => {
     try {
       const { r53RegisterDomain } = await import("@hasna/domains");
-      const result = await r53RegisterDomain(params.domain, {
+      const contact = normalizeRoute53RegistrationContact({
         first_name: params.first_name, last_name: params.last_name,
         email: params.email, phone: params.phone,
         address_line_1: params.address_line_1, city: params.city,
         state: params.state, country_code: params.country_code,
         zip_code: params.zip_code, organization_name: params.organization_name,
-      }, params.duration_years ?? 1);
+      });
+      const result = await r53RegisterDomain(params.domain, contact as Parameters<typeof r53RegisterDomain>[1], params.duration_years ?? 1);
       return { content: [{ type: "text", text: JSON.stringify({ domain: params.domain, ...result }, null, 2) }] };
     } catch (e) { return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true }; }
   },
@@ -88,10 +94,10 @@ export function registerInfrastructureTools(server: McpServer): void {
     contact: z.object({
       first_name: z.string(), last_name: z.string(), email: z.string(),
       phone: z.string(), address_line_1: z.string(), city: z.string(),
-      state: z.string(), country_code: z.string(), zip_code: z.string(),
+      state: z.string().optional(), country_code: z.string(), zip_code: z.string(),
       organization_name: z.string().optional(),
     }).optional().describe("Registrant contact info (omit if domain already purchased)"),
-    duration_years: z.number().optional(),
+    duration_years: z.number().int().positive().max(MAX_DOMAIN_REGISTRATION_YEARS).optional(),
     add_mx: z.boolean().optional().describe("Also publish an inbound MX record for receiving (default false)"),
   },
   async ({ domain, provider_id, contact, duration_years, add_mx }) => {
@@ -111,7 +117,7 @@ export function registerInfrastructureTools(server: McpServer): void {
         const avail = await r53CheckAvailability(domain);
         if (!avail.available) throw new Error(`${domain} is not available for registration`);
         steps.push(`availability: ${avail.available}, price: ${avail.price ?? "unknown"} ${avail.currency ?? ""}`);
-        const reg = await r53RegisterDomain(domain, contact, duration_years ?? 1);
+        const reg = await r53RegisterDomain(domain, normalizeRoute53RegistrationContact(contact) as Parameters<typeof r53RegisterDomain>[1], duration_years ?? 1);
         steps.push(`registration submitted, operation_id: ${reg.operationId}`);
         const result = await pollRegistrationUntilDone(reg.operationId, {
           getStatus: async (id: string) => await r53GetRegistrationStatus(id),
@@ -224,12 +230,12 @@ export function registerInfrastructureTools(server: McpServer): void {
     prefix: z.string().optional().describe("S3 key prefix (e.g. inbound/example.com/)"),
     region: z.string().optional().describe("AWS region (default: us-east-1)"),
     provider_id: z.string().optional().describe("Associate emails with this provider ID"),
-    limit: z.number().optional().describe("Max emails per run (default: 100)"),
+    limit: z.number().int().positive().max(MAX_MCP_S3_SYNC_LIMIT).optional().describe("Max emails per run (default: 100, max: 10000)"),
   },
   async ({ bucket, prefix, region, provider_id, limit }) => {
     try {
       const { syncS3Inbox } = await import("../../lib/s3-sync.js");
-      const result = await syncS3Inbox({ bucket, prefix, region, providerId: provider_id, limit });
+      const result = await syncS3Inbox({ bucket, prefix, region, providerId: provider_id, limit: limit ?? 100 });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
@@ -287,7 +293,7 @@ export function registerInfrastructureTools(server: McpServer): void {
       let parsed: unknown;
       try { parsed = JSON.parse(value); } catch { parsed = value; }
       setConfigValue(key, parsed);
-      return { content: [{ type: "text", text: `✓ ${key} = ${JSON.stringify(parsed)}` }] };
+      return { content: [{ type: "text", text: JSON.stringify({ [key]: parsed }, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -383,11 +389,12 @@ export function registerInfrastructureTools(server: McpServer): void {
     async ({ domain, provider_id, send_provider, add_mx }) => {
       try {
         const db = getDatabase();
-        const provider = getProvider(resolveId("providers", provider_id));
+        const resolvedProviderId = resolveId("providers", provider_id);
+        const provider = getProvider(resolvedProviderId);
         if (!provider) throw new ProviderNotFoundError(provider_id);
         const { getDomainByName } = await import("../../db/domains.js");
         const { setDomainProvisioning } = await import("../../db/provisioning.js");
-        const rec = getDomainByName(resolveId("providers", provider_id), domain, db) ?? createDomain(resolveId("providers", provider_id), domain, db);
+        const rec = getDomainByName(resolvedProviderId, domain, db) ?? createDomain(resolvedProviderId, domain, db);
         setDomainProvisioning(rec.id, { provisioning_status: "ses_identity_created", send_provider: send_provider ?? "ses", dns_provider: "cloudflare" }, db);
         const adapter = getAdapter(provider);
         await adapter.addDomain(domain);
@@ -411,8 +418,8 @@ export function registerInfrastructureTools(server: McpServer): void {
       owner: z.string().optional().describe("Owner name, ID, or ID prefix"),
       administrator: z.string().optional().describe("Administering agent name, ID, or ID prefix"),
       wait: z.boolean().optional().describe("Advance provisioning now and wait until ready"),
-      timeout_seconds: z.number().int().positive().optional().describe("Max seconds to wait when wait=true"),
-      interval_seconds: z.number().int().positive().optional().describe("Polling interval when wait=true"),
+      timeout_seconds: z.number().int().positive().max(MAX_MCP_PROVISION_WAIT_SECONDS).optional().describe("Max seconds to wait when wait=true (max 300)"),
+      interval_seconds: z.number().int().positive().max(MAX_MCP_PROVISION_INTERVAL_SECONDS).optional().describe("Polling interval when wait=true (max 60)"),
       inbound_bucket: z.string().optional().describe("Inbound S3 bucket for receive validation"),
     },
     async ({ email, provider_id, domain_id, receive_strategy, forward_to, owner, administrator, wait, timeout_seconds, interval_seconds, inbound_bucket }) => {
@@ -488,20 +495,28 @@ export function registerInfrastructureTools(server: McpServer): void {
   server.tool(
     "provision_status",
     "Show provisioning status of domains and their addresses.",
-    { domain: z.string().optional() },
-    async ({ domain }) => {
+    {
+      domain: z.string().optional(),
+      limit: z.number().int().positive().max(1000).optional().describe("Maximum domains to return"),
+      offset: z.number().int().min(0).optional().describe("Number of domains to skip"),
+    },
+    async ({ domain, limit, offset }) => {
       try {
         const db = getDatabase();
-        const { listDomains } = await import("../../db/domains.js");
-        const { listAddresses } = await import("../../db/addresses.js");
-        const { getDomainProvisioning, getAddressProvisioning } = await import("../../db/provisioning.js");
-        const domains = listDomains(undefined, db).filter((d) => !domain || d.domain === domain);
+        const { findDomainsByName, listDomains } = await import("../../db/domains.js");
+        const {
+          listDomainProvisioningByIds,
+          listAddressProvisioningByDomains,
+        } = await import("../../db/provisioning.js");
+        const domains = domain ? findDomainsByName(domain, db) : listDomains(undefined, db, { limit: limit ?? 50, offset: offset ?? 0 });
+        const domainIds = domains.map((d) => d.id);
+        const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
+        const addressProvisioning = listAddressProvisioningByDomains(domainIds, db);
         const result = domains.map((d) => ({
           domain: d.domain,
-          provisioning: getDomainProvisioning(d.id, db),
-          addresses: listAddresses(undefined, db)
-            .filter((a) => getAddressProvisioning(a.id, db)?.domain_id === d.id)
-            .map((a) => ({ email: a.email, provisioning: getAddressProvisioning(a.id, db) })),
+          provisioning: domainProvisioning.get(d.id) ?? null,
+          addresses: (addressProvisioning.get(d.id) ?? [])
+            .map((a) => ({ email: a.email, provisioning: a.provisioning })),
         }));
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (e) { return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true }; }

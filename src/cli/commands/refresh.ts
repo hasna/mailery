@@ -1,7 +1,13 @@
 import type { Command } from "commander";
-import chalk from "chalk";
-import { autoPull } from "../tui/autopull.js";
-import { handleError } from "../utils.js";
+import chalk from "../../lib/chalk-lite.js";
+import { handleError, parseCliPositiveIntOption } from "../utils.js";
+
+const MAX_REFRESH_SCAN_LIMIT = 10000;
+
+async function runAutoPull(opts: { s3?: boolean; gmail?: boolean; limit?: number }) {
+  const { autoPull } = await import("../tui/autopull.js");
+  return autoPull(opts);
+}
 
 /**
  * `emails refresh` — one-shot "pull everything now". Syncs every configured
@@ -18,8 +24,8 @@ export function registerRefreshCommand(program: Command, output: (data: unknown,
     .option("--limit <n>", "Max objects to scan per bucket", "1000")
     .action(async (opts: { gmail?: boolean; limit?: string }) => {
       try {
-        const limit = Math.max(1, parseInt(opts.limit ?? "1000", 10) || 1000);
-        const r = await autoPull({ s3: true, gmail: opts.gmail === true, limit });
+        const limit = parseCliPositiveIntOption(opts.limit, 1000, MAX_REFRESH_SCAN_LIMIT);
+        const r = await runAutoPull({ s3: true, gmail: opts.gmail === true, limit });
 
         if (!r.configured) {
           console.log(chalk.yellow("No inbound sources configured."));

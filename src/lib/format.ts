@@ -1,26 +1,26 @@
-import chalk from "chalk";
+import { ansi } from "./ansi.js";
 
 export function colorStatus(status: string): string {
   switch (status) {
-    case "delivered": return chalk.green(status);
-    case "bounced": case "complained": case "failed": return chalk.red(status);
-    case "sent": return chalk.blue(status);
-    case "pending": return chalk.yellow(status);
-    default: return chalk.gray(status);
+    case "delivered": return ansi.green(status);
+    case "bounced": case "complained": case "failed": return ansi.red(status);
+    case "sent": return ansi.blue(status);
+    case "pending": return ansi.yellow(status);
+    default: return ansi.gray(status);
   }
 }
 
 export function colorDnsStatus(status: string): string {
   switch (status) {
-    case "verified": return chalk.green("\u2713 " + status);
-    case "pending": return chalk.yellow("\u25CB " + status);
-    case "failed": return chalk.red("\u2717 " + status);
-    default: return chalk.gray(status);
+    case "verified": return ansi.green("\u2713 " + status);
+    case "pending": return ansi.yellow("\u25CB " + status);
+    case "failed": return ansi.red("\u2717 " + status);
+    default: return ansi.gray(status);
   }
 }
 
 export function colorProvider(active: boolean, text: string): string {
-  return active ? chalk.green(text) : chalk.gray(text);
+  return active ? ansi.green(text) : ansi.gray(text);
 }
 
 export function truncate(str: string, len: number): string {

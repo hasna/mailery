@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, resetDatabase } from "./database.js";
+import { closeDatabase, getDatabase, resetDatabase } from "./database.js";
 import { createProvider } from "./providers.js";
 import { createEmail } from "./emails.js";
 import { storeEmailContent, getEmailContent } from "./email-content.js";
@@ -79,5 +79,13 @@ describe("getEmailContent", () => {
     storeEmailContent(emailId, { text: "test" });
     const content = getEmailContent(emailId);
     expect(content!.email_id).toBe(emailId);
+  });
+
+  it("tolerates malformed header JSON", () => {
+    storeEmailContent(emailId, { text: "test", headers: { "X-Test": "1" } });
+    getDatabase().run("UPDATE email_content SET headers_json = ? WHERE email_id = ?", ["not-json", emailId]);
+
+    const content = getEmailContent(emailId);
+    expect(content?.headers).toEqual({});
   });
 });

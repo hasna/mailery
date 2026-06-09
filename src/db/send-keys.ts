@@ -9,6 +9,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Database } from "./database.js";
 import { getDatabase, now, uuid } from "./database.js";
 import { getOwner, getAddressOwnership, type Owner } from "./owners.js";
+import { safeOffset, safeOptionalLimit } from "./pagination.js";
 import { canonicalSender } from "../lib/email-address.js";
 
 const TOKEN_PREFIX = "esk_";
@@ -23,6 +24,34 @@ export interface SendKey {
   last_used_at: string | null;
   revoked_at: string | null;
 }
+
+export type SendKeySummary = Omit<SendKey, "key_hash">;
+
+export interface ListSendKeyOptions {
+  limit?: number;
+  offset?: number;
+}
+
+const SEND_KEY_COLUMNS = [
+  "id",
+  "owner_id",
+  "key_hash",
+  "prefix",
+  "label",
+  "created_at",
+  "last_used_at",
+  "revoked_at",
+].join(", ");
+
+const SEND_KEY_SUMMARY_COLUMNS = [
+  "id",
+  "owner_id",
+  "prefix",
+  "label",
+  "created_at",
+  "last_used_at",
+  "revoked_at",
+].join(", ");
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -52,24 +81,63 @@ export function createSendKey(ownerId: string, label?: string, db?: Database): {
 
 export function getSendKey(id: string, db?: Database): SendKey | null {
   const d = db || getDatabase();
-  return (d.query("SELECT * FROM send_keys WHERE id = ?").get(id) as SendKey | null) ?? null;
+  return (d.query(`SELECT ${SEND_KEY_COLUMNS} FROM send_keys WHERE id = ?`).get(id) as SendKey | null) ?? null;
 }
 
 /** Resolve a token to its (non-revoked) key, stamping last_used_at. */
 export function verifySendKey(token: string, db?: Database): SendKey | null {
   const d = db || getDatabase();
   if (!token || !token.startsWith(TOKEN_PREFIX)) return null;
-  const row = d.query("SELECT * FROM send_keys WHERE key_hash = ?").get(hashToken(token)) as SendKey | null;
+  const row = d.query(`SELECT ${SEND_KEY_COLUMNS} FROM send_keys WHERE key_hash = ?`).get(hashToken(token)) as SendKey | null;
   if (!row || row.revoked_at) return null;
   d.run("UPDATE send_keys SET last_used_at = ? WHERE id = ?", [now(), row.id]);
   return row;
 }
 
-export function listSendKeys(ownerId?: string, db?: Database): SendKey[] {
+export function listSendKeys(ownerId?: string, db?: Database, opts?: ListSendKeyOptions): SendKey[] {
   const d = db || getDatabase();
+  const limit = safeOptionalLimit(opts?.limit);
+  const offset = safeOffset(opts?.offset);
   return (ownerId
-    ? d.query("SELECT * FROM send_keys WHERE owner_id = ? ORDER BY created_at DESC").all(ownerId)
-    : d.query("SELECT * FROM send_keys ORDER BY created_at DESC").all()) as SendKey[];
+    ? (limit !== null
+        ? d.query(`SELECT ${SEND_KEY_COLUMNS} FROM send_keys WHERE owner_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(ownerId, limit, offset)
+        : d.query(`SELECT ${SEND_KEY_COLUMNS} FROM send_keys WHERE owner_id = ? ORDER BY created_at DESC`).all(ownerId))
+    : (limit !== null
+        ? d.query(`SELECT ${SEND_KEY_COLUMNS} FROM send_keys ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(limit, offset)
+        : d.query(`SELECT ${SEND_KEY_COLUMNS} FROM send_keys ORDER BY created_at DESC`).all())) as SendKey[];
+}
+
+export function listSendKeySummaries(ownerId?: string, db?: Database, opts?: ListSendKeyOptions): SendKeySummary[] {
+  const d = db || getDatabase();
+  const limit = safeOptionalLimit(opts?.limit);
+  const offset = safeOffset(opts?.offset);
+  return (ownerId
+    ? (limit !== null
+        ? d.query(`SELECT ${SEND_KEY_SUMMARY_COLUMNS} FROM send_keys WHERE owner_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(ownerId, limit, offset)
+        : d.query(`SELECT ${SEND_KEY_SUMMARY_COLUMNS} FROM send_keys WHERE owner_id = ? ORDER BY created_at DESC`).all(ownerId))
+    : (limit !== null
+        ? d.query(`SELECT ${SEND_KEY_SUMMARY_COLUMNS} FROM send_keys ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(limit, offset)
+        : d.query(`SELECT ${SEND_KEY_SUMMARY_COLUMNS} FROM send_keys ORDER BY created_at DESC`).all())) as SendKeySummary[];
+}
+
+export function listSendKeysByOwners(ownerIds: Iterable<string>, db?: Database): SendKey[] {
+  const ids = [...new Set([...ownerIds].map((id) => id.trim()).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const d = db || getDatabase();
+  const placeholders = ids.map(() => "?").join(", ");
+  return d
+    .query(`SELECT ${SEND_KEY_COLUMNS} FROM send_keys WHERE owner_id IN (${placeholders}) ORDER BY created_at DESC`)
+    .all(...ids) as SendKey[];
+}
+
+export function listSendKeySummariesByOwners(ownerIds: Iterable<string>, db?: Database): SendKeySummary[] {
+  const ids = [...new Set([...ownerIds].map((id) => id.trim()).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const d = db || getDatabase();
+  const placeholders = ids.map(() => "?").join(", ");
+  return d
+    .query(`SELECT ${SEND_KEY_SUMMARY_COLUMNS} FROM send_keys WHERE owner_id IN (${placeholders}) ORDER BY created_at DESC`)
+    .all(...ids) as SendKeySummary[];
 }
 
 export function revokeSendKey(id: string, db?: Database): boolean {

@@ -1,8 +1,9 @@
-import { SqliteAdapter as Database } from "@hasna/cloud";
+import { Database } from "bun:sqlite";
 // Re-export so all db/lib modules import Database from here instead of bun:sqlite
 export type { Database };
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { sqlEmailAddress, sqlEmailDomain } from "./email-address-sql.js";
 
 function isInMemoryDb(path: string): boolean {
   return path === ":memory:" || path.startsWith("file::memory:");
@@ -46,6 +47,117 @@ function ensureDir(filePath: string): void {
   const dir = dirname(resolve(filePath));
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
+  }
+}
+
+function normalizedRecipientSql(valueSql: string): string {
+  const value = `CAST(${valueSql} AS TEXT)`;
+  return `LOWER(TRIM(CASE
+    WHEN instr(${value}, '<') > 0 AND instr(${value}, '>') > instr(${value}, '<')
+      THEN substr(${value}, instr(${value}, '<') + 1, instr(${value}, '>') - instr(${value}, '<') - 1)
+    ELSE ${value}
+  END))`;
+}
+
+function inboundRecipientInsertSql(idSql: string, toAddressesSql: string): string {
+  return `INSERT OR IGNORE INTO inbound_recipients (inbound_email_id, address, domain)
+    SELECT ${idSql}, normalized.address, substr(normalized.address, instr(normalized.address, '@') + 1)
+      FROM (
+        SELECT ${normalizedRecipientSql("j.value")} AS address
+          FROM json_each(CASE WHEN json_valid(${toAddressesSql}) THEN ${toAddressesSql} ELSE '[]' END) AS j
+      ) normalized
+     WHERE instr(normalized.address, '@') > 1
+       AND instr(substr(normalized.address, instr(normalized.address, '@') + 1), '.') > 0
+       AND normalized.address NOT LIKE '% %'
+       AND normalized.address NOT LIKE '%<%'
+       AND normalized.address NOT LIKE '%>%'`;
+}
+
+function inboundRecipientBackfillSql(): string {
+  return `INSERT OR IGNORE INTO inbound_recipients (inbound_email_id, address, domain)
+    SELECT normalized.inbound_email_id, normalized.address, substr(normalized.address, instr(normalized.address, '@') + 1)
+      FROM (
+        SELECT e.id AS inbound_email_id, ${normalizedRecipientSql("j.value")} AS address
+          FROM inbound_emails e,
+               json_each(CASE WHEN json_valid(e.to_addresses) THEN e.to_addresses ELSE '[]' END) AS j
+      ) normalized
+     WHERE instr(normalized.address, '@') > 1
+       AND instr(substr(normalized.address, instr(normalized.address, '@') + 1), '.') > 0
+       AND normalized.address NOT LIKE '% %'
+       AND normalized.address NOT LIKE '%<%'
+       AND normalized.address NOT LIKE '%>%'`;
+}
+
+const INBOUND_RECIPIENTS_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS inbound_recipients (
+    inbound_email_id TEXT NOT NULL REFERENCES inbound_emails(id) ON DELETE CASCADE,
+    address TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    PRIMARY KEY (inbound_email_id, address)
+  );
+  CREATE INDEX IF NOT EXISTS idx_inbound_recipients_address ON inbound_recipients(address, inbound_email_id);
+  CREATE INDEX IF NOT EXISTS idx_inbound_recipients_domain ON inbound_recipients(domain, inbound_email_id);
+  CREATE INDEX IF NOT EXISTS idx_inbound_recipients_email ON inbound_recipients(inbound_email_id);
+`;
+
+const INBOUND_RECIPIENTS_BACKFILL_SQL = `
+  ${inboundRecipientBackfillSql()};
+`;
+
+const INBOUND_RECIPIENTS_TRIGGERS_SQL = `
+  CREATE TRIGGER IF NOT EXISTS trg_inbound_recipients_insert
+  AFTER INSERT ON inbound_emails
+  BEGIN
+    ${inboundRecipientInsertSql("NEW.id", "NEW.to_addresses")};
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_inbound_recipients_update_to
+  AFTER UPDATE OF to_addresses ON inbound_emails
+  BEGIN
+    DELETE FROM inbound_recipients WHERE inbound_email_id = NEW.id;
+    ${inboundRecipientInsertSql("NEW.id", "NEW.to_addresses")};
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_inbound_recipients_delete
+  AFTER DELETE ON inbound_emails
+  BEGIN
+    DELETE FROM inbound_recipients WHERE inbound_email_id = OLD.id;
+  END;
+`;
+
+function safeExec(db: Database, sql: string): void {
+  try { db.exec(sql); } catch {}
+}
+
+function tableExists(db: Database, tableName: string): boolean {
+  try {
+    const row = db
+      .query("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1")
+      .get(tableName) as { ok: number } | null;
+    return !!row;
+  } catch {
+    return false;
+  }
+}
+
+function migrationRecorded(db: Database, id: number): boolean {
+  try {
+    const row = db.query("SELECT 1 AS ok FROM _migrations WHERE id = ? LIMIT 1").get(id) as { ok: number } | null;
+    return !!row;
+  } catch {
+    return false;
+  }
+}
+
+function ensureInboundRecipients(db: Database): void {
+  const tableExisted = tableExists(db, "inbound_recipients");
+  safeExec(db, INBOUND_RECIPIENTS_SCHEMA_SQL);
+  if (!migrationRecorded(db, 31) || !tableExisted) {
+    safeExec(db, INBOUND_RECIPIENTS_BACKFILL_SQL);
+  }
+  safeExec(db, INBOUND_RECIPIENTS_TRIGGERS_SQL);
+  if (tableExists(db, "inbound_recipients")) {
+    safeExec(db, "INSERT OR IGNORE INTO _migrations (id) VALUES (31)");
   }
 }
 
@@ -123,8 +235,11 @@ const MIGRATIONS = [
 
   CREATE INDEX IF NOT EXISTS idx_domains_provider ON domains(provider_id);
   CREATE INDEX IF NOT EXISTS idx_domains_domain ON domains(domain);
+  CREATE INDEX IF NOT EXISTS idx_domains_domain_nocase ON domains(domain COLLATE NOCASE);
+  CREATE INDEX IF NOT EXISTS idx_domains_provider_domain_nocase ON domains(provider_id, domain COLLATE NOCASE);
   CREATE INDEX IF NOT EXISTS idx_addresses_provider ON addresses(provider_id);
   CREATE INDEX IF NOT EXISTS idx_addresses_email ON addresses(email);
+  CREATE INDEX IF NOT EXISTS idx_addresses_email_nocase ON addresses(email COLLATE NOCASE);
   CREATE INDEX IF NOT EXISTS idx_emails_provider ON emails(provider_id);
   CREATE INDEX IF NOT EXISTS idx_emails_status ON emails(status);
   CREATE INDEX IF NOT EXISTS idx_emails_sent_at ON emails(sent_at);
@@ -632,6 +747,66 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_addrownevents_address ON address_ownership_events(address_id, created_at);
   INSERT OR IGNORE INTO _migrations (id) VALUES (29);
   `,
+
+  // Migration 30: hot-path composite indexes for bounded list views.
+  // These match the query shapes used by emails ui, MCP list/export tools, and
+  // diagnostics: equality filters first, then the timestamp used for ordering.
+  `
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_read_arch_recv ON inbound_emails(is_sent, is_read, is_archived, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_sent_star_arch_recv ON inbound_emails(is_sent, is_starred, is_archived, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_arch_recv ON inbound_emails(provider_id, is_sent, is_archived, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_read_arch_recv ON inbound_emails(provider_id, is_sent, is_read, is_archived, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_star_arch_recv ON inbound_emails(provider_id, is_sent, is_starred, is_archived, received_at);
+  CREATE INDEX IF NOT EXISTS idx_emails_provider_sent ON emails(provider_id, sent_at);
+  CREATE INDEX IF NOT EXISTS idx_emails_status_sent ON emails(status, sent_at);
+  CREATE INDEX IF NOT EXISTS idx_emails_provider_status_sent ON emails(provider_id, status, sent_at);
+  CREATE INDEX IF NOT EXISTS idx_emails_from_sent ON emails(from_address, sent_at);
+  CREATE INDEX IF NOT EXISTS idx_events_provider_occurred ON events(provider_id, occurred_at);
+  CREATE INDEX IF NOT EXISTS idx_events_type_occurred ON events(type, occurred_at);
+  CREATE INDEX IF NOT EXISTS idx_events_provider_type_occurred ON events(provider_id, type, occurred_at);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (30);
+  `,
+
+  // Migration 31: denormalized recipient index for inbound mail. This avoids
+  // json_each(to_addresses) scans on every inbox source/filter/count refresh.
+  `
+  ${INBOUND_RECIPIENTS_SCHEMA_SQL}
+  ${INBOUND_RECIPIENTS_BACKFILL_SQL}
+  ${INBOUND_RECIPIENTS_TRIGGERS_SQL}
+  INSERT OR IGNORE INTO _migrations (id) VALUES (31);
+  `,
+
+  // Migration 32: standalone inbound message-id index for S3 object dedupe.
+  // The Gmail dedupe index is keyed by provider_id first; S3 sync probes by
+  // message_id alone, so it needs its own indexed seek to avoid full scans.
+  `
+  CREATE INDEX IF NOT EXISTS idx_inbound_message_id ON inbound_emails(message_id)
+    WHERE message_id IS NOT NULL;
+  INSERT OR IGNORE INTO _migrations (id) VALUES (32);
+  `,
+
+  // Migration 33: scheduler due-enrollment composite index.
+  `
+  CREATE INDEX IF NOT EXISTS idx_enrollments_due ON sequence_enrollments(status, next_send_at, id);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (33);
+  `,
+
+  // Migration 34: scheduler due-email composite index.
+  `
+  CREATE INDEX IF NOT EXISTS idx_scheduled_due ON scheduled_emails(status, scheduled_at, id);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (34);
+  `,
+
+  // Migration 35: expression indexes for display-name sender filters.
+  // These match sqlEmailAddress/sqlEmailDomain so exact sender and warming
+  // domain filters stay indexed even when stored From values include names.
+  `
+  CREATE INDEX IF NOT EXISTS idx_emails_sender_canonical_sent ON emails(${sqlEmailAddress("from_address")}, sent_at);
+  CREATE INDEX IF NOT EXISTS idx_emails_sender_domain_sent ON emails(${sqlEmailDomain("from_address")}, sent_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_sender_canonical_recv ON inbound_emails(is_sent, is_archived, ${sqlEmailAddress("from_address")}, received_at);
+  CREATE INDEX IF NOT EXISTS idx_inbound_sender_domain_recv ON inbound_emails(is_sent, is_archived, ${sqlEmailDomain("from_address")}, received_at);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (35);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -819,14 +994,40 @@ function ensureSchema(db: Database): void {
   )`);
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_addrownevents_address ON address_ownership_events(address_id, created_at)");
 
+  // Migration 30 idempotent guarantee: composite indexes for list/export/stat hot paths.
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_sent_read_arch_recv ON inbound_emails(is_sent, is_read, is_archived, received_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_sent_star_arch_recv ON inbound_emails(is_sent, is_starred, is_archived, received_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_arch_recv ON inbound_emails(provider_id, is_sent, is_archived, received_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_read_arch_recv ON inbound_emails(provider_id, is_sent, is_read, is_archived, received_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_provider_sent_star_arch_recv ON inbound_emails(provider_id, is_sent, is_starred, is_archived, received_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_emails_provider_sent ON emails(provider_id, sent_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_emails_status_sent ON emails(status, sent_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_emails_provider_status_sent ON emails(provider_id, status, sent_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_emails_from_sent ON emails(from_address, sent_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_events_provider_occurred ON events(provider_id, occurred_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_events_type_occurred ON events(type, occurred_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_events_provider_type_occurred ON events(provider_id, type, occurred_at)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_inbound_message_id ON inbound_emails(message_id) WHERE message_id IS NOT NULL");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_enrollments_due ON sequence_enrollments(status, next_send_at, id)");
+
+  // Migration 35 idempotent guarantee: expression indexes for display-name
+  // sender filters in sent mail and Gmail-synced sent mail.
+  ensureProvTable(`CREATE INDEX IF NOT EXISTS idx_emails_sender_canonical_sent ON emails(${sqlEmailAddress("from_address")}, sent_at)`);
+  ensureProvTable(`CREATE INDEX IF NOT EXISTS idx_emails_sender_domain_sent ON emails(${sqlEmailDomain("from_address")}, sent_at)`);
+  ensureProvTable(`CREATE INDEX IF NOT EXISTS idx_inbound_sender_canonical_recv ON inbound_emails(is_sent, is_archived, ${sqlEmailAddress("from_address")}, received_at)`);
+  ensureProvTable(`CREATE INDEX IF NOT EXISTS idx_inbound_sender_domain_recv ON inbound_emails(is_sent, is_archived, ${sqlEmailDomain("from_address")}, received_at)`);
+
   const ensureIndex = (sql: string) => {
     try { db.exec(sql); } catch {}
   };
 
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_domains_provider ON domains(provider_id)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_domains_domain ON domains(domain)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_domains_domain_nocase ON domains(domain COLLATE NOCASE)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_domains_provider_domain_nocase ON domains(provider_id, domain COLLATE NOCASE)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_addresses_provider ON addresses(provider_id)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_addresses_email ON addresses(email)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_addresses_email_nocase ON addresses(email COLLATE NOCASE)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_emails_provider ON emails(provider_id)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_emails_status ON emails(status)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_emails_sent_at ON emails(sent_at)");
@@ -891,6 +1092,7 @@ function ensureSchema(db: Database): void {
   )`);
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_scheduled_status ON scheduled_emails(status)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_scheduled_at ON scheduled_emails(scheduled_at)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_scheduled_due ON scheduled_emails(status, scheduled_at, id)");
 
   // Ensure groups table exists
   ensureTable(`CREATE TABLE IF NOT EXISTS groups (
@@ -976,6 +1178,7 @@ function ensureSchema(db: Database): void {
   ensureColumn("ALTER TABLE inbound_emails ADD COLUMN metadata_s3_url TEXT");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_inbound_thread ON inbound_emails(provider_thread_id)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_inbound_history ON inbound_emails(provider_history_id)");
+  ensureInboundRecipients(db);
 
   // Ensure sequences tables exist
   ensureTable(`CREATE TABLE IF NOT EXISTS sequences (
@@ -1017,6 +1220,7 @@ function ensureSchema(db: Database): void {
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_enrollments_email ON sequence_enrollments(contact_email)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_enrollments_next_send ON sequence_enrollments(next_send_at)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_enrollments_status ON sequence_enrollments(status)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_enrollments_due ON sequence_enrollments(status, next_send_at, id)");
 
   // Ensure warming_schedules table exists
   ensureTable(`CREATE TABLE IF NOT EXISTS warming_schedules (
@@ -1045,6 +1249,7 @@ function ensureSchema(db: Database): void {
   // Dedup index on inbound_emails for Gmail sync
   ensureIndex(`CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_provider_message ON inbound_emails(provider_id, message_id)
     WHERE provider_id IS NOT NULL AND message_id IS NOT NULL`);
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_inbound_message_id ON inbound_emails(message_id) WHERE message_id IS NOT NULL");
   ensureColumn("ALTER TABLE inbound_emails ADD COLUMN attachment_paths TEXT NOT NULL DEFAULT '[]'");
 
   // Ensure email_triage table exists
@@ -1091,6 +1296,25 @@ export function resetDatabase(): void {
   _db = null;
 }
 
+let transactionCounter = 0;
+
+export function runInTransaction<T>(db: Database, fn: () => T): T {
+  const savepoint = `emails_tx_${++transactionCounter}`;
+  db.exec(`SAVEPOINT ${savepoint}`);
+  try {
+    const result = fn();
+    db.exec(`RELEASE ${savepoint}`);
+    return result;
+  } catch (error) {
+    try {
+      db.exec(`ROLLBACK TO ${savepoint}`);
+    } finally {
+      db.exec(`RELEASE ${savepoint}`);
+    }
+    throw error;
+  }
+}
+
 export function now(): string {
   return new Date().toISOString();
 }
@@ -1103,7 +1327,7 @@ export function uuid(): string {
 // All call sites pass a literal; this allowlist makes that a hard guarantee.
 const RESOLVABLE_TABLES = new Set([
   "providers", "domains", "addresses", "emails", "inbound_emails", "sandbox_emails",
-  "templates", "contacts", "groups", "scheduled_emails", "sequences", "owners",
+  "templates", "contacts", "groups", "scheduled_emails", "sequences", "owners", "events",
   "aliases", "send_keys",
 ]);
 
@@ -1116,9 +1340,40 @@ export function resolvePartialId(db: Database, table: string, partialId: string)
     return row?.id ?? null;
   }
 
-  const rows = db.query(`SELECT id FROM ${table} WHERE id LIKE ?`).all(`${partialId}%`) as { id: string }[];
+  const rows = db.query(`SELECT id FROM ${table} WHERE id LIKE ? LIMIT ?`).all(`${partialId}%`, 2) as { id: string }[];
   if (rows.length === 1) {
     return rows[0]!.id;
   }
   return null;
+}
+
+export function listPartialIdMatches(db: Database, table: string, partialId: string, limit = 6): string[] {
+  if (!RESOLVABLE_TABLES.has(table)) {
+    throw new Error(`resolvePartialId: refusing unknown table '${table}'`);
+  }
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 6;
+  const rows = db
+    .query(`SELECT id FROM ${table} WHERE id LIKE ? LIMIT ?`)
+    .all(`${partialId}%`, safeLimit) as { id: string }[];
+  return rows.map((row) => row.id);
+}
+
+export function resolvePartialIdOrThrow(db: Database, table: string, partialId: string): string {
+  const value = partialId.trim();
+  if (!value) throw new Error(`Missing ID for table '${table}'.`);
+
+  const id = resolvePartialId(db, table, value);
+  if (id) return id;
+
+  const matches = listPartialIdMatches(db, table, value, 6);
+  if (matches.length === 0) {
+    throw new Error(`Could not resolve ID '${value}' in table '${table}'.`);
+  }
+
+  const preview = matches.slice(0, 5).join(", ");
+  const count = matches.length >= 6 ? "at least 6" : String(matches.length);
+  const extra = matches.length >= 6 ? " (showing first 5)" : "";
+  throw new Error(
+    `Ambiguous ID '${value}' in table '${table}' (${count} matches${extra}): ${preview}. Use a longer prefix or full ID.`,
+  );
 }

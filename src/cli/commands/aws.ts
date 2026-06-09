@@ -3,7 +3,7 @@
  */
 
 import type { Command } from "commander";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import { handleError } from "../utils.js";
 
 export function registerAwsCommands(program: Command, output: (data: unknown, formatted: string) => void): void {

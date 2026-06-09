@@ -23,7 +23,7 @@ describe("mcp/helpers resolveId", () => {
 
   it("throws table-aware not-found error", () => {
     expect(() => resolveId("providers", "missing")).toThrow(
-      "Could not resolve ID 'missing' in table 'providers' (no matching rows).",
+      "Could not resolve ID 'missing' in table 'providers'.",
     );
   });
 

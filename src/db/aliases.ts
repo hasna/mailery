@@ -9,6 +9,7 @@
  */
 import type { Database } from "./database.js";
 import { getDatabase, now, uuid } from "./database.js";
+import { safeOffset, safeOptionalLimit } from "./pagination.js";
 
 /** Sentinel local-part used to represent a catch-all. */
 export const CATCH_ALL = "*";
@@ -23,6 +24,11 @@ export interface Alias {
   protected: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface ListAliasOptions {
+  limit?: number;
+  offset?: number;
 }
 
 interface AliasRow extends Omit<Alias, "protected"> { protected?: number }
@@ -97,11 +103,31 @@ export function getAlias(id: string, db?: Database): Alias | null {
   return row ? rowToAlias(row) : null;
 }
 
-export function listAliases(domain?: string, db?: Database): Alias[] {
+export function listAliases(domain?: string, db?: Database, opts?: ListAliasOptions): Alias[] {
   const d = db || getDatabase();
+  const limit = safeOptionalLimit(opts?.limit);
+  const offset = safeOffset(opts?.offset);
   const rows = domain
-    ? d.query("SELECT * FROM aliases WHERE domain = ? ORDER BY local_part").all(domain.toLowerCase()) as AliasRow[]
-    : d.query("SELECT * FROM aliases ORDER BY (domain='*') DESC, domain, local_part").all() as AliasRow[];
+    ? (limit !== null
+        ? d.query("SELECT * FROM aliases WHERE domain = ? ORDER BY local_part LIMIT ? OFFSET ?").all(domain.toLowerCase(), limit, offset) as AliasRow[]
+        : d.query("SELECT * FROM aliases WHERE domain = ? ORDER BY local_part").all(domain.toLowerCase()) as AliasRow[])
+    : (limit !== null
+        ? d.query("SELECT * FROM aliases ORDER BY (domain='*') DESC, domain, local_part LIMIT ? OFFSET ?").all(limit, offset) as AliasRow[]
+        : d.query("SELECT * FROM aliases ORDER BY (domain='*') DESC, domain, local_part").all() as AliasRow[]);
+  return rows.map(rowToAlias);
+}
+
+/** List aliases that route to any of the given target addresses. */
+export function listAliasesByTargets(targets: Iterable<string>, db?: Database): Alias[] {
+  const normalized = [...new Set([...targets].map((target) => target.trim().toLowerCase()).filter(Boolean))];
+  if (normalized.length === 0) return [];
+  const d = db || getDatabase();
+  const placeholders = normalized.map(() => "?").join(", ");
+  const rows = d.query(
+    `SELECT * FROM aliases
+     WHERE LOWER(target_address) IN (${placeholders})
+     ORDER BY (domain='*') DESC, domain, local_part`,
+  ).all(...normalized) as AliasRow[];
   return rows.map(rowToAlias);
 }
 

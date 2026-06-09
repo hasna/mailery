@@ -5,6 +5,7 @@ import {
   createScheduledEmail,
   getScheduledEmail,
   listScheduledEmails,
+  listScheduledEmailSummaries,
   cancelScheduledEmail,
   getDueEmails,
   markSent,
@@ -97,6 +98,32 @@ describe("getScheduledEmail", () => {
     expect(found!.id).toBe(created.id);
   });
 
+  it("tolerates malformed recipient, attachment, and template JSON", () => {
+    const db = getDatabase();
+    const created = createScheduledEmail({
+      provider_id: testProviderId,
+      from_address: "sender@example.com",
+      to_addresses: ["alice@example.com"],
+      cc_addresses: ["bob@example.com"],
+      bcc_addresses: ["charlie@example.com"],
+      subject: "Bad JSON",
+      attachments_json: [{ filename: "a.txt" }],
+      template_vars: { name: "Alice" },
+      scheduled_at: "2030-01-01T00:00:00.000Z",
+    });
+    db.run(
+      "UPDATE scheduled_emails SET to_addresses = ?, cc_addresses = ?, bcc_addresses = ?, attachments_json = ?, template_vars = ? WHERE id = ?",
+      ["not-json", "{}", "not-json", "not-json", "not-json", created.id],
+    );
+
+    const found = getScheduledEmail(created.id);
+    expect(found?.to_addresses).toEqual([]);
+    expect(found?.cc_addresses).toEqual([]);
+    expect(found?.bcc_addresses).toEqual([]);
+    expect(found?.attachments_json).toEqual([]);
+    expect(found?.template_vars).toEqual({});
+  });
+
   it("returns null for unknown id", () => {
     expect(getScheduledEmail("nonexistent")).toBeNull();
   });
@@ -155,6 +182,103 @@ describe("listScheduledEmails", () => {
     const sent = listScheduledEmails({ status: "sent" });
     expect(sent.length).toBe(1);
     expect(sent[0]!.subject).toBe("Test 1");
+  });
+
+  it("paginates scheduled emails after applying status filters", () => {
+    for (let i = 0; i < 5; i++) {
+      createScheduledEmail({
+        provider_id: testProviderId,
+        from_address: "sender@example.com",
+        to_addresses: [`pending-${i}@example.com`],
+        subject: `Pending ${i}`,
+        scheduled_at: `2030-01-0${i + 1}T00:00:00.000Z`,
+      });
+    }
+    const sent = createScheduledEmail({
+      provider_id: testProviderId,
+      from_address: "sender@example.com",
+      to_addresses: ["sent@example.com"],
+      subject: "Sent",
+      scheduled_at: "2030-01-01T12:00:00.000Z",
+    });
+    markSent(sent.id);
+
+    const page = listScheduledEmails({ status: "pending", limit: 2, offset: 1 });
+
+    expect(page).toHaveLength(2);
+    expect(page.every((email) => email.status === "pending")).toBe(true);
+    expect(page.map((email) => email.subject)).not.toContain("Sent");
+  });
+});
+
+describe("listScheduledEmailSummaries", () => {
+  it("uses a lean projection and omits bodies, attachments, and template vars", () => {
+    const db = getDatabase();
+    createScheduledEmail({
+      provider_id: testProviderId,
+      from_address: "sender@example.com",
+      to_addresses: ["alice@example.com"],
+      subject: "Large scheduled payload",
+      html: `<p>${"large html ".repeat(200)}</p>`,
+      text_body: "large text ".repeat(200),
+      attachments_json: [{ filename: "large.txt", content: "secret attachment".repeat(100) }],
+      template_name: "welcome",
+      template_vars: { secret: "large template vars".repeat(100) },
+      scheduled_at: "2030-01-01T00:00:00.000Z",
+    }, db);
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") {
+          return (sql: string) => {
+            queries.push(sql);
+            return target.query(sql);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const [summary] = listScheduledEmailSummaries({ limit: 1 }, recordingDb);
+
+    expect(summary).toBeDefined();
+    expect(summary?.subject).toBe("Large scheduled payload");
+    expect(summary?.template_name).toBe("welcome");
+    expect("html" in summary!).toBe(false);
+    expect("text_body" in summary!).toBe(false);
+    expect("attachments_json" in summary!).toBe(false);
+    expect("template_vars" in summary!).toBe(false);
+    expect(JSON.stringify(summary)).not.toContain("secret attachment");
+    expect(JSON.stringify(summary)).not.toContain("large template vars");
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).not.toContain("SELECT *");
+    expect(queries[0]).not.toMatch(/\b(html|text_body|attachments_json|template_vars)\b/);
+  });
+
+  it("filters and paginates summary rows", () => {
+    for (let i = 0; i < 5; i++) {
+      createScheduledEmail({
+        provider_id: testProviderId,
+        from_address: "sender@example.com",
+        to_addresses: [`pending-${i}@example.com`],
+        subject: `Summary pending ${i}`,
+        scheduled_at: `2030-01-0${i + 1}T00:00:00.000Z`,
+      });
+    }
+    const sent = createScheduledEmail({
+      provider_id: testProviderId,
+      from_address: "sender@example.com",
+      to_addresses: ["sent@example.com"],
+      subject: "Summary sent",
+      scheduled_at: "2030-01-01T12:00:00.000Z",
+    });
+    markSent(sent.id);
+
+    const page = listScheduledEmailSummaries({ status: "pending", limit: 2, offset: 1 });
+
+    expect(page).toHaveLength(2);
+    expect(page.every((email) => email.status === "pending")).toBe(true);
+    expect(page.map((email) => email.subject)).toEqual(["Summary pending 1", "Summary pending 2"]);
   });
 });
 
@@ -249,6 +373,22 @@ describe("getDueEmails", () => {
 
     const due = getDueEmails();
     expect(due.length).toBe(0);
+  });
+
+  it("limits due emails after ordering by scheduled time", () => {
+    for (let i = 0; i < 5; i++) {
+      createScheduledEmail({
+        provider_id: testProviderId,
+        from_address: "sender@example.com",
+        to_addresses: [`due-${i}@example.com`],
+        subject: `Due ${i}`,
+        scheduled_at: `2000-01-0${i + 1}T00:00:00.000Z`,
+      });
+    }
+
+    const due = getDueEmails({ limit: 2 });
+
+    expect(due.map((email) => email.subject)).toEqual(["Due 0", "Due 1"]);
   });
 });
 

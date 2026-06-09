@@ -1,12 +1,23 @@
 // API route handlers — contacts-groups.ts
 import { listContacts, suppressContact, unsuppressContact } from '../../db/contacts.js';
-import { listTemplates, createTemplate, deleteTemplate } from '../../db/templates.js';
-import { listGroups, createGroup, deleteGroup, getGroupByName, listMembers, addMember, removeMember } from '../../db/groups.js';
-import { listScheduledEmails, cancelScheduledEmail } from '../../db/scheduled.js';
+import { listTemplateSummaries, getTemplate, createTemplate, deleteTemplate } from '../../db/templates.js';
+import { listGroups, createGroup, deleteGroup, getGroupByName, listMemberSummaries, getMember, addMember, removeMember } from '../../db/groups.js';
+import { listScheduledEmailSummaries, cancelScheduledEmail } from '../../db/scheduled.js';
 import { getEmailContent } from '../../db/email-content.js';
 import { getAnalytics } from '../../lib/analytics.js';
 import { exportEmailsCsv, exportEmailsJson, exportEventsCsv, exportEventsJson } from '../../lib/export.js';
-import { json, notFound, badRequest, internalError, resolveId, parseBody } from './helpers.js';
+import { json, notFound, badRequest, internalError, resolveId, resolveOptionalId, parseBody, queryInteger, queryPage } from './helpers.js';
+
+const EXPORT_DEFAULT_LIMIT = 1000;
+const EXPORT_MAX_LIMIT = 5000;
+
+function resolveGroupRef(raw: string): { id: string } | null {
+  const ref = decodeURIComponent(raw);
+  const group = getGroupByName(ref);
+  if (group) return group;
+  const id = resolveId("groups", ref);
+  return id ? { id } : null;
+}
 
 export async function handle(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
 // ─── CONTACTS ──────────────────────────────────────────────────────────
@@ -15,7 +26,10 @@ export async function handle(req: Request, url: URL, path: string, method: strin
 if (path === "/api/contacts" && method === "GET") {
   try {
     const suppressedParam = url.searchParams.get("suppressed");
-    const opts = suppressedParam !== null ? { suppressed: suppressedParam === "true" } : undefined;
+    const opts = {
+      ...(suppressedParam !== null ? { suppressed: suppressedParam === "true" } : {}),
+      ...queryPage(url, 100),
+    };
     return json(listContacts(opts));
   } catch (e) { return internalError(e); }
 }
@@ -43,7 +57,7 @@ if (contactUnsuppressMatch && method === "POST") {
 // GET /api/templates
 if (path === "/api/templates" && method === "GET") {
   try {
-    return json(listTemplates());
+    return json(listTemplateSummaries(undefined, queryPage(url, 100)));
   } catch (e) { return internalError(e); }
 }
 
@@ -63,8 +77,17 @@ if (path === "/api/templates" && method === "POST") {
   } catch (e) { return internalError(e); }
 }
 
-// DELETE /api/templates/:id
+// GET /api/templates/:id
 const templateMatch = path.match(/^\/api\/templates\/([^/]+)$/);
+if (templateMatch && method === "GET") {
+  try {
+    const template = getTemplate(decodeURIComponent(templateMatch[1]!));
+    if (!template) return notFound("Template not found");
+    return json(template);
+  } catch (e) { return internalError(e); }
+}
+
+// DELETE /api/templates/:id
 if (templateMatch && method === "DELETE") {
   try {
     const deleted = deleteTemplate(decodeURIComponent(templateMatch[1]!));
@@ -78,7 +101,7 @@ if (templateMatch && method === "DELETE") {
 // GET /api/groups
 if (path === "/api/groups" && method === "GET") {
   try {
-    return json(listGroups());
+    return json(listGroups(undefined, queryPage(url, 100)));
   } catch (e) { return internalError(e); }
 }
 
@@ -96,22 +119,16 @@ if (path === "/api/groups" && method === "POST") {
 const groupMembersMatch = path.match(/^\/api\/groups\/([^/]+)\/members$/);
 if (groupMembersMatch && method === "GET") {
   try {
-    const group = getGroupByName(groupMembersMatch[1]!) ?? (() => {
-      const id = resolveId("groups", groupMembersMatch[1]!);
-      return id ? { id } as { id: string } : null;
-    })();
+    const group = resolveGroupRef(groupMembersMatch[1]!);
     if (!group) return notFound("Group not found");
-    return json(listMembers(group.id));
+    return json(listMemberSummaries(group.id, undefined, queryPage(url, 100)));
   } catch (e) { return internalError(e); }
 }
 
 // POST /api/groups/:id/members
 if (groupMembersMatch && method === "POST") {
   try {
-    const group = getGroupByName(groupMembersMatch[1]!) ?? (() => {
-      const id = resolveId("groups", groupMembersMatch[1]!);
-      return id ? { id } as { id: string } : null;
-    })();
+    const group = resolveGroupRef(groupMembersMatch[1]!);
     if (!group) return notFound("Group not found");
     const body = await parseBody(req) as Record<string, unknown>;
     if (!body.email) return badRequest("email is required");
@@ -122,12 +139,19 @@ if (groupMembersMatch && method === "POST") {
 
 // DELETE /api/groups/:id/members/:email
 const groupMemberDeleteMatch = path.match(/^\/api\/groups\/([^/]+)\/members\/([^/]+)$/);
+if (groupMemberDeleteMatch && method === "GET") {
+  try {
+    const group = resolveGroupRef(groupMemberDeleteMatch[1]!);
+    if (!group) return notFound("Group not found");
+    const member = getMember(group.id, decodeURIComponent(groupMemberDeleteMatch[2]!));
+    if (!member) return notFound("Member not found");
+    return json(member);
+  } catch (e) { return internalError(e); }
+}
+
 if (groupMemberDeleteMatch && method === "DELETE") {
   try {
-    const group = getGroupByName(groupMemberDeleteMatch[1]!) ?? (() => {
-      const id = resolveId("groups", groupMemberDeleteMatch[1]!);
-      return id ? { id } as { id: string } : null;
-    })();
+    const group = resolveGroupRef(groupMemberDeleteMatch[1]!);
     if (!group) return notFound("Group not found");
     const removed = removeMember(group.id, decodeURIComponent(groupMemberDeleteMatch[2]!));
     if (!removed) return notFound("Member not found");
@@ -139,10 +163,7 @@ if (groupMemberDeleteMatch && method === "DELETE") {
 const groupMatch = path.match(/^\/api\/groups\/([^/]+)$/);
 if (groupMatch && method === "DELETE") {
   try {
-    const group = getGroupByName(groupMatch[1]!) ?? (() => {
-      const id = resolveId("groups", groupMatch[1]!);
-      return id ? { id } as { id: string } : null;
-    })();
+    const group = resolveGroupRef(groupMatch[1]!);
     if (!group) return notFound("Group not found");
     deleteGroup(group.id);
     return json({ ok: true });
@@ -155,8 +176,11 @@ if (groupMatch && method === "DELETE") {
 if (path === "/api/scheduled" && method === "GET") {
   try {
     const statusParam = url.searchParams.get("status") as "pending" | "sent" | "cancelled" | null;
-    const opts = statusParam ? { status: statusParam } : undefined;
-    return json(listScheduledEmails(opts));
+    const opts = {
+      ...(statusParam ? { status: statusParam } : {}),
+      ...queryPage(url, 100),
+    };
+    return json(listScheduledEmailSummaries(opts));
   } catch (e) { return internalError(e); }
 }
 
@@ -177,9 +201,8 @@ if (scheduledMatch && method === "DELETE") {
 // GET /api/analytics?provider_id=x&period=30d
 if (path === "/api/analytics" && method === "GET") {
   try {
-    const providerId = url.searchParams.get("provider_id") ?? undefined;
     const period = url.searchParams.get("period") ?? "30d";
-    const resolvedId = providerId ? resolveId("providers", providerId) ?? providerId : undefined;
+    const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
     return json(getAnalytics(resolvedId, period));
   } catch (e) { return internalError(e); }
 }
@@ -204,17 +227,20 @@ if (emailContentMatch && method === "GET") {
 if (path === "/api/export/emails" && method === "GET") {
   try {
     const format = url.searchParams.get("format") ?? "json";
-    const providerId = url.searchParams.get("provider_id") ?? undefined;
+    const providerId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
+    const fromAddress = url.searchParams.get("from_address") ?? url.searchParams.get("from") ?? undefined;
     const since = url.searchParams.get("since") ?? undefined;
-    const resolvedId = providerId ? resolveId("providers", providerId) ?? providerId : undefined;
-    const filters = { provider_id: resolvedId, since };
+    const until = url.searchParams.get("until") ?? undefined;
+    const limit = queryInteger(url, "limit", EXPORT_DEFAULT_LIMIT, { min: 1, max: EXPORT_MAX_LIMIT });
+    const offset = queryInteger(url, "offset", 0, { min: 0 });
+    const filters = { provider_id: providerId, from_address: fromAddress, since, until, limit, offset };
     if (format === "csv") {
       return new Response(exportEmailsCsv(filters), {
-        headers: { "Content-Type": "text/csv", "Access-Control-Allow-Origin": "*" },
+        headers: { "Content-Type": "text/csv", "Access-Control-Allow-Origin": "*", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
       });
     }
     return new Response(exportEmailsJson(filters), {
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
     });
   } catch (e) { return internalError(e); }
 }
@@ -223,17 +249,19 @@ if (path === "/api/export/emails" && method === "GET") {
 if (path === "/api/export/events" && method === "GET") {
   try {
     const format = url.searchParams.get("format") ?? "json";
-    const providerId = url.searchParams.get("provider_id") ?? undefined;
+    const providerId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
     const since = url.searchParams.get("since") ?? undefined;
-    const resolvedId = providerId ? resolveId("providers", providerId) ?? providerId : undefined;
-    const filters = { provider_id: resolvedId, since };
+    const until = url.searchParams.get("until") ?? undefined;
+    const limit = queryInteger(url, "limit", EXPORT_DEFAULT_LIMIT, { min: 1, max: EXPORT_MAX_LIMIT });
+    const offset = queryInteger(url, "offset", 0, { min: 0 });
+    const filters = { provider_id: providerId, since, until, limit, offset };
     if (format === "csv") {
       return new Response(exportEventsCsv(filters), {
-        headers: { "Content-Type": "text/csv", "Access-Control-Allow-Origin": "*" },
+        headers: { "Content-Type": "text/csv", "Access-Control-Allow-Origin": "*", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
       });
     }
     return new Response(exportEventsJson(filters), {
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "X-Export-Limit": String(limit), "X-Export-Offset": String(offset) },
     });
   } catch (e) { return internalError(e); }
 }

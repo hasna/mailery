@@ -1,5 +1,7 @@
 import type { Database } from "./database.js";
 import { getDatabase, uuid, now } from "./database.js";
+import { parseJsonArray, parseJsonObject } from "./json.js";
+import { safeOffset, safeOptionalLimit } from "./pagination.js";
 
 export type ScheduledStatus = "pending" | "sent" | "cancelled" | "failed";
 
@@ -23,6 +25,8 @@ export interface ScheduledEmail {
   created_at: string;
 }
 
+export type ScheduledEmailSummary = Omit<ScheduledEmail, "html" | "text_body" | "attachments_json" | "template_vars">;
+
 interface ScheduledEmailRow {
   id: string;
   provider_id: string;
@@ -43,14 +47,62 @@ interface ScheduledEmailRow {
   created_at: string;
 }
 
+type ScheduledEmailSummaryRow = Omit<ScheduledEmailRow, "html" | "text_body" | "attachments_json" | "template_vars">;
+
+const SCHEDULED_EMAIL_COLUMNS = [
+  "id",
+  "provider_id",
+  "from_address",
+  "to_addresses",
+  "cc_addresses",
+  "bcc_addresses",
+  "reply_to",
+  "subject",
+  "html",
+  "text_body",
+  "attachments_json",
+  "template_name",
+  "template_vars",
+  "scheduled_at",
+  "status",
+  "error",
+  "created_at",
+].join(", ");
+
+const SCHEDULED_EMAIL_SUMMARY_COLUMNS = [
+  "id",
+  "provider_id",
+  "from_address",
+  "to_addresses",
+  "cc_addresses",
+  "bcc_addresses",
+  "reply_to",
+  "subject",
+  "template_name",
+  "scheduled_at",
+  "status",
+  "error",
+  "created_at",
+].join(", ");
+
 function rowToScheduledEmail(row: ScheduledEmailRow): ScheduledEmail {
   return {
     ...row,
-    to_addresses: JSON.parse(row.to_addresses || "[]") as string[],
-    cc_addresses: JSON.parse(row.cc_addresses || "[]") as string[],
-    bcc_addresses: JSON.parse(row.bcc_addresses || "[]") as string[],
-    attachments_json: JSON.parse(row.attachments_json || "[]") as unknown[],
-    template_vars: row.template_vars ? (JSON.parse(row.template_vars) as Record<string, string>) : null,
+    to_addresses: parseJsonArray<string>(row.to_addresses),
+    cc_addresses: parseJsonArray<string>(row.cc_addresses),
+    bcc_addresses: parseJsonArray<string>(row.bcc_addresses),
+    attachments_json: parseJsonArray(row.attachments_json),
+    template_vars: row.template_vars ? parseJsonObject<Record<string, string>>(row.template_vars) : null,
+    status: row.status as ScheduledStatus,
+  };
+}
+
+function rowToScheduledEmailSummary(row: ScheduledEmailSummaryRow): ScheduledEmailSummary {
+  return {
+    ...row,
+    to_addresses: parseJsonArray<string>(row.to_addresses),
+    cc_addresses: parseJsonArray<string>(row.cc_addresses),
+    bcc_addresses: parseJsonArray<string>(row.bcc_addresses),
     status: row.status as ScheduledStatus,
   };
 }
@@ -104,21 +156,59 @@ export function createScheduledEmail(
 
 export function getScheduledEmail(id: string, db?: Database): ScheduledEmail | null {
   const d = db || getDatabase();
-  const row = d.query("SELECT * FROM scheduled_emails WHERE id = ?").get(id) as ScheduledEmailRow | null;
+  const row = d.query(`SELECT ${SCHEDULED_EMAIL_COLUMNS} FROM scheduled_emails WHERE id = ?`).get(id) as ScheduledEmailRow | null;
   if (!row) return null;
   return rowToScheduledEmail(row);
 }
 
-export function listScheduledEmails(opts?: { status?: ScheduledStatus }, db?: Database): ScheduledEmail[] {
+export interface ListScheduledEmailOptions {
+  status?: ScheduledStatus;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ListDueEmailOptions {
+  limit?: number;
+}
+
+function isDatabase(value: unknown): value is Database {
+  return Boolean(value && typeof (value as { query?: unknown }).query === "function");
+}
+
+export function listScheduledEmails(opts?: ListScheduledEmailOptions, db?: Database): ScheduledEmail[] {
   const d = db || getDatabase();
+  const conditions: string[] = [];
+  const params: Array<string | number> = [];
   if (opts?.status) {
-    const rows = d
-      .query("SELECT * FROM scheduled_emails WHERE status = ? ORDER BY scheduled_at ASC")
-      .all(opts.status) as ScheduledEmailRow[];
-    return rows.map(rowToScheduledEmail);
+    conditions.push("status = ?");
+    params.push(opts.status);
   }
-  const rows = d.query("SELECT * FROM scheduled_emails ORDER BY scheduled_at ASC").all() as ScheduledEmailRow[];
+  const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
+  const limit = safeOptionalLimit(opts?.limit);
+  const offset = safeOffset(opts?.offset);
+  if (limit !== null) params.push(limit, offset);
+  const rows = d
+    .query(`SELECT ${SCHEDULED_EMAIL_COLUMNS} FROM scheduled_emails${where} ORDER BY scheduled_at ASC${limit !== null ? " LIMIT ? OFFSET ?" : ""}`)
+    .all(...params) as ScheduledEmailRow[];
   return rows.map(rowToScheduledEmail);
+}
+
+export function listScheduledEmailSummaries(opts?: ListScheduledEmailOptions, db?: Database): ScheduledEmailSummary[] {
+  const d = db || getDatabase();
+  const conditions: string[] = [];
+  const params: Array<string | number> = [];
+  if (opts?.status) {
+    conditions.push("status = ?");
+    params.push(opts.status);
+  }
+  const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
+  const limit = safeOptionalLimit(opts?.limit);
+  const offset = safeOffset(opts?.offset);
+  if (limit !== null) params.push(limit, offset);
+  const rows = d
+    .query(`SELECT ${SCHEDULED_EMAIL_SUMMARY_COLUMNS} FROM scheduled_emails${where} ORDER BY scheduled_at ASC${limit !== null ? " LIMIT ? OFFSET ?" : ""}`)
+    .all(...params) as ScheduledEmailSummaryRow[];
+  return rows.map(rowToScheduledEmailSummary);
 }
 
 export function cancelScheduledEmail(id: string, db?: Database): boolean {
@@ -130,12 +220,20 @@ export function cancelScheduledEmail(id: string, db?: Database): boolean {
   return result.changes > 0;
 }
 
-export function getDueEmails(db?: Database): ScheduledEmail[] {
-  const d = db || getDatabase();
+export function getDueEmails(db?: Database): ScheduledEmail[];
+export function getDueEmails(opts?: ListDueEmailOptions, db?: Database): ScheduledEmail[];
+export function getDueEmails(optsOrDb?: ListDueEmailOptions | Database, maybeDb?: Database): ScheduledEmail[] {
+  const d = isDatabase(optsOrDb) ? optsOrDb : maybeDb || getDatabase();
+  const opts = isDatabase(optsOrDb) ? undefined : optsOrDb;
   const currentTime = now();
+  const limit = safeOptionalLimit(opts?.limit);
+  const params: Array<string | number> = [currentTime];
+  if (limit !== null) params.push(limit);
   const rows = d
-    .query("SELECT * FROM scheduled_emails WHERE status = 'pending' AND scheduled_at <= ? ORDER BY scheduled_at ASC")
-    .all(currentTime) as ScheduledEmailRow[];
+    .query(`SELECT ${SCHEDULED_EMAIL_COLUMNS} FROM scheduled_emails
+      WHERE status = 'pending' AND scheduled_at <= ?
+      ORDER BY scheduled_at ASC, id ASC${limit !== null ? " LIMIT ?" : ""}`)
+    .all(...params) as ScheduledEmailRow[];
   return rows.map(rowToScheduledEmail);
 }
 

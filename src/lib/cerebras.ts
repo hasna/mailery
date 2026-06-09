@@ -3,6 +3,10 @@
  * Uses the Cerebras Cloud REST API for fast inference.
  */
 
+import { CerebrasError } from "./cerebras-error.js";
+
+export { CerebrasError } from "./cerebras-error.js";
+
 export interface CerebrasMessage {
   role: "system" | "user" | "assistant";
   content: string;
@@ -35,17 +39,6 @@ export interface CerebrasResponse {
   model: string;
   choices: CerebrasChoice[];
   usage: CerebrasUsage;
-}
-
-export class CerebrasError extends Error {
-  constructor(
-    message: string,
-    public status?: number,
-    public code?: string,
-  ) {
-    super(message);
-    this.name = "CerebrasError";
-  }
 }
 
 const DEFAULT_MODEL = "llama-4-scout-17b-16e-instruct";

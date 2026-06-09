@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { resetDatabase, closeDatabase, getDatabase, uuid } from "../db/database.js";
 import { getGmailSyncState, setGmailSyncState } from "../db/gmail-sync-state.js";
 
@@ -32,11 +35,30 @@ mock.module("@aws-sdk/client-s3", () => {
       this.input = input;
     }
   }
+  class CreateBucketCommand extends PutObjectCommand {}
+  class HeadBucketCommand extends PutObjectCommand {}
   class HeadObjectCommand extends PutObjectCommand {}
   class GetObjectCommand extends PutObjectCommand {}
   class ListObjectsV2Command extends PutObjectCommand {}
   class CopyObjectCommand extends PutObjectCommand {}
-  return { S3Client, PutObjectCommand, HeadObjectCommand, GetObjectCommand, ListObjectsV2Command, CopyObjectCommand };
+  class PutBucketPolicyCommand extends PutObjectCommand {}
+  class PutBucketVersioningCommand extends PutObjectCommand {}
+  class PutBucketEncryptionCommand extends PutObjectCommand {}
+  class PutPublicAccessBlockCommand extends PutObjectCommand {}
+  return {
+    S3Client,
+    CopyObjectCommand,
+    CreateBucketCommand,
+    GetObjectCommand,
+    HeadBucketCommand,
+    HeadObjectCommand,
+    ListObjectsV2Command,
+    PutBucketEncryptionCommand,
+    PutBucketPolicyCommand,
+    PutBucketVersioningCommand,
+    PutObjectCommand,
+    PutPublicAccessBlockCommand,
+  };
 });
 
 const { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory } = await import("./gmail-sync.js");
@@ -44,6 +66,17 @@ const { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory } = await impor
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const DATE = "Fri, 20 Mar 2026 10:00:00 +0000";
+const ARCHIVE_ENV_NAMES = [
+  "HASNA_EMAILS_ARCHIVE_S3_BUCKET",
+  "HASNA_EMAILS_ARCHIVE_S3_REGION",
+  "HASNA_EMAILS_ARCHIVE_S3_PREFIX",
+  "EMAILS_ARCHIVE_S3_BUCKET",
+  "EMAILS_ARCHIVE_S3_REGION",
+  "EMAILS_ARCHIVE_S3_PREFIX",
+] as const;
+let originalHome: string | undefined;
+let originalArchiveEnv: Partial<Record<(typeof ARCHIVE_ENV_NAMES)[number], string | undefined>> = {};
+let tmpHome = "";
 
 function makeListOutput(msgs: { id: string; from?: string; subject?: string }[]): string {
   return JSON.stringify(msgs.map((m) => ({ id: m.id, from: m.from ?? "a@b.com", subject: m.subject ?? "S", date: DATE })));
@@ -111,8 +144,27 @@ function setMock(
   });
 }
 
-beforeEach(() => mockRun.mockReset());
-afterEach(() => { closeDatabase(); delete process.env["EMAILS_DB_PATH"]; });
+beforeEach(() => {
+  mockRun.mockReset();
+  originalHome = process.env["HOME"];
+  originalArchiveEnv = Object.fromEntries(ARCHIVE_ENV_NAMES.map((name) => [name, process.env[name]]));
+  tmpHome = mkdtempSync(join(tmpdir(), "emails-gmail-sync-"));
+  process.env["HOME"] = tmpHome;
+  for (const name of ARCHIVE_ENV_NAMES) delete process.env[name];
+});
+
+afterEach(() => {
+  closeDatabase();
+  delete process.env["EMAILS_DB_PATH"];
+  if (originalHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = originalHome;
+  for (const name of ARCHIVE_ENV_NAMES) {
+    const value = originalArchiveEnv[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+  if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
+});
 
 // ─── syncGmailInbox ───────────────────────────────────────────────────────────
 
@@ -137,6 +189,74 @@ describe("syncGmailInbox", () => {
     expect(r2.skipped).toBe(1);
   });
 
+  it("batch-skips known page message ids without fetching details", async () => {
+    const { db, providerId } = setupDb();
+    const messages = [{ id: "msg1" }, { id: "msg2" }, { id: "msg3" }];
+    setMock(messages);
+    await syncGmailInbox({ providerId, db });
+
+    mockRun.mockReset();
+    mockRun.mockImplementation(async (operationArgs: { operation: string }) => {
+      if (operationArgs.operation === "messages.list") {
+        const data = JSON.parse(makeListOutput(messages));
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      if (operationArgs.operation === "messages.read") {
+        return { connector: "gmail", operation: operationArgs.operation, success: false, stdout: "", stderr: "should not read skipped messages", exitCode: 1 };
+      }
+      return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
+    });
+
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    const result = await syncGmailInbox({ providerId, db: recordingDb });
+
+    expect(result.synced).toBe(0);
+    expect(result.skipped).toBe(3);
+    expect(result.errors).toHaveLength(0);
+    expect(mockRun.mock.calls.filter((call) => call[0]?.operation === "messages.read")).toHaveLength(0);
+    expect(queries.filter((sql) => sql.includes("message_id IN"))).toHaveLength(1);
+    expect(queries.filter((sql) => sql.includes("provider_id = ? AND message_id = ?"))).toHaveLength(0);
+  });
+
+  it("claims duplicate message refs once before concurrent detail fetches", async () => {
+    const { db, providerId } = setupDb();
+    let reads = 0;
+    mockRun.mockImplementation(async (operationArgs: {
+      operation: string;
+      input?: Record<string, unknown> & { args?: Array<string | number | boolean> };
+    }) => {
+      if (operationArgs.operation === "messages.list") {
+        const data = JSON.parse(makeListOutput([{ id: "dup-msg" }, { id: "dup-msg" }]));
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      if (operationArgs.operation === "messages.read") {
+        reads++;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const id = String(operationArgs.input?.args?.[0] ?? "x");
+        const data = JSON.parse(makeReadOutput({ id }));
+        return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: JSON.stringify(data), stderr: "", exitCode: 0, data };
+      }
+      return { connector: "gmail", operation: operationArgs.operation, success: true, stdout: "[]", stderr: "", exitCode: 0, data: [] };
+    });
+
+    const result = await syncGmailInbox({ providerId, db, messageConcurrency: 2 });
+
+    expect(result.synced).toBe(1);
+    expect(result.skipped).toBe(1);
+    expect(reads).toBe(1);
+  });
+
   it("stores text and html body separately", async () => {
     const { db, providerId } = setupDb();
     // Provide both text body and HTML body — mock returns them for separate calls
@@ -145,6 +265,16 @@ describe("syncGmailInbox", () => {
     const row = db.query("SELECT text_body, html_body FROM inbound_emails WHERE message_id = 'msg1'").get() as { text_body: string; html_body: string } | null;
     expect(row!.text_body).toBe("plain text");
     expect(row!.html_body).toBe("<b>html</b>");
+  });
+
+  it("does not archive to S3 unless an archive bucket is explicitly enabled", async () => {
+    const { db, providerId } = setupDb();
+    setMock([{ id: "msg1", body: "plain text", htmlBody: "<b>html</b>" }]);
+
+    const result = await syncGmailInbox({ providerId, db });
+
+    expect(result.synced).toBe(1);
+    expect(mockRun.mock.calls.some((call) => call[0]?.operation === "messages.getRaw")).toBe(false);
   });
 
   it("uses the first full message payload for body and attachment metadata", async () => {

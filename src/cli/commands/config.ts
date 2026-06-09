@@ -1,6 +1,7 @@
 import type { Command } from "commander";
-import chalk from "chalk";
-import { loadConfig, saveConfig, getConfigValue, setConfigValue } from "../../lib/config.js";
+import chalk from "../../lib/chalk-lite.js";
+import { CANONICAL_OPEN_EMAILS_S3_BUCKET, CANONICAL_OPEN_EMAILS_S3_REGION, loadConfig, saveConfig, getConfigValue, setConfigValue } from "../../lib/config.js";
+import { redactSecrets } from "../../lib/redaction.js";
 import { handleError } from "../utils.js";
 
 const KNOWN_KEYS: { key: string; description: string; example: string }[] = [
@@ -10,12 +11,19 @@ const KNOWN_KEYS: { key: string; description: string; example: string }[] = [
   { key: "gmail_s3_bucket", description: "S3 bucket name for attachment storage (requires gmail_attachment_storage=s3)", example: "my-email-archive" },
   { key: "gmail_s3_prefix", description: "S3 key prefix for attachments (default: emails)", example: "emails" },
   { key: "gmail_s3_region", description: "AWS region for S3 uploads (default: us-east-1)", example: "us-east-1" },
-  { key: "gmail_archive_s3_region", description: "AWS region for Gmail archive uploads (default: us-west-2)", example: "us-west-2" },
+  { key: "gmail_archive_s3_bucket", description: "S3 bucket for durable Gmail archive uploads", example: CANONICAL_OPEN_EMAILS_S3_BUCKET },
+  { key: "gmail_archive_s3_region", description: "AWS region for Gmail archive uploads", example: CANONICAL_OPEN_EMAILS_S3_REGION },
+  { key: "gmail_archive_s3_prefix", description: "S3 key prefix for Gmail archive uploads (default: gmail)", example: "gmail" },
   { key: "cloudflare_api_token", description: "Cloudflare API token for auto DNS setup (also reads CLOUDFLARE_API_TOKEN env var)", example: "abc123..." },
-  { key: "aws_s3_inbound_bucket", description: "S3 bucket name used by SES for inbound email storage", example: "my-emails-bucket" },
-  { key: "aws_s3_inbound_prefix", description: "S3 key prefix for inbound emails (default: inbound/<domain>/)", example: "inbound/example.com/" },
-  { key: "aws_s3_inbound_region", description: "AWS region for inbound S3 bucket (default: us-east-1)", example: "us-east-1" },
+  { key: "inbound_s3_bucket", description: "S3 bucket name used by SES for inbound email storage", example: "my-emails-bucket" },
+  { key: "inbound_s3_prefix", description: "S3 key prefix for inbound emails (default: inbound/<domain>/)", example: "inbound/example.com/" },
+  { key: "inbound_s3_region", description: "AWS region for inbound S3 bucket (default: us-east-1)", example: "us-east-1" },
+  { key: "inbound_s3_profile", description: "AWS profile for inbound S3 sync when not using provider credentials", example: "hasna-xyz-infra" },
 ];
+
+function redactConfigEntry(key: string, value: unknown): unknown {
+  return (redactSecrets({ [key]: value }) as Record<string, unknown>)[key];
+}
 
 export function registerConfigCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const configCmd = program.command("config").description("Manage configuration");
@@ -28,7 +36,7 @@ export function registerConfigCommands(program: Command, output: (data: unknown,
         let parsed: unknown;
         try { parsed = JSON.parse(value); } catch { parsed = value; }
         setConfigValue(key, parsed);
-        console.log(chalk.green(`✓ ${key} = ${JSON.stringify(parsed)}`));
+        console.log(chalk.green(`✓ ${key} = ${JSON.stringify(redactConfigEntry(key, parsed))}`));
       } catch (e) { handleError(e); }
     });
 
@@ -39,7 +47,7 @@ export function registerConfigCommands(program: Command, output: (data: unknown,
       try {
         const value = getConfigValue(key);
         if (value === undefined) { console.log(chalk.dim(`${key} is not set`)); }
-        else { console.log(`${key} = ${JSON.stringify(value)}`); }
+        else { console.log(`${key} = ${JSON.stringify(redactConfigEntry(key, value))}`); }
       } catch (e) { handleError(e); }
     });
 
@@ -67,10 +75,11 @@ export function registerConfigCommands(program: Command, output: (data: unknown,
         const config = loadConfig();
         const keys = Object.keys(config);
         if (keys.length === 0) { output({}, chalk.dim("No config values set. Run 'emails config keys' to see available keys.")); return; }
+        const redacted = redactSecrets(config);
         console.log(chalk.bold("\nConfig:"));
-        for (const key of keys) { console.log(`  ${chalk.cyan(key.padEnd(32))} ${JSON.stringify(config[key])}`); }
+        for (const key of keys) { console.log(`  ${chalk.cyan(key.padEnd(32))} ${JSON.stringify(redacted[key])}`); }
         console.log();
-        output(config, "");
+        output(redacted, "");
       } catch (e) { handleError(e); }
     });
 

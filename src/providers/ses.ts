@@ -7,12 +7,19 @@ import {
   BatchGetMetricDataCommand,
   PutEmailIdentityMailFromAttributesCommand,
 } from "@aws-sdk/client-sesv2";
+import {
+  SESClient as SESClassicClient,
+  GetIdentityVerificationAttributesCommand,
+  VerifyDomainDkimCommand,
+  VerifyDomainIdentityCommand,
+} from "@aws-sdk/client-ses";
 import type { DnsRecord, DnsStatus, Provider, SendEmailOptions, Stats } from "../types/index.js";
 import { ProviderConfigError } from "../types/index.js";
 import type { ProviderAdapter, RemoteAddress, RemoteDomain, RemoteEvent } from "./interface.js";
 
 export class SESAdapter implements ProviderAdapter {
   private client: SESv2Client;
+  private classicClient: SESClassicClient;
   private providerId: string;
 
   constructor(provider: Provider) {
@@ -25,12 +32,15 @@ export class SESAdapter implements ProviderAdapter {
     }
 
     const clientConfig: ConstructorParameters<typeof SESv2Client>[0] = { region };
+    const classicClientConfig: ConstructorParameters<typeof SESClassicClient>[0] = { region };
 
     if (accessKeyId && secretAccessKey) {
       clientConfig.credentials = { accessKeyId, secretAccessKey };
+      classicClientConfig.credentials = { accessKeyId, secretAccessKey };
     }
 
     this.client = new SESv2Client(clientConfig);
+    this.classicClient = new SESClassicClient(classicClientConfig);
     this.providerId = provider.id;
   }
 
@@ -49,11 +59,10 @@ export class SESAdapter implements ProviderAdapter {
           new GetEmailIdentityCommand({ EmailIdentity: identity.IdentityName }),
         );
         const dkimStatus = this.mapDkimStatus(detail.DkimAttributes?.Status);
-        const verified = detail.VerifiedForSendingStatus ?? false;
         domains.push({
           domain: identity.IdentityName,
           dkim_status: dkimStatus,
-          spf_status: verified ? "verified" : "pending",
+          spf_status: this.mapIdentityStatus(detail.VerificationStatus, detail.VerifiedForSendingStatus),
           dmarc_status: "pending",
         });
       } catch {
@@ -70,6 +79,9 @@ export class SESAdapter implements ProviderAdapter {
 
   async getDnsRecords(domain: string): Promise<DnsRecord[]> {
     const records: DnsRecord[] = [];
+
+    const identityRecord = await this.getDomainIdentityDnsRecord(domain);
+    if (identityRecord) records.push(identityRecord);
 
     try {
       const detail = await this.client.send(
@@ -114,15 +126,37 @@ export class SESAdapter implements ProviderAdapter {
         new GetEmailIdentityCommand({ EmailIdentity: domain }),
       );
       const dkimStatus = this.mapDkimStatus(detail.DkimAttributes?.Status);
-      const verified = detail.VerifiedForSendingStatus ?? false;
       return {
         dkim: dkimStatus,
-        spf: verified ? "verified" : "pending",
+        spf: this.mapIdentityStatus(detail.VerificationStatus, detail.VerifiedForSendingStatus),
         dmarc: "pending",
       };
     } catch {
       return { dkim: "pending", spf: "pending", dmarc: "pending" };
     }
+  }
+
+  async reinitiateDomainVerification(domain: string): Promise<DnsRecord[]> {
+    const identity = await this.classicClient.send(
+      new VerifyDomainIdentityCommand({ Domain: domain }),
+    );
+    const dkim = await this.classicClient.send(
+      new VerifyDomainDkimCommand({ Domain: domain }),
+    );
+
+    const records: DnsRecord[] = [];
+    if (identity.VerificationToken) {
+      records.push(this.createIdentityDnsRecord(domain, identity.VerificationToken));
+    }
+    for (const token of dkim.DkimTokens ?? []) {
+      records.push({
+        type: "CNAME",
+        name: `${token}._domainkey.${domain}`,
+        value: `${token}.dkim.amazonses.com`,
+        purpose: "DKIM",
+      });
+    }
+    return records;
   }
 
   async addDomain(domain: string): Promise<void> {
@@ -154,6 +188,30 @@ export class SESAdapter implements ProviderAdapter {
       }),
     );
     return mailFrom;
+  }
+
+  private async getDomainIdentityDnsRecord(domain: string): Promise<DnsRecord | null> {
+    try {
+      const result = await this.classicClient.send(
+        new GetIdentityVerificationAttributesCommand({ Identities: [domain] }),
+      );
+      const attributes = result.VerificationAttributes ?? {};
+      const match = attributes[domain] ?? Object.entries(attributes)
+        .find(([identity]) => identity.toLowerCase() === domain.toLowerCase())?.[1];
+      const token = match?.VerificationToken?.trim();
+      return token ? this.createIdentityDnsRecord(domain, token) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private createIdentityDnsRecord(domain: string, token: string): DnsRecord {
+    return {
+      type: "TXT",
+      name: `_amazonses.${domain}`,
+      value: token,
+      purpose: "SES_IDENTITY",
+    };
   }
 
   async listAddresses(): Promise<RemoteAddress[]> {
@@ -332,6 +390,13 @@ export class SESAdapter implements ProviderAdapter {
   }
 
   private mapDkimStatus(status?: string): DnsStatus {
+    if (status === "SUCCESS") return "verified";
+    if (status === "FAILED" || status === "TEMPORARY_FAILURE") return "failed";
+    return "pending";
+  }
+
+  private mapIdentityStatus(status?: string, verified?: boolean): DnsStatus {
+    if (verified) return "verified";
     if (status === "SUCCESS") return "verified";
     if (status === "FAILED" || status === "TEMPORARY_FAILURE") return "failed";
     return "pending";

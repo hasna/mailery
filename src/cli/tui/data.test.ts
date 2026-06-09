@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { closeDatabase, resetDatabase, getDatabase } from "../../db/database.js";
-import { createProvider } from "../../db/providers.js";
-import { createDomain } from "../../db/domains.js";
+import { createProvider, updateProvider } from "../../db/providers.js";
+import { createDomain, updateDomain } from "../../db/domains.js";
 import { createAddress, markVerified } from "../../db/addresses.js";
+import { createEmail } from "../../db/emails.js";
 import { setAddressQuota } from "../../db/address-lifecycle.js";
 import { createAlias } from "../../db/aliases.js";
 import { createOwner, assignAddressOwner } from "../../db/owners.js";
@@ -12,8 +13,9 @@ import { storeInboundEmail, setInboundRead, setInboundStarred, setInboundArchive
 import {
   listMailbox, mailboxCounts, getMessageBody, toggleStar, toggleRead, archiveMessage,
   replyDefaults, sendComposed, listSources, listInboxAddresses, getSettings, setSetting,
-  defaultFromAddress, providerIdForSender, listDomainSummaries,
+  defaultFromAddress, providerIdForSender, listDomainSummaries, mailboxLabel, addressChoiceByAddress,
 } from "./data.js";
+import { setConfigValue } from "../../lib/config.js";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -61,10 +63,119 @@ describe("tui data — mailboxes", () => {
     expect(c.inbox).toBe(3);      // a, b, s (archived excluded)
   });
 
+  it("computes unscoped counts with indexed scalar probes", () => {
+    seed("a");
+    seed("b", { read: true });
+    seed("s", { star: true });
+    seed("z", { archived: true });
+    const db = getDatabase();
+    createEmail(providerId, { from: "me@x.com", to: "you@y.com", subject: "app-sent", text: "body" }, "app-sent", db);
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<gmail-sent@x>", from_address: "me@x.com", to_addresses: ["you@y.com"],
+      cc_addresses: [], subject: "gmail sent", text_body: "body", html_body: null, attachments: [],
+      label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
+    }, db);
+
+    const calls: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "query") return Reflect.get(target, prop, receiver);
+        return (sql: string) => {
+          const statement = target.query(sql);
+          return new Proxy(statement, {
+            get(stmt, statementProp, statementReceiver) {
+              if (statementProp !== "get") return Reflect.get(stmt, statementProp, statementReceiver);
+              return (...args: unknown[]) => {
+                calls.push(sql);
+                return statement.get(...args as never[]);
+              };
+            },
+          });
+        };
+      },
+    });
+
+    const c = mailboxCounts(recordingDb as never);
+
+    expect(c).toEqual({ inbox: 3, unread: 2, starred: 1, sent: 2, archived: 1 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("SELECT COUNT(*) FROM inbound_emails WHERE is_sent = 0 AND is_archived = 0");
+    expect(calls[0]).not.toContain("SUM(CASE");
+    const plan = db.query(`EXPLAIN QUERY PLAN ${calls[0]}`).all() as Array<{ detail: string }>;
+    const details = plan.map((row) => row.detail).join(" ");
+    expect(details).toMatch(/idx_inbound_(sent_arch_recv|sender_domain_recv)/);
+    expect(details).toContain("idx_inbound_sent_read_arch_recv");
+    expect(details).toContain("idx_inbound_sent_star_arch_recv");
+    expect(details).toMatch(/idx_inbound_(arch_recv|is_archived)/);
+    expect(details).not.toContain("SCAN inbound_emails");
+  });
+
+  it("computes source counts with one aggregate statement and the recipient index", () => {
+    seed("a");
+    seed("b", { read: true });
+    seed("s", { star: true });
+    seed("z", { archived: true });
+    seed("other", { to: ["other@x.com"] });
+    const db = getDatabase();
+    createEmail(providerId, { from: "me@x.com", to: "you@y.com", subject: "app-sent", text: "body" }, "app-sent", db);
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<gmail-sent@x>", from_address: "me@x.com", to_addresses: ["you@y.com"],
+      cc_addresses: [], subject: "gmail sent", text_body: "body", html_body: null, attachments: [],
+      label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
+    }, db);
+
+    const calls: Array<{ sql: string; args: unknown[] }> = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "query") return Reflect.get(target, prop, receiver);
+        return (sql: string) => {
+          const statement = target.query(sql);
+          return new Proxy(statement, {
+            get(stmt, statementProp, statementReceiver) {
+              if (statementProp !== "get") return Reflect.get(stmt, statementProp, statementReceiver);
+              return (...args: unknown[]) => {
+                calls.push({ sql, args });
+                return statement.get(...args as never[]);
+              };
+            },
+          });
+        };
+      },
+    });
+
+    const c = mailboxCounts({ source: { address: "me@x.com" } }, recordingDb as never);
+
+    expect(c).toEqual({ inbox: 3, unread: 2, starred: 1, sent: 2, archived: 1 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.sql).toContain("FROM inbound_recipients");
+    expect(calls[0]!.sql).not.toContain("json_each");
+    expect(calls[0]!.args).toEqual(["me@x.com", "me@x.com", "me@x.com"]);
+  });
+
   it("filters by search", () => {
     seed("invoice report");
     seed("lunch plans");
     expect(listMailbox("inbox", { search: "invoice" }).map((m) => m.subject)).toEqual(["invoice report"]);
+  });
+
+  it("searches before applying the page limit", () => {
+    seed("recent lunch plans");
+    seed("older invoice report");
+    const db = getDatabase();
+    db.run("UPDATE inbound_emails SET received_at = ? WHERE subject = ?", ["2026-01-03T10:00:00.000Z", "recent lunch plans"]);
+    db.run("UPDATE inbound_emails SET received_at = ? WHERE subject = ?", ["2026-01-01T10:00:00.000Z", "older invoice report"]);
+
+    expect(listMailbox("inbox", { search: "invoice", limit: 1 }).map((m) => m.subject)).toEqual(["older invoice report"]);
+  });
+
+  it("searches recipient addresses before applying the page limit", () => {
+    seed("recent recipient", { to: ["recent@example.com"] });
+    seed("older recipient", { to: ['"Target" <target@example.com>'] });
+    const db = getDatabase();
+    db.run("UPDATE inbound_emails SET received_at = ? WHERE subject = ?", ["2026-01-03T10:00:00.000Z", "recent recipient"]);
+    db.run("UPDATE inbound_emails SET received_at = ? WHERE subject = ?", ["2026-01-01T10:00:00.000Z", "older recipient"]);
+
+    expect(listMailbox("inbox", { search: "target@example.com", limit: 1 }).map((m) => m.subject)).toEqual(["older recipient"]);
   });
 
   it("sorts and paginates mailbox results", () => {
@@ -80,6 +191,54 @@ describe("tui data — mailboxes", () => {
     expect(listMailbox("inbox", { limit: 1, offset: 1 }).map((m) => m.subject)).toEqual(["middle"]);
     expect(listMailbox("inbox", { sort: "oldest" }).map((m) => m.subject)).toEqual(["oldest", "middle", "newest"]);
   });
+
+  it("normalizes bad mailbox and pagination inputs at runtime", () => {
+    seed("first");
+    seed("second");
+
+    expect(mailboxLabel("bad-folder" as never)).toBe("Inbox");
+    expect(listMailbox("bad-folder" as never).map((m) => m.subject).sort()).toEqual(["first", "second"]);
+    expect(listMailbox("inbox", { limit: Number.NaN, offset: Number.NaN }).length).toBe(2);
+    expect(listMailbox("inbox", { limit: Number.POSITIVE_INFINITY, offset: Number.POSITIVE_INFINITY }).length).toBe(2);
+    expect(listMailbox("inbox", { limit: 0 }).length).toBe(1);
+  });
+
+  it("uses bounded SQL pagination for inbox pages", () => {
+    const calls: Array<{ sql: string; args: unknown[] }> = [];
+    const db = {
+      query: (sql: string) => ({
+        all: (...args: unknown[]) => {
+          calls.push({ sql, args });
+          return [];
+        },
+      }),
+    };
+
+    listMailbox("inbox", { limit: 5, offset: 20 }, db as never);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.sql).toContain("LIMIT ? OFFSET ?");
+    expect(calls[0]!.args.slice(-2)).toEqual([5, 20]);
+  });
+
+  it("uses the recipient index instead of JSON scans for address-scoped inbox pages", () => {
+    const calls: Array<{ sql: string; args: unknown[] }> = [];
+    const db = {
+      query: (sql: string) => ({
+        all: (...args: unknown[]) => {
+          calls.push({ sql, args });
+          return [];
+        },
+      }),
+    };
+
+    listMailbox("inbox", { source: { address: "ops@example.com" }, limit: 5 }, db as never);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.sql).toContain("inbound_recipients");
+    expect(calls[0]!.sql).not.toContain("json_each(to_addresses)");
+    expect(calls[0]!.args).toContain("ops@example.com");
+  });
 });
 
 describe("tui data — body + mutations", () => {
@@ -91,6 +250,41 @@ describe("tui data — body + mutations", () => {
     expect(b.flags).toContain("starred");
   });
 
+  it("reads inbound body with a narrow projection", () => {
+    const e = seed("lean body", { star: true });
+    const db = getDatabase();
+    const calls: Array<{ sql: string; args: unknown[] }> = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") {
+          return (sql: string) => {
+            const statement = target.query(sql);
+            return {
+              get: (...args: unknown[]) => {
+                calls.push({ sql, args });
+                return statement.get(...args);
+              },
+              all: (...args: unknown[]) => {
+                calls.push({ sql, args });
+                return statement.all(...args);
+              },
+            };
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const b = getMessageBody({ kind: "inbound", id: e.id } as never, recordingDb as never)!;
+
+    expect(b.subject).toBe("lean body");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.sql).toContain("SELECT from_address, to_addresses");
+    expect(calls[0]!.sql).not.toContain("SELECT *");
+    expect(calls[0]!.sql).not.toContain("headers_json");
+    expect(calls[0]!.args).toEqual([e.id]);
+  });
+
   it("toggles star and read", () => {
     const e = seed("x");
     const msg = listMailbox("inbox")[0]!;
@@ -99,6 +293,37 @@ describe("tui data — body + mutations", () => {
     archiveMessage(msg, true);
     expect(listMailbox("inbox")).toHaveLength(0);
     expect(listMailbox("archived")).toHaveLength(1);
+  });
+
+  it("toggles inbound flags without loading message bodies", () => {
+    seed("lean toggles");
+    const msg = listMailbox("inbox")[0]!;
+    const db = getDatabase();
+    const queries: string[] = [];
+    const runs: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        if (prop === "run") return (sql: string, ...args: unknown[]) => {
+          runs.push(sql);
+          return target.run(sql, ...args);
+        };
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    expect(toggleStar(msg, recordingDb as never)).toBe(true);
+    expect(toggleRead(msg, recordingDb as never)).toBe(true);
+    archiveMessage(msg, true, recordingDb as never);
+
+    expect(runs).toHaveLength(3);
+    expect(queries).toHaveLength(3);
+    expect(queries.every((sql) => sql.includes("SELECT 1 AS ok"))).toBe(true);
+    expect(queries.join("\n")).not.toContain("SELECT *");
+    expect(queries.join("\n")).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
   });
 });
 
@@ -120,6 +345,17 @@ describe("tui data — compose / reply", () => {
 
   it("rejects an empty recipient", async () => {
     await expect(sendComposed({ from: "me@x.com", to: "  ", subject: "x", body: "y" })).rejects.toThrow(/recipient/i);
+  });
+
+  it("rejects missing explicit provider ids before sending", async () => {
+    await expect(sendComposed({
+      from: "me@x.com",
+      to: "you@y.com",
+      subject: "bad provider",
+      body: "yo",
+      providerId: "missing-provider",
+    })).rejects.toThrow("Could not resolve ID 'missing-provider' in table 'providers'.");
+    expect(listMailbox("sent").map((m) => m.subject)).not.toContain("bad provider");
   });
 });
 
@@ -165,6 +401,14 @@ describe("tui data — attachments + markdown + profiles", () => {
     assignAddressOwner(address.id, owner.id, undefined, db);
     createAlias("support@acme.com", "ops@acme.com", db);
     createSendKey(owner.id, "ops-key", db);
+    createAlias("noise@elsewhere.com", "other@elsewhere.com", db);
+    const unrelatedOwner = createOwner({ type: "agent", name: "unrelated-agent" }, db);
+    createSendKey(unrelatedOwner.id, "unrelated-key", db);
+    createEmail(providerId, {
+      from: '"Ops Team" <ops@acme.com>',
+      to: ["client@example.com"],
+      subject: "sent today",
+    }, "profile-sent-today", db);
 
     const profiles = listProfiles();
     const p = profiles.find((x) => x.id === providerId)!;
@@ -182,9 +426,75 @@ describe("tui data — attachments + markdown + profiles", () => {
       owner: "ops-agent",
       receive_status: "ready",
       daily_quota: 25,
+      sent_today: 1,
       aliases: ["support@acme.com"],
     });
     expect(p.address_details[0]!.send_keys[0]).toMatchObject({ owner: "ops-agent", label: "ops-key", active: true });
+    expect(JSON.stringify(p)).not.toContain("noise@elsewhere.com");
+    expect(JSON.stringify(p)).not.toContain("unrelated-key");
+  });
+
+  it("paginates profiles before hydrating provider details", () => {
+    const db = getDatabase();
+    const older = createProvider({ name: "older-profile", type: "sandbox", active: true }, db);
+    const middle = createProvider({ name: "middle-profile", type: "sandbox", active: true }, db);
+    const newer = createProvider({ name: "newer-profile", type: "sandbox", active: true }, db);
+    db.run("UPDATE providers SET created_at = ? WHERE id = ?", ["2025-01-01T00:00:00.000Z", providerId]);
+    db.run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-01T00:00:00.000Z", older.id]);
+    db.run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-02T00:00:00.000Z", middle.id]);
+    db.run("UPDATE providers SET created_at = ? WHERE id = ?", ["2026-01-03T00:00:00.000Z", newer.id]);
+    createDomain(older.id, "older-profile.test", db);
+    createDomain(middle.id, "middle-profile.test", db);
+    createDomain(newer.id, "newer-profile.test", db);
+    createAddress({ provider_id: older.id, email: "ops@older-profile.test" }, db);
+    createAddress({ provider_id: middle.id, email: "ops@middle-profile.test" }, db);
+    createAddress({ provider_id: newer.id, email: "ops@newer-profile.test" }, db);
+
+    const page = listProfiles({ limit: 1, offset: 1 });
+
+    expect(page.map((profile) => profile.name)).toEqual(["middle-profile"]);
+    expect(JSON.stringify(page)).toContain("middle-profile.test");
+    expect(JSON.stringify(page)).not.toContain("older-profile.test");
+    expect(JSON.stringify(page)).not.toContain("newer-profile.test");
+  });
+
+  it("hydrates profile domains and addresses with batched provider queries", () => {
+    const db = getDatabase();
+    const first = createProvider({ name: "first-profile", type: "resend", api_key: "profile-secret-key", active: true }, db);
+    const second = createProvider({ name: "second-profile", type: "sandbox", active: true }, db);
+    createDomain(first.id, "first-profile.test", db);
+    createDomain(second.id, "second-profile.test", db);
+    const firstAddress = createAddress({ provider_id: first.id, email: "ops@first-profile.test" }, db);
+    createAddress({ provider_id: second.id, email: "ops@second-profile.test" }, db);
+    const owner = createOwner({ type: "agent", name: "profile-key-agent" }, db);
+    assignAddressOwner(firstAddress.id, owner.id, undefined, db);
+    const key = createSendKey(owner.id, "profile-key", db).key;
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") {
+          return (sql: string) => {
+            queries.push(sql);
+            return target.query(sql);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    const profiles = listProfiles({ limit: 3 }, recordingDb);
+
+    expect(profiles.some((profile) => profile.domains.includes("first-profile.test"))).toBe(true);
+    expect(profiles.some((profile) => profile.addresses.includes("ops@second-profile.test"))).toBe(true);
+    expect(JSON.stringify(profiles)).not.toContain("profile-secret-key");
+    expect(JSON.stringify(profiles)).not.toContain(key.key_hash);
+    expect(queries.filter((sql) => sql.includes("FROM providers")).join("\n")).not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_id|oauth_client_secret|oauth_refresh_token|oauth_access_token|oauth_token_expiry)\b/);
+    expect(queries.filter((sql) => sql.includes("FROM send_keys")).join("\n")).not.toMatch(/\bkey_hash\b/);
+    expect(queries.filter((sql) => sql.includes("FROM domains WHERE provider_id IN"))).toHaveLength(1);
+    expect(queries.filter((sql) => sql.includes("FROM addresses WHERE provider_id IN"))).toHaveLength(1);
+    expect(queries.filter((sql) => sql.includes("FROM domains WHERE provider_id = ?"))).toHaveLength(0);
+    expect(queries.filter((sql) => sql.includes("FROM addresses WHERE provider_id = ?"))).toHaveLength(0);
   });
 
   it("defaults compose From to the best configured sender for the active source", () => {
@@ -198,6 +508,7 @@ describe("tui data — attachments + markdown + profiles", () => {
     expect(defaultFromAddress({ source: { providerId } }, db)).toBe("ops@acme.com");
     expect(defaultFromAddress({ source: { domain: "acme.com" } }, db)).toBe("ops@acme.com");
     expect(defaultFromAddress({ source: { domain: "missing.com" }, fallback: "selected@inbox.com" }, db)).toBe("selected@inbox.com");
+    expect(defaultFromAddress({ source: { domain: "missing.com" } }, db)).toBe("ops@acme.com");
 
     // If no verified address is available for the source provider, fall back to
     // its newest active address rather than leaving compose unusable.
@@ -244,11 +555,66 @@ describe("tui data — Sent folder (Gmail SENT + app-sent)", () => {
     expect(m.sentByMe).toBe(true);
     expect(m.to).toBe("client@y.com");
   });
+
+  it("searches sent mail by recipient address before applying the page limit", async () => {
+    await sendComposed({ from: "me@x.com", to: "recent@example.com", subject: "recent sent", body: "hi", providerId });
+    await sendComposed({ from: "me@x.com", to: "target@example.com", subject: "older sent", body: "hi", providerId });
+    const db = getDatabase();
+    db.run("UPDATE emails SET sent_at = ? WHERE subject = ?", ["2026-01-03T10:00:00.000Z", "recent sent"]);
+    db.run("UPDATE emails SET sent_at = ? WHERE subject = ?", ["2026-01-01T10:00:00.000Z", "older sent"]);
+
+    expect(listMailbox("sent", { search: "target@example.com", limit: 1 }).map((m) => m.subject)).toEqual(["older sent"]);
+  });
+
+  it("paginates merged sent mail after bounding each source branch", () => {
+    const db = getDatabase();
+    const newest = createEmail(providerId, { from: "me@x.com", to: "client@y.com", subject: "app newest", text: "body" }, "app-newest", db);
+    const oldest = createEmail(providerId, { from: "me@x.com", to: "client@y.com", subject: "app oldest", text: "body" }, "app-oldest", db);
+    db.run("UPDATE emails SET sent_at = ? WHERE id = ?", ["2026-01-04T10:00:00.000Z", newest.id]);
+    db.run("UPDATE emails SET sent_at = ? WHERE id = ?", ["2026-01-01T10:00:00.000Z", oldest.id]);
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<gmail-newer@x>", from_address: "me@x.com", to_addresses: ["client@y.com"],
+      cc_addresses: [], subject: "gmail newer", text_body: "body", html_body: null, attachments: [],
+      label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: "2026-01-03T10:00:00.000Z",
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<gmail-older@x>", from_address: "me@x.com", to_addresses: ["client@y.com"],
+      cc_addresses: [], subject: "gmail older", text_body: "body", html_body: null, attachments: [],
+      label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: "2026-01-02T10:00:00.000Z",
+    }, db);
+
+    expect(listMailbox("sent", { limit: 2, offset: 1 }).map((m) => m.subject)).toEqual(["gmail newer", "gmail older"]);
+    expect(listMailbox("sent", { limit: 2, offset: 1, sort: "oldest" }).map((m) => m.subject)).toEqual(["gmail older", "gmail newer"]);
+  });
+
+  it("uses one bounded SQL page for the combined sent mailbox", () => {
+    const calls: Array<{ sql: string; args: unknown[] }> = [];
+    const db = {
+      query: (sql: string) => ({
+        all: (...args: unknown[]) => {
+          calls.push({ sql, args });
+          return [];
+        },
+      }),
+    };
+
+    listMailbox("sent", { limit: 5, offset: 20 }, db as never);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.sql).toContain("WITH app_sent AS");
+    expect(calls[0]!.sql).toContain("synced_sent AS");
+    expect(calls[0]!.sql).toContain("UNION ALL");
+    expect(calls[0]!.sql).toContain("LIMIT ? OFFSET ?");
+    expect(calls[0]!.sql).not.toContain("SELECT *");
+    expect(calls[0]!.args).toEqual([25, 25, 5, 20]);
+  });
 });
 
 describe("tui data — inbox sources (per-inbox switching)", () => {
   it("lists All inboxes, configured addresses, and observed recipients", () => {
     createAddress({ provider_id: providerId, email: "ops@elyratelier.com" });
+    const suspended = createAddress({ provider_id: providerId, email: "paused@elyratelier.com" });
+    getDatabase().run("UPDATE addresses SET status = 'suspended' WHERE id = ?", [suspended.id]);
     seed("observed", { to: ['"Signup" <signup@wobblyrobottaco.com>'] });
     storeInboundEmail({
       provider_id: providerId, message_id: "<sent-client@x>", from_address: "me@elyratelier.com", to_addresses: ["client@example.com"],
@@ -259,16 +625,320 @@ describe("tui data — inbox sources (per-inbox switching)", () => {
     const choices = listInboxAddresses();
     expect(choices[0]).toMatchObject({ id: "all", label: "All inboxes" });
     expect(choices.some((choice) => choice.address === "ops@elyratelier.com" && choice.configured)).toBe(true);
+    expect(choices.some((choice) => choice.address === "paused@elyratelier.com")).toBe(false);
     expect(choices.some((choice) => choice.address === "signup@wobblyrobottaco.com" && choice.observed)).toBe(true);
     expect(choices.some((choice) => choice.address === "client@example.com")).toBe(false);
   });
 
+  it("refreshes observed address choices when new inbound mail changes the snapshot", () => {
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<first-observed@x>", from_address: "alice@ext.com",
+      to_addresses: ["first@example.com"], cc_addresses: [], subject: "first", text_body: "b",
+      html_body: null, attachments: [], headers: {}, raw_size: 1,
+      received_at: "2026-06-04T11:29:09.000Z",
+    });
+    expect(listInboxAddresses().some((choice) => choice.address === "first@example.com" && choice.observed)).toBe(true);
+
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<second-observed@x>", from_address: "alice@ext.com",
+      to_addresses: ["second@example.com"], cc_addresses: [], subject: "second", text_body: "b",
+      html_body: null, attachments: [], headers: {}, raw_size: 1,
+      received_at: "2026-06-04T11:30:09.000Z",
+    });
+    const refreshed = listInboxAddresses();
+    expect(refreshed.some((choice) => choice.address === "first@example.com" && choice.observed)).toBe(true);
+    expect(refreshed.some((choice) => choice.address === "second@example.com" && choice.observed)).toBe(true);
+  });
+
+  it("searches bounded inbox address choices outside the initial page", () => {
+    const target = createAddress({ provider_id: providerId, email: "target@elyratelier.com" });
+    getDatabase().run("UPDATE addresses SET created_at = ? WHERE id = ?", ["2025-01-01T00:00:00.000Z", target.id]);
+    for (let i = 0; i < 20; i++) {
+      createAddress({ provider_id: providerId, email: `newer-${i}@elyratelier.com` });
+    }
+
+    const firstPage = listInboxAddresses({ limit: 5 });
+    expect(firstPage).toHaveLength(6); // All inboxes + five concrete choices.
+    expect(firstPage.some((choice) => choice.address === "target@elyratelier.com")).toBe(false);
+
+    const searched = listInboxAddresses({ limit: 5, search: "target@" });
+    expect(searched.some((choice) => choice.address === "target@elyratelier.com" && choice.configured)).toBe(true);
+  });
+
+  it("bounds the default observed inbox address snapshot while keeping search global", () => {
+    const db = getDatabase();
+    for (let i = 0; i < 205; i++) {
+      storeInboundEmail({
+        provider_id: providerId,
+        message_id: `<observed-${i}@x>`,
+        from_address: "alice@ext.com",
+        to_addresses: [`observed-${String(i).padStart(3, "0")}@example.com`],
+        cc_addresses: [],
+        subject: `observed-${i}`,
+        text_body: "b",
+        html_body: null,
+        attachments: [],
+        headers: {},
+        raw_size: 1,
+        received_at: new Date(Date.UTC(2026, 5, 4, 11, 0, i)).toISOString(),
+      }, db);
+    }
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "<observed-target@x>",
+      from_address: "alice@ext.com",
+      to_addresses: ["zz-target@example.com"],
+      cc_addresses: [],
+      subject: "observed-target",
+      text_body: "b",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-01T00:00:00.000Z",
+    }, db);
+
+    const firstPage = listInboxAddresses();
+    expect(firstPage).toHaveLength(201); // All inboxes + bounded observed snapshot.
+    expect(firstPage.some((choice) => choice.address === "zz-target@example.com")).toBe(false);
+
+    const searched = listInboxAddresses({ limit: 5, search: "zz-target" });
+    expect(searched).toContainEqual(expect.objectContaining({
+      address: "zz-target@example.com",
+      observed: true,
+    }));
+  });
+
+  it("uses the cached recent observed-address snapshot for non-search limited refreshes", () => {
+    const db = getDatabase();
+    for (let i = 0; i < 10; i++) {
+      storeInboundEmail({
+        provider_id: providerId,
+        message_id: `<limited-observed-${i}@x>`,
+        from_address: "alice@ext.com",
+        to_addresses: [`limited-${i}@example.com`],
+        cc_addresses: [],
+        subject: `limited-${i}`,
+        text_body: "b",
+        html_body: null,
+        attachments: [],
+        headers: {},
+        raw_size: 1,
+        received_at: new Date(Date.UTC(2026, 5, 4, 11, 0, i)).toISOString(),
+      }, db);
+    }
+    const calls: Array<{ sql: string; args: unknown[] }> = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "query") return Reflect.get(target, prop, receiver);
+        return (sql: string) => {
+          const statement = target.query(sql);
+          return new Proxy(statement, {
+            get(stmt, statementProp, statementReceiver) {
+              if (statementProp === "all") {
+                return (...args: unknown[]) => {
+                  calls.push({ sql, args });
+                  return statement.all(...args as never[]);
+                };
+              }
+              if (statementProp === "get") {
+                return (...args: unknown[]) => {
+                  calls.push({ sql, args });
+                  return statement.get(...args as never[]);
+                };
+              }
+              return Reflect.get(stmt, statementProp, statementReceiver);
+            },
+          });
+        };
+      },
+    }) as typeof db;
+
+    const first = listInboxAddresses({ limit: 5 }, recordingDb);
+    const second = listInboxAddresses({ limit: 5 }, recordingDb);
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "<limited-observed-sent@x>",
+      from_address: "me@example.com",
+      to_addresses: ["sent-cache@example.com"],
+      cc_addresses: [],
+      subject: "sent cache noise",
+      text_body: "b",
+      html_body: null,
+      attachments: [],
+      label_ids: ["SENT"],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-06-04T11:30:09.000Z",
+    }, db);
+    const third = listInboxAddresses({ limit: 5 }, recordingDb);
+
+    expect(first).toHaveLength(6);
+    expect(second).toEqual(first);
+    expect(third).toEqual(first);
+    expect(third.some((choice) => choice.address === "sent-cache@example.com")).toBe(false);
+    const recentQueries = calls.filter((call) => call.sql.includes("WITH recent AS"));
+    expect(recentQueries).toHaveLength(1);
+    expect(recentQueries[0]!.args).toEqual([50, 5]);
+    expect(calls.some((call) => call.sql.includes("SELECT DISTINCT r.address"))).toBe(false);
+  });
+
+  it("expands the observed-address scan only when recent mail has too few unique recipients", () => {
+    const db = getDatabase();
+    for (let i = 0; i < 60; i++) {
+      storeInboundEmail({
+        provider_id: providerId,
+        message_id: `<busy-recipient-${i}@x>`,
+        from_address: "alice@ext.com",
+        to_addresses: ["busy@example.com"],
+        cc_addresses: [],
+        subject: `busy-${i}`,
+        text_body: "b",
+        html_body: null,
+        attachments: [],
+        headers: {},
+        raw_size: 1,
+        received_at: new Date(Date.UTC(2026, 5, 4, 12, 0, i)).toISOString(),
+      }, db);
+    }
+    for (let i = 0; i < 4; i++) {
+      storeInboundEmail({
+        provider_id: providerId,
+        message_id: `<older-unique-${i}@x>`,
+        from_address: "alice@ext.com",
+        to_addresses: [`older-${i}@example.com`],
+        cc_addresses: [],
+        subject: `older-${i}`,
+        text_body: "b",
+        html_body: null,
+        attachments: [],
+        headers: {},
+        raw_size: 1,
+        received_at: new Date(Date.UTC(2026, 5, 4, 11, 0, i)).toISOString(),
+      }, db);
+    }
+    const calls: Array<{ sql: string; args: unknown[] }> = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "query") return Reflect.get(target, prop, receiver);
+        return (sql: string) => {
+          const statement = target.query(sql);
+          return new Proxy(statement, {
+            get(stmt, statementProp, statementReceiver) {
+              if (statementProp === "all") {
+                return (...args: unknown[]) => {
+                  calls.push({ sql, args });
+                  return statement.all(...args as never[]);
+                };
+              }
+              if (statementProp === "get") {
+                return (...args: unknown[]) => {
+                  calls.push({ sql, args });
+                  return statement.get(...args as never[]);
+                };
+              }
+              return Reflect.get(stmt, statementProp, statementReceiver);
+            },
+          });
+        };
+      },
+    }) as typeof db;
+
+    const choices = listInboxAddresses({ limit: 5 }, recordingDb);
+
+    expect(choices.map((choice) => choice.address).filter(Boolean)).toEqual([
+      "busy@example.com",
+      "older-0@example.com",
+      "older-1@example.com",
+      "older-2@example.com",
+      "older-3@example.com",
+    ]);
+    const recentQueries = calls.filter((call) => call.sql.includes("WITH recent AS"));
+    expect(recentQueries.map((query) => query.args)).toEqual([[50, 5], [100, 5]]);
+  });
+
+  it("resolves one address choice without building the full chooser", () => {
+    const db = getDatabase();
+    const address = createAddress({ provider_id: providerId, email: "target-choice@example.com" });
+    markVerified(address.id);
+    for (let i = 0; i < 20; i++) {
+      storeInboundEmail({
+        provider_id: providerId,
+        message_id: `<choice-noise-${i}@x>`,
+        from_address: "alice@ext.com",
+        to_addresses: [`noise-${i}@example.com`],
+        cc_addresses: [],
+        subject: `choice-noise-${i}`,
+        text_body: "b",
+        html_body: null,
+        attachments: [],
+        headers: {},
+        raw_size: 1,
+        received_at: new Date(Date.UTC(2026, 5, 4, 11, 0, i)).toISOString(),
+      }, db);
+    }
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "<target-choice-observed@x>",
+      from_address: "alice@ext.com",
+      to_addresses: ["target-choice@example.com"],
+      cc_addresses: [],
+      subject: "target choice",
+      text_body: "b",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-06-04T11:30:09.000Z",
+    }, db);
+    const calls: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "query") return Reflect.get(target, prop, receiver);
+        return (sql: string) => {
+          calls.push(sql);
+          return target.query(sql);
+        };
+      },
+    }) as typeof db;
+
+    const choice = addressChoiceByAddress("target-choice@example.com", recordingDb);
+
+    expect(choice).toMatchObject({
+      address: "target-choice@example.com",
+      configured: true,
+      observed: true,
+    });
+    expect(calls.some((sql) => sql.includes("WITH recent AS"))).toBe(false);
+    expect(calls.some((sql) => sql.includes("ORDER BY created_at DESC, email ASC LIMIT"))).toBe(false);
+    expect(calls.some((sql) => sql.includes("WHERE email = ? COLLATE NOCASE"))).toBe(true);
+    expect(calls.some((sql) => sql.includes("FROM inbound_recipients"))).toBe(true);
+  });
+
   it("lists All + each active provider + each registered domain", () => {
     createDomain(providerId, "elyratelier.com");
-    const sources = listSources();
+    const inactive = createProvider({ name: "inactive", type: "sandbox", api_key: "inactive-secret" }).id;
+    updateProvider(inactive, { active: false });
+    const db = getDatabase();
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "query") return Reflect.get(target, prop, receiver);
+        return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+      },
+    }) as typeof db;
+
+    const sources = listSources(recordingDb);
+
     expect(sources[0]).toMatchObject({ id: "all", label: "All Mail" });
     expect(sources.some((s) => s.providerId === providerId)).toBe(true);
+    expect(sources.some((s) => s.providerId === inactive)).toBe(false);
     expect(sources.some((s) => s.domain === "elyratelier.com")).toBe(true);
+    expect(queries.filter((sql) => sql.includes("FROM providers")).join("\n"))
+      .not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_id|oauth_client_secret|oauth_refresh_token|oauth_access_token|oauth_token_expiry)\b/);
   });
 
   it("filters a mailbox by provider", () => {
@@ -293,17 +963,51 @@ describe("tui data — inbox sources (per-inbox switching)", () => {
     seed("to-team", { to: ["team@elyratelier.com"] });
     await sendComposed({ from: "ops@elyratelier.com", to: "client@y.com", subject: "sent ops", body: "hi", providerId });
     await sendComposed({ from: "team@elyratelier.com", to: "client@y.com", subject: "sent team", body: "hi", providerId });
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<gmail-ops@x>", from_address: "ops@elyratelier.com", to_addresses: ["client@y.com"],
+      cc_addresses: [], subject: "gmail sent ops", text_body: "b", html_body: null, attachments: [],
+      label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
+    });
 
     const inbox = listMailbox("inbox", { source: { address: "ops@elyratelier.com" } }).map((m) => m.subject);
     expect(inbox).toEqual(["to-ops"]);
     const sent = listMailbox("sent", { source: { address: "ops@elyratelier.com" } }).map((m) => m.subject);
     expect(sent).toContain("sent ops");
+    expect(sent).toContain("gmail sent ops");
     expect(sent).not.toContain("sent team");
     expect(mailboxCounts({ source: { address: "ops@elyratelier.com" } }).inbox).toBe(1);
-    expect(mailboxCounts({ source: { address: "ops@elyratelier.com" } }).sent).toBe(1);
+    expect(mailboxCounts({ source: { address: "ops@elyratelier.com" } }).sent).toBe(2);
+  });
+
+  it("filters Sent by exact sender address through display-name From values", () => {
+    const db = getDatabase();
+    createEmail(providerId, {
+      from: '"Ops Team" <ops@elyratelier.com>',
+      to: ["client@y.com"],
+      subject: "display app sent",
+    }, "display-app-sent", db);
+    createEmail(providerId, {
+      from: "team@elyratelier.com",
+      to: ["client@y.com"],
+      subject: "team app sent",
+    }, "team-app-sent", db);
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<display-gmail-sent@x>", from_address: '"Ops Team" <ops@elyratelier.com>',
+      to_addresses: ["client@y.com"], cc_addresses: [], subject: "display gmail sent", text_body: "b",
+      html_body: null, attachments: [], label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
+    }, db);
+
+    const sent = listMailbox("sent", { source: { address: "ops@elyratelier.com" } }).map((m) => m.subject);
+
+    expect(sent).toContain("display app sent");
+    expect(sent).toContain("display gmail sent");
+    expect(sent).not.toContain("team app sent");
+    expect(mailboxCounts({ source: { address: "ops@elyratelier.com" } }).sent).toBe(2);
   });
 
   it("resolves sender provider by configured From address", () => {
+    const other = createProvider({ name: "other", type: "sandbox", active: true }).id;
+    createAddress({ provider_id: other, email: "ops@elyratelier.com" });
     const address = createAddress({ provider_id: providerId, email: "ops@elyratelier.com" });
     markVerified(address.id);
     expect(providerIdForSender("ops@elyratelier.com")).toBe(providerId);
@@ -325,9 +1029,12 @@ describe("tui data — inbox sources (per-inbox switching)", () => {
   });
 
   it("summarizes domains with address and email counts", async () => {
-    createDomain(providerId, "elyratelier.com");
+    const domain = createDomain(providerId, "elyratelier.com");
     const address = createAddress({ provider_id: providerId, email: "ops@elyratelier.com" });
+    const suspended = createAddress({ provider_id: providerId, email: "paused@elyratelier.com" });
     markVerified(address.id);
+    getDatabase().run("UPDATE addresses SET status = 'suspended' WHERE id = ?", [suspended.id]);
+    setAddressProvisioning(address.id, { domain_id: domain.id, provisioning_status: "ready" });
     seed("source-inbox", { to: ["ops@elyratelier.com"] });
     await sendComposed({ from: "ops@elyratelier.com", to: "client@y.com", subject: "source-sent", body: "hi", providerId });
 
@@ -344,10 +1051,136 @@ describe("tui data — inbox sources (per-inbox switching)", () => {
     });
   });
 
+  it("paginates domain summaries before loading readiness and mail counts", () => {
+    const older = createDomain(providerId, "older-page.test");
+    const middle = createDomain(providerId, "middle-page.test");
+    const newer = createDomain(providerId, "newer-page.test");
+    const db = getDatabase();
+    db.run("UPDATE domains SET created_at = ? WHERE id = ?", ["2026-01-01T00:00:00.000Z", older.id]);
+    db.run("UPDATE domains SET created_at = ? WHERE id = ?", ["2026-01-02T00:00:00.000Z", middle.id]);
+    db.run("UPDATE domains SET created_at = ? WHERE id = ?", ["2026-01-03T00:00:00.000Z", newer.id]);
+    createAddress({ provider_id: providerId, email: "ops@older-page.test" });
+    createAddress({ provider_id: providerId, email: "ops@middle-page.test" });
+    createAddress({ provider_id: providerId, email: "ops@newer-page.test" });
+
+    const firstPage = listDomainSummaries({ limit: 2, offset: 0 }).map((item) => item.domain);
+    const secondPage = listDomainSummaries({ limit: 2, offset: 2 }).map((item) => item.domain);
+
+    expect(firstPage).toHaveLength(2);
+    expect(firstPage).toContain("middle-page.test");
+    expect(firstPage).toContain("newer-page.test");
+    expect(firstPage).not.toContain("older-page.test");
+    expect(secondPage).toEqual(["older-page.test"]);
+  });
+
+  it("summarizes only registered domains even when mail has many external domains", async () => {
+    createDomain(providerId, "registeredcount.com");
+    seed("registered inbound", { to: ["ops@registeredcount.com"] });
+    await sendComposed({ from: "ops@registeredcount.com", to: "client@y.com", subject: "registered sent", body: "hi", providerId });
+
+    const db = getDatabase();
+    for (let i = 0; i < 60; i++) {
+      storeInboundEmail({
+        provider_id: providerId,
+        message_id: `<external-${i}@x>`,
+        from_address: `sender-${i}@outside.test`,
+        to_addresses: [`team@external-${i}.test`],
+        cc_addresses: [],
+        subject: `external inbound ${i}`,
+        text_body: "external",
+        html_body: null,
+        attachments: [],
+        headers: {},
+        raw_size: 1,
+        received_at: new Date().toISOString(),
+      }, db);
+      createEmail(providerId, {
+        from: `sender@external-${i}.test`,
+        to: ["client@y.com"],
+        subject: `external sent ${i}`,
+      }, undefined, db);
+    }
+
+    const summaries = listDomainSummaries();
+    const summary = summaries.find((item) => item.domain === "registeredcount.com");
+
+    expect(summary).toMatchObject({
+      inbox: 1,
+      unread: 1,
+      sent: 1,
+      total: 2,
+    });
+    expect(summaries.some((item) => item.domain === "external-1.test")).toBe(false);
+  });
+
+  it("does not treat a configured address as receive-ready until address provisioning is ready", () => {
+    const domain = createDomain(providerId, "pendingreceive.com");
+    updateDomain(domain.id, { dkim_status: "verified", spf_status: "verified", dmarc_status: "verified" });
+    createAddress({ provider_id: providerId, email: "ops@pendingreceive.com" });
+
+    const summary = listDomainSummaries().find((item) => item.domain === "pendingreceive.com");
+
+    expect(summary).toMatchObject({
+      addresses: 1,
+      readiness: "ready_to_send",
+    });
+  });
+
+  it("summarizes display-name recipient and sender addresses by domain", () => {
+    createDomain(providerId, "displayname.com");
+    const address = createAddress({ provider_id: providerId, email: "ops@displayname.com" });
+    markVerified(address.id);
+    seed("display inbound", { to: ['"Ops Team" <ops@displayname.com>'] });
+    createEmail(providerId, {
+      from: '"Ops Team" <ops@displayname.com>',
+      to: ["client@example.com"],
+      subject: "display app sent",
+    });
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<display-sent@x>", from_address: '"Ops Team" <ops@displayname.com>',
+      to_addresses: ["client@example.com"], cc_addresses: [], subject: "display synced sent", text_body: "b",
+      html_body: null, attachments: [], label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
+    });
+
+    const summary = listDomainSummaries().find((item) => item.domain === "displayname.com");
+
+    expect(summary).toMatchObject({
+      addresses: 1,
+      inbox: 1,
+      unread: 1,
+      sent: 2,
+      total: 3,
+    });
+  });
+
+  it("counts one inbound email once per domain when multiple recipients share that domain", () => {
+    createDomain(providerId, "dupecount.com");
+    createDomain(providerId, "othercount.com");
+    seed("multi-recipient", { to: ["ops@dupecount.com", "team@dupecount.com", "help@othercount.com"] });
+
+    const summaries = new Map(listDomainSummaries().map((item) => [item.domain, item]));
+
+    expect(summaries.get("dupecount.com")).toMatchObject({
+      inbox: 1,
+      unread: 1,
+      total: 1,
+    });
+    expect(summaries.get("othercount.com")).toMatchObject({
+      inbox: 1,
+      unread: 1,
+      total: 1,
+    });
+  });
+
   it("filters Sent by sender domain for app-sent and Gmail SENT mail", async () => {
     const db = getDatabase();
     await sendComposed({ from: "me@elyratelier.com", to: "client@y.com", subject: "app elyra", body: "hi", providerId });
     await sendComposed({ from: "me@droolbowl.com", to: "client@y.com", subject: "app other", body: "hi", providerId });
+    createEmail(providerId, {
+      from: '"Me" <me@elyratelier.com>',
+      to: ["client@y.com"],
+      subject: "app display elyra",
+    }, undefined, db);
     storeInboundEmail({
       provider_id: providerId, message_id: "<gs1@x>", from_address: "me@elyratelier.com", to_addresses: ["client@y.com"],
       cc_addresses: [], subject: "gmail elyra", text_body: "b", html_body: null, attachments: [],
@@ -361,10 +1194,11 @@ describe("tui data — inbox sources (per-inbox switching)", () => {
 
     const sent = listMailbox("sent", { source: { domain: "elyratelier.com" } }).map((m) => m.subject);
     expect(sent).toContain("app elyra");
+    expect(sent).toContain("app display elyra");
     expect(sent).toContain("gmail elyra");
     expect(sent).not.toContain("app other");
     expect(sent).not.toContain("gmail other");
-    expect(mailboxCounts({ source: { domain: "elyratelier.com" } }).sent).toBe(2);
+    expect(mailboxCounts({ source: { domain: "elyratelier.com" } }).sent).toBe(3);
   });
 });
 
@@ -399,5 +1233,11 @@ describe("tui data — settings (persisted to config)", () => {
     expect(s.defaultAddress).toBe("ops@example.com");
     expect(s.defaultFrom).toBe("team@example.com");
     expect(s.theme).toBe("dark");
+  });
+
+  it("falls back to inbox for an invalid persisted default mailbox", () => {
+    setConfigValue("default_mailbox", "broken-folder");
+
+    expect(getSettings().defaultMailbox).toBe("inbox");
   });
 });

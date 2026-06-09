@@ -1,4 +1,4 @@
-import chalk from "chalk";
+import chalk from "../lib/chalk-lite.js";
 import { createInterface } from "node:readline/promises";
 import { getDatabase, resolvePartialId } from "../db/database.js";
 import { redactSecrets } from "../lib/redaction.js";
@@ -11,6 +11,9 @@ const jsonStdoutLines: string[] = [];
 const jsonStderrLines: string[] = [];
 const originalConsoleLog = console.log.bind(console);
 const originalConsoleError = console.error.bind(console);
+
+export const DEFAULT_CLI_PAGE_LIMIT = 50;
+export const MAX_CLI_PAGE_LIMIT = 1000;
 
 export function configureCliRuntime(opts: { json?: boolean }): void {
   jsonOutput = !!opts.json;
@@ -154,6 +157,42 @@ export function parseDuration(str: string): number {
     case "h": return val * 3600000;
     default: return 300000;
   }
+}
+
+export function parseCliPositiveIntOption(
+  value: number | string | undefined,
+  fallback: number,
+  max = Number.POSITIVE_INFINITY,
+): number {
+  const cap = Number.isFinite(max) ? Math.max(1, Math.trunc(max)) : Number.POSITIVE_INFINITY;
+  const safeFallback = Number.isFinite(fallback) && fallback >= 1
+    ? Math.min(cap, Math.trunc(fallback))
+    : 1;
+  const parsed = typeof value === "number"
+    ? value
+    : Number.parseInt(value ?? String(safeFallback), 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return safeFallback;
+  return Math.min(cap, Math.trunc(parsed));
+}
+
+export function parseCliNonNegativeIntOption(value: number | string | undefined, fallback = 0): number {
+  const safeFallback = Number.isFinite(fallback) && fallback >= 0 ? Math.trunc(fallback) : 0;
+  const parsed = typeof value === "number"
+    ? value
+    : Number.parseInt(value ?? String(safeFallback), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return safeFallback;
+  return Math.trunc(parsed);
+}
+
+export function parseCliPage(
+  opts: { limit?: number | string; offset?: number | string },
+  fallbackLimit = DEFAULT_CLI_PAGE_LIMIT,
+  maxLimit = MAX_CLI_PAGE_LIMIT,
+): { limit: number; offset: number } {
+  return {
+    limit: parseCliPositiveIntOption(opts.limit, fallbackLimit, maxLimit),
+    offset: parseCliNonNegativeIntOption(opts.offset, 0),
+  };
 }
 
 export function padRight(str: string, len: number): string {

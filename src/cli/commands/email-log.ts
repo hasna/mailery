@@ -6,16 +6,64 @@
  * test, export, webhook, pull, stats, monitor, analytics
  */
 import type { Command } from "commander";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import { createEmail, listEmails, getEmail, searchEmails } from "../../db/emails.js";
 import { getEmailContent } from "../../db/email-content.js";
-import { listProviders, getProvider } from "../../db/providers.js";
-import { listAddresses } from "../../db/addresses.js";
-import { getDatabase, resolvePartialId } from "../../db/database.js";
+import { getLatestActiveProviderId, getProvider } from "../../db/providers.js";
+import { getPreferredActiveAddressEmail } from "../../db/addresses.js";
+import { getDatabase, resolvePartialId, resolvePartialIdOrThrow } from "../../db/database.js";
 import { getDefaultProviderId } from "../../lib/config.js";
 import { colorStatus } from "../../lib/format.js";
-import { handleError, resolveId } from "../utils.js";
-import { listReplies, getReplyCount } from "../../db/inbound.js";
+import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption, resolveId } from "../utils.js";
+import { listReplies, listReplySummaries, getReplyCount } from "../../db/inbound.js";
+import type { InboundEmail, InboundEmailSummary } from "../../db/inbound.js";
+
+const MAX_EMAIL_EXPORT_LIMIT = 10000;
+const DEFAULT_REPLY_LIMIT = 20;
+const MAX_REPLY_LIMIT = 200;
+
+interface ReplyPageOpts {
+  limit?: string;
+  offset?: string;
+}
+
+function parseReplyPage(opts: ReplyPageOpts): { limit: number; offset: number } {
+  return {
+    limit: parseCliPositiveIntOption(opts.limit, DEFAULT_REPLY_LIMIT, MAX_REPLY_LIMIT),
+    offset: parseCliNonNegativeIntOption(opts.offset),
+  };
+}
+
+function replyPagePayload<T extends InboundEmail | InboundEmailSummary>(
+  replies: T[],
+  total: number,
+  limit: number,
+  offset: number,
+): { replies: T[]; total: number; limit: number; offset: number; has_more: boolean } {
+  return {
+    replies,
+    total,
+    limit,
+    offset,
+    has_more: offset + replies.length < total,
+  };
+}
+
+function formatReplySummaries(replies: InboundEmailSummary[], total: number, limit: number, offset: number, label: string): string {
+  if (!replies.length) return chalk.dim(`No replies${total > 0 ? " in this page" : ""}.`);
+  const lines: string[] = [];
+  lines.push(chalk.bold(`\n${replies.length} of ${total} repl${total === 1 ? "y" : "ies"}${label ? ` for ${label}` : ""}`));
+  if (offset > 0 || offset + replies.length < total) {
+    lines.push(chalk.dim(`Showing offset ${offset}, limit ${limit}${offset + replies.length < total ? " (more available)" : ""}.`));
+  }
+  lines.push("");
+  for (const r of replies) {
+    lines.push(`  ${chalk.dim(r.received_at.slice(0, 16))}  ${chalk.cyan(r.from_address)}`);
+    lines.push(`  ${chalk.dim("Subject:")} ${r.subject || "(no subject)"}`);
+    lines.push("");
+  }
+  return lines.join("\n");
+}
 
 export function registerEmailLogCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   // ─── EMAIL NAMESPACE ─────────────────────────────────────────────────────────
@@ -30,13 +78,16 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .description("List sent emails")
     .option("--provider <id>", "Filter by provider ID")
     .option("--status <status>", "Filter by status: sent|delivered|bounced|complained|failed")
+    .option("--from <email>", "Filter by sender address")
     .option("--since <date>", "Show emails since date (ISO 8601)")
     .option("--limit <n>", "Max results", "20")
-    .action((opts: { provider?: string; status?: string; since?: string; limit?: string }) => {
+    .option("--offset <n>", "Skip first N emails", "0")
+    .action((opts: { provider?: string; status?: string; from?: string; since?: string; limit?: string; offset?: string }) => {
       try {
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const limit = parseInt(opts.limit ?? "20", 10);
-        const emails = listEmails({ provider_id: providerId, status: opts.status as "sent" | "delivered" | "bounced" | "complained" | "failed" | undefined, since: opts.since, limit });
+        const limit = parseCliPositiveIntOption(opts.limit, 20);
+        const offset = parseCliNonNegativeIntOption(opts.offset);
+        const emails = listEmails({ provider_id: providerId, status: opts.status as "sent" | "delivered" | "bounced" | "complained" | "failed" | undefined, from_address: opts.from, since: opts.since, limit, offset });
         if (emails.length === 0) { output([], chalk.dim("No emails found.")); return; }
         const lines: string[] = [];
         lines.push(chalk.bold(`${"Date".padEnd(20)}  ${"From".padEnd(28)}  ${"To".padEnd(28)}  ${"Subject".padEnd(36)}  Status`));
@@ -59,9 +110,14 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .description("Search sent emails by subject, from, or to")
     .option("--since <date>", "Show emails since date")
     .option("--limit <n>", "Max results", "20")
-    .action((query: string, opts: { since?: string; limit?: string }) => {
+    .option("--offset <n>", "Skip first N results", "0")
+    .action((query: string, opts: { since?: string; limit?: string; offset?: string }) => {
       try {
-        const emails = searchEmails(query, { since: opts.since, limit: parseInt(opts.limit ?? "20", 10) });
+        const emails = searchEmails(query, {
+          since: opts.since,
+          limit: parseCliPositiveIntOption(opts.limit, 20),
+          offset: parseCliNonNegativeIntOption(opts.offset),
+        });
         if (emails.length === 0) { output([], chalk.dim(`No emails matching "${query}".`)); return; }
         const lines: string[] = [];
         for (const e of emails) {
@@ -100,37 +156,41 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
   emailCmd
     .command("replies <id>")
     .description("Show replies received for a sent email")
-    .action((id: string) => {
+    .option("--limit <n>", "Max replies", String(DEFAULT_REPLY_LIMIT))
+    .option("--offset <n>", "Skip first N replies", "0")
+    .action((id: string, opts: ReplyPageOpts) => {
       try {
         const db = getDatabase();
         const resolvedId = resolveId("emails", id);
-        const replies = listReplies(resolvedId, db);
-        if (!replies.length) { console.log(chalk.dim("No replies.")); return; }
-        console.log(chalk.bold(`\n${replies.length} repl${replies.length === 1 ? "y" : "ies"}:\n`));
-        for (const r of replies) {
-          console.log(`  ${chalk.dim(r.received_at.slice(0,16))}  ${chalk.cyan(r.from_address)}`);
-          if (r.text_body) console.log(`  ${r.text_body.slice(0,100).replace(/\n/g," ")}...`);
-          console.log();
-        }
-        output(replies, "");
+        const { limit, offset } = parseReplyPage(opts);
+        const total = getReplyCount(resolvedId, db);
+        const replies = listReplySummaries(resolvedId, db, { limit, offset });
+        output(
+          replyPagePayload(replies, total, limit, offset),
+          formatReplySummaries(replies, total, limit, offset, ""),
+        );
       } catch (e) { handleError(e); }
     });
 
   emailCmd
     .command("thread <id>")
     .description("Show the full conversation (sent + received), grouped by thread_id")
-    .action(async (id: string) => {
+    .option("--limit <n>", "Max reply bodies for fallback conversations", String(DEFAULT_REPLY_LIMIT))
+    .option("--offset <n>", "Skip first N fallback replies", "0")
+    .action(async (id: string, opts: ReplyPageOpts) => {
       try {
         const db = getDatabase();
         const { getEmailThreading, getThreadMessages } = await import("../../db/threads.js");
         const { getInboundEmail } = await import("../../db/inbound.js");
+        const { limit, offset } = parseReplyPage(opts);
 
         let threadId: string | null = null;
-        const sentId = resolveId("emails", id);
+        const sentId = resolvePartialId(db, "emails", id);
         const sent = sentId ? getEmail(sentId, db) : null;
         if (sent) threadId = getEmailThreading(sent.id, db)?.thread_id ?? null;
         if (!threadId) {
-          const inb = getInboundEmail(resolveId("inbound_emails", id) ?? id, db);
+          const inboundId = resolvePartialId(db, "inbound_emails", id);
+          const inb = inboundId ? getInboundEmail(inboundId, db) : null;
           if (inb) threadId = inb.thread_id;
         }
 
@@ -148,8 +208,13 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         }
 
         if (!sent) return handleError(new Error(`Email not found: ${id}`));
-        const replies = listReplies(sent.id, db);
-        console.log(chalk.bold(`\nThread (${1 + replies.length} message${replies.length !== 1 ? "s" : ""})\n`));
+        const total = getReplyCount(sent.id, db);
+        const replies = listReplies(sent.id, db, { limit, offset });
+        const messageCount = 1 + total;
+        console.log(chalk.bold(`\nThread (${messageCount} message${messageCount !== 1 ? "s" : ""})\n`));
+        if (offset > 0 || offset + replies.length < total) {
+          console.log(chalk.dim(`  Showing ${replies.length} of ${total} replies (offset ${offset}, limit ${limit}).\n`));
+        }
         console.log(chalk.bold(`  [Sent] ${sent.sent_at.slice(0, 16)}`));
         console.log(`  ${chalk.cyan(sent.from_address)} → ${sent.to_addresses.join(", ")}`);
         console.log(`  ${chalk.dim("Subject:")} ${sent.subject}  ${colorStatus(sent.status)}`);
@@ -159,7 +224,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         }
         if (!replies.length) console.log(chalk.dim("\n  No replies yet."));
         console.log();
-        output({ email: sent, replies }, "");
+        output({ email: sent, ...replyPagePayload(replies, total, limit, offset) }, "");
       } catch (e) { handleError(e); }
     });
 
@@ -177,13 +242,16 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
   program.command("log").description("Show email send log (alias: emails email list)")
     .option("--provider <id>", "Filter by provider ID")
     .option("--status <status>", "Filter by status: sent|delivered|bounced|complained|failed")
+    .option("--from <email>", "Filter by sender address")
     .option("--since <date>", "Show emails since date (ISO 8601)")
     .option("--limit <n>", "Max results", "20")
-    .action((opts: { provider?: string; status?: string; since?: string; limit?: string }) => {
+    .option("--offset <n>", "Skip first N emails", "0")
+    .action((opts: { provider?: string; status?: string; from?: string; since?: string; limit?: string; offset?: string }) => {
       try {
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const limit = parseInt(opts.limit ?? "20", 10);
-        const emails = listEmails({ provider_id: providerId, status: opts.status as "sent" | "delivered" | "bounced" | "complained" | "failed" | undefined, since: opts.since, limit });
+        const limit = parseCliPositiveIntOption(opts.limit, 20);
+        const offset = parseCliNonNegativeIntOption(opts.offset);
+        const emails = listEmails({ provider_id: providerId, status: opts.status as "sent" | "delivered" | "bounced" | "complained" | "failed" | undefined, from_address: opts.from, since: opts.since, limit, offset });
         if (emails.length === 0) { output([], chalk.dim("No emails found.")); return; }
         const logLines: string[] = [];
         logLines.push(chalk.bold(`${"Date".padEnd(20)}  ${"From".padEnd(30)}  ${"To".padEnd(30)}  ${"Subject".padEnd(40)}  Status`));
@@ -210,10 +278,11 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
   program.command("search <query>").description("Search emails by subject, from, or to")
     .option("--since <date>", "Show emails since date (ISO 8601)")
     .option("--limit <n>", "Max results", "20")
-    .action((query: string, opts: { since?: string; limit?: string }) => {
+    .option("--offset <n>", "Skip first N results", "0")
+    .action((query: string, opts: { since?: string; limit?: string; offset?: string }) => {
       try {
-        const limit = parseInt(opts.limit ?? "20", 10);
-        const emails = searchEmails(query, { since: opts.since, limit });
+        const limit = parseCliPositiveIntOption(opts.limit, 20);
+        const emails = searchEmails(query, { since: opts.since, limit, offset: parseCliNonNegativeIntOption(opts.offset) });
         if (emails.length === 0) {
           const formatted = chalk.dim(`No emails matching "${query}".`);
           output([], formatted);
@@ -298,36 +367,41 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
 
   // ─── REPLIES ─────────────────────────────────────────────────────────────────
   program.command("replies <id>").description("Show replies received for a sent email")
-    .action((id: string) => {
+    .option("--limit <n>", "Max replies", String(DEFAULT_REPLY_LIMIT))
+    .option("--offset <n>", "Skip first N replies", "0")
+    .action((id: string, opts: ReplyPageOpts) => {
       try {
         const db = getDatabase();
         const resolvedId = resolveId("emails", id);
-        const replies = listReplies(resolvedId, db);
-        if (!replies.length) {
-          console.log(chalk.dim("No replies received for this email."));
-          return;
-        }
-        console.log(chalk.bold(`\n${replies.length} repl${replies.length === 1 ? "y" : "ies"} for email ${id.slice(0, 8)}:\n`));
-        for (const r of replies) {
-          console.log(`  ${chalk.dim(r.received_at.slice(0, 16))}  ${chalk.cyan(r.from_address)}`);
-          console.log(`  ${chalk.dim("Subject:")} ${r.subject}`);
-          if (r.text_body) console.log(`  ${chalk.dim("Preview:")} ${r.text_body.slice(0, 100).replace(/\n/g, " ")}...`);
-          console.log();
-        }
+        const { limit, offset } = parseReplyPage(opts);
+        const total = getReplyCount(resolvedId, db);
+        const replies = listReplySummaries(resolvedId, db, { limit, offset });
+        output(
+          replyPagePayload(replies, total, limit, offset),
+          formatReplySummaries(replies, total, limit, offset, `email ${id.slice(0, 8)}`),
+        );
       } catch (e) { handleError(e); }
     });
 
   // ─── CONVERSATION ─────────────────────────────────────────────────────────────
   program.command("conversation <id>").description("Show full conversation thread for a sent email (email + all replies)")
-    .action((id: string) => {
+    .option("--limit <n>", "Max reply bodies", String(DEFAULT_REPLY_LIMIT))
+    .option("--offset <n>", "Skip first N replies", "0")
+    .action((id: string, opts: ReplyPageOpts) => {
       try {
         const db = getDatabase();
         const resolvedId = resolveId("emails", id);
         const emailRecord = getEmail(resolvedId, db);
         if (!emailRecord) handleError(new Error(`Email not found: ${id}`));
-        const replies = listReplies(resolvedId, db);
+        const { limit, offset } = parseReplyPage(opts);
+        const total = getReplyCount(resolvedId, db);
+        const replies = listReplies(resolvedId, db, { limit, offset });
+        const messageCount = 1 + total;
 
-        console.log(chalk.bold(`\n📧 Conversation thread (${1 + replies.length} message${replies.length === 1 ? "" : "s"})\n`));
+        console.log(chalk.bold(`\nConversation thread (${messageCount} message${messageCount === 1 ? "" : "s"})\n`));
+        if (offset > 0 || offset + replies.length < total) {
+          console.log(chalk.dim(`  Showing ${replies.length} of ${total} replies (offset ${offset}, limit ${limit}).\n`));
+        }
 
         // Original sent email
         console.log(chalk.bold(`  [Sent] ${emailRecord!.sent_at.slice(0, 16)}`));
@@ -350,6 +424,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
           console.log(chalk.dim("\n  No replies received yet."));
         }
         console.log();
+        output({ email: emailRecord, ...replyPagePayload(replies, total, limit, offset) }, "");
       } catch (e) { handleError(e); }
     });
 
@@ -364,28 +439,23 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         else {
           const defaultId = getDefaultProviderId();
           if (defaultId) {
-            const resolved = resolvePartialId(db, "providers", defaultId);
-            if (resolved) { resolvedProviderId = resolved; }
-            else { handleError(new Error(`Default provider not found: ${defaultId}. Update with 'emails config set default_provider <id>'`)); }
+            resolvedProviderId = resolvePartialIdOrThrow(db, "providers", defaultId);
           } else {
-            const providers = listProviders(db).filter((p) => p.active);
-            if (providers.length === 0) handleError(new Error("No active providers. Add one with 'emails provider add'"));
-            resolvedProviderId = providers[0]!.id;
+            const activeProviderId = getLatestActiveProviderId(undefined, db);
+            if (!activeProviderId) handleError(new Error("No active providers. Add one with 'emails provider add'"));
+            resolvedProviderId = activeProviderId!;
           }
         }
         const provider = getProvider(resolvedProviderId!, db);
         if (!provider) handleError(new Error(`Provider not found: ${resolvedProviderId!}`));
+        const preferredAddress = getPreferredActiveAddressEmail({ provider_id: resolvedProviderId! }, db);
         let toEmail = opts?.to;
         if (!toEmail) {
-          const addrs = listAddresses(resolvedProviderId!, db);
-          const v = addrs.find((a) => a.verified);
-          if (v) { toEmail = v.email; } else if (addrs.length > 0) { toEmail = addrs[0]!.email; }
-          else { handleError(new Error("No --to address specified and no addresses found for this provider")); }
+          if (preferredAddress) toEmail = preferredAddress;
+          else handleError(new Error("No --to address specified and no addresses found for this provider"));
         }
-        const fromAddrs = listAddresses(resolvedProviderId!, db);
         let fromEmail: string;
-        const vf = fromAddrs.find((a) => a.verified);
-        if (vf) { fromEmail = vf.email; } else if (fromAddrs.length > 0) { fromEmail = fromAddrs[0]!.email; }
+        if (preferredAddress) { fromEmail = preferredAddress; }
         else { handleError(new Error("No sender addresses configured for this provider. Add one with 'emails address add'")); }
         const ts = new Date().toISOString();
         const subject = `Test from open-emails \u2014 ${ts}`;
@@ -406,11 +476,14 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .command("export <type>")
     .description("Export emails or events (type: emails | events)")
     .option("--provider <id>", "Filter by provider ID")
+    .option("--from <email>", "Filter exported emails by sender address")
     .option("--since <date>", "Filter from date (ISO)")
     .option("--until <date>", "Filter until date (ISO)")
+    .option("--limit <n>", "Maximum rows to export")
+    .option("--offset <n>", "Number of rows to skip")
     .option("--format <fmt>", "Output format: json | csv", "json")
     .option("--output <file>", "Write to file instead of stdout")
-    .action((type: string, opts: { provider?: string; since?: string; until?: string; format?: string; output?: string }) => {
+    .action((type: string, opts: { provider?: string; from?: string; since?: string; until?: string; limit?: string; offset?: string; format?: string; output?: string }) => {
       try {
         if (type !== "emails" && type !== "events") {
           handleError(new Error("Export type must be 'emails' or 'events'"));
@@ -419,13 +492,17 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         const { exportEmailsCsv, exportEmailsJson, exportEventsCsv, exportEventsJson } = require("../../lib/export.js");
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const fmt = opts.format ?? "json";
+        const hasPage = opts.limit !== undefined || opts.offset !== undefined;
+        const limit = hasPage ? parseCliPositiveIntOption(opts.limit, 50, MAX_EMAIL_EXPORT_LIMIT) : undefined;
+        const offset = hasPage ? parseCliNonNegativeIntOption(opts.offset, 0) : undefined;
+        const page = hasPage ? { limit, offset } : {};
         let result: string;
 
         if (type === "emails") {
-          const filters = { provider_id: providerId, since: opts.since, until: opts.until };
+          const filters = { provider_id: providerId, from_address: opts.from, since: opts.since, until: opts.until, ...page };
           result = fmt === "csv" ? exportEmailsCsv(filters) : exportEmailsJson(filters);
         } else {
-          const filters = { provider_id: providerId, since: opts.since };
+          const filters = { provider_id: providerId, since: opts.since, until: opts.until, ...page };
           result = fmt === "csv" ? exportEventsCsv(filters) : exportEventsJson(filters);
         }
 

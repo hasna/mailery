@@ -13,6 +13,7 @@
 import type { Provider } from "../../types/index.js";
 import { getAdapter } from "../../providers/index.js";
 import { getDomainProvisioning } from "../../db/provisioning.js";
+import { listInboundSubjectsForRecipient } from "../../db/inbound.js";
 import type { Database } from "../../db/database.js";
 import type { DomainDeps, AddressDeps } from "./orchestrator.js";
 import { runRoundtrip } from "./roundtrip.js";
@@ -103,6 +104,7 @@ export function makeAddressDeps(opts: RealDepsOptions): AddressDeps {
       void prov;
       const { sendWithFailover } = await import("../send.js");
       const { syncS3Inbox } = await import("../s3-sync.js");
+      const roundtripStartedAt = new Date().toISOString();
       const report = await runRoundtrip(
         {
           send: async ({ from, to, subject, text }) => {
@@ -113,7 +115,7 @@ export function makeAddressDeps(opts: RealDepsOptions): AddressDeps {
           fetchReceived: async (mailbox) => {
             await syncS3Inbox({ bucket: opts.inboundBucket, prefix: `inbound/${domain}/`, providerId, limit: 1000, region, db: opts.db });
             const db = opts.db ?? (await import("../../db/database.js")).getDatabase();
-            return db.query("SELECT subject FROM inbound_emails WHERE to_addresses LIKE ?").all(`%${mailbox}%`) as { subject: string }[];
+            return listInboundSubjectsForRecipient(mailbox, { since: roundtripStartedAt, limit: 100 }, db);
           },
         },
         { addresses: [ctx.email, ctx.email], count: 1, tokenPrefix: `VAL-${Date.now()}`, pollAttempts: 8, pollIntervalMs: 8000 },

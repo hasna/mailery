@@ -33,8 +33,8 @@ emails inbox sync --all
 # Check sent email log
 emails email list
 
-# Sync email data to RDS PostgreSQL
-emails cloud push
+# Sync email data to remote PostgreSQL storage
+emails storage push
 ```
 
 ## Email UI (`emails ui`)
@@ -90,7 +90,7 @@ emails group             # recipient groups
 emails sequence          # drip sequences
 emails schedule          # scheduled emails: list, cancel, run
 emails triage            # AI triage: classify, prioritize, draft replies
-emails cloud             # sync to/from cloud (RDS PostgreSQL): push, pull, migrate
+emails storage           # sync to/from remote PostgreSQL storage: push, pull, migrate
 emails aws               # AWS setup: SES receipt rules, S3 inbound bucket
 emails config            # configuration (key=value)
 emails stats             # delivery statistics (--inbox for received mail)
@@ -163,7 +163,7 @@ emails serve   # or: emails-serve   (HOST=0.0.0.0 to allow other machines)
 curl -H "Authorization: Bearer $ESK" localhost:3900/api/v1/addresses
 curl -H "Authorization: Bearer $ESK" -X POST localhost:3900/api/v1/provision/address -d '{"email":"ops@example.com"}'
 curl -H "Authorization: Bearer $ESK" -X POST localhost:3900/api/v1/send -d '{"from":"ops@example.com","to":"x@y.com","subject":"hi","text":"yo"}'
-curl -H "Authorization: Bearer $ESK" localhost:3900/api/v1/inbox          # mail to your addresses
+curl -H "Authorization: Bearer $ESK" 'localhost:3900/api/v1/inbox?limit=50&offset=0&search=invoice'  # scoped, paginated inbox
 ```
 
 ## Library API
@@ -222,17 +222,32 @@ emails inbox watch                        # auto-delivers new mail in real-time 
 Alternatively, point an SNS HTTP subscription at `POST /webhook/ses-inbound` on
 `emails serve` — it auto-confirms the subscription and syncs on each notification.
 
-## Cloud Sync (PostgreSQL)
+## Storage Sync (PostgreSQL)
+
+Canonical production storage is the `emails` database on
+`hasna-xyz-infra-apps-prod-postgres`. The runtime secret lives at
+`hasna/xyz/opensource/emails/prod/rds`; load it into the canonical env var
+without printing or committing the connection string.
 
 ```bash
-# Configure RDS
-emails cloud setup --host <rds-host> --username <user>
+# Configure RDS/PostgreSQL
+export HASNA_EMAILS_DATABASE_URL="postgres://..."
+
+# Check config and sync history
+emails storage status
 
 # Push local SQLite → RDS
-emails cloud push
+emails storage push
 
 # Pull RDS → local
-emails cloud pull
+emails storage pull
+```
+
+Storage internals are intentionally kept off the default library entrypoint. Import
+them from the explicit subpath when building storage tooling:
+
+```ts
+import { getStorageStatus, storagePush, storagePull } from "@hasna/emails/storage";
 ```
 
 ## Data

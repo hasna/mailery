@@ -238,6 +238,27 @@ function collectAttachmentsFromPayload(part: GmailMessagePart | undefined, attac
   return attachments;
 }
 
+function listExistingInboundMessageIds(providerId: string, messages: GmailListMessage[], db: Database): Set<string> {
+  const messageIds = [...new Set(messages.map((message) => message.id).filter(Boolean))];
+  const existing = new Set<string>();
+
+  for (let i = 0; i < messageIds.length; i += 500) {
+    const chunk = messageIds.slice(i, i + 500);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const rows = db.query(
+      `SELECT message_id
+         FROM inbound_emails
+        WHERE provider_id = ?
+          AND message_id IN (${placeholders})`,
+    ).all(providerId, ...chunk) as Array<{ message_id: string | null }>;
+    for (const row of rows) {
+      if (row.message_id) existing.add(row.message_id);
+    }
+  }
+
+  return existing;
+}
+
 function rawReceivedAt(detail: GmailMessageDetail, parsedDate: Date | undefined): string {
   if (parsedDate && !isNaN(parsedDate.getTime())) return parsedDate.toISOString();
   if (detail.internalDate && /^\d+$/.test(detail.internalDate)) {
@@ -346,20 +367,18 @@ async function syncGmailMessages(
   const archiveRegion = syncConfig.archive_s3_region ?? syncConfig.s3_region;
   let latestHistoryId: string | undefined;
   const concurrency = normalizeConcurrency(opts.messageConcurrency);
+  const claimedMessageIds = listExistingInboundMessageIds(opts.providerId, capped, db);
 
   await mapWithConcurrency(capped, concurrency, async (msgRef) => {
     if (!msgRef.id) return;
 
-    try {
-      // Dedup
-      const existing = db
-        .query("SELECT id FROM inbound_emails WHERE provider_id = ? AND message_id = ? LIMIT 1")
-        .get(opts.providerId, msgRef.id);
-      if (existing) {
-        result.skipped++;
-        return;
-      }
+    if (claimedMessageIds.has(msgRef.id)) {
+      result.skipped++;
+      return;
+    }
+    claimedMessageIds.add(msgRef.id);
 
+    try {
       const archiveBucket = opts.archiveS3Bucket ?? syncConfig.archive_s3_bucket;
       if (archiveBucket) {
         const rawResult = await runGmailOperation<GmailMessageDetail>(

@@ -1,5 +1,6 @@
 import type { Database } from "../db/database.js";
 import { getDatabase } from "../db/database.js";
+import { sqlEmailDomain } from "../db/email-address-sql.js";
 
 export interface WarmingSchedule {
   id: string;
@@ -74,9 +75,13 @@ export function getTodayLimit(schedule: WarmingSchedule): number | null {
 export function getTodaySentCount(domain: string, db?: Database): number {
   const d = db || getDatabase();
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const tomorrow = new Date(`${today}T00:00:00.000Z`);
+  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+  const start = `${today}T00:00:00`;
+  const end = tomorrow.toISOString().slice(0, 19);
   const result = d.query(
-    "SELECT COUNT(*) as count FROM emails WHERE from_address LIKE ? AND sent_at >= ? AND sent_at < ?"
-  ).get(`%@${domain}`, `${today}T00:00:00`, `${today}T23:59:59`) as { count: number } | null;
+    `SELECT COUNT(*) as count FROM emails WHERE ${sqlEmailDomain("from_address")} = ? AND sent_at >= ? AND sent_at < ?`,
+  ).get(domain.toLowerCase(), start, end) as { count: number } | null;
   return result?.count ?? 0;
 }
 

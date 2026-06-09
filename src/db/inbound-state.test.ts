@@ -4,7 +4,10 @@ import { getDatabase, resetDatabase } from "./database.js";
 import {
   storeInboundEmail, listInboundEmails, getInboundEmail,
   setInboundRead, setInboundArchived, setInboundStarred,
-  addInboundLabel, removeInboundLabel, getUnreadCount,
+  setInboundReadSummary, setInboundArchivedSummary, setInboundStarredSummary,
+  setInboundReadFlag, setInboundArchivedFlag, setInboundStarredFlag,
+  addInboundLabel, removeInboundLabel, addInboundLabelSummary, removeInboundLabelSummary,
+  getUnreadCount,
 } from "./inbound.js";
 
 let db: Database;
@@ -43,6 +46,106 @@ describe("inbound read-state", () => {
   it("throws on unknown id", () => {
     expect(() => setInboundRead("nope", true)).toThrow(/not found/i);
   });
+
+  it("uses a narrow existence check before hydrating the updated row", () => {
+    const e = seed("wide-read");
+    const queries: string[] = [];
+    const runs: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        if (prop === "run") return (sql: string, ...args: unknown[]) => {
+          runs.push(sql);
+          return target.run(sql, ...args);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    const updated = setInboundRead(e.id, true, recordingDb);
+
+    expect(updated.is_read).toBe(true);
+    expect(runs).toHaveLength(1);
+    expect(queries[0]).toContain("SELECT 1 AS ok");
+    expect(queries[0]).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
+    expect(queries.filter((sql) => sql.includes("SELECT * FROM inbound_emails WHERE id = ?"))).toHaveLength(1);
+  });
+
+  it("updates hot UI flags without selecting full message rows", () => {
+    const e = seed("hot-flags");
+    const queries: string[] = [];
+    const runs: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        if (prop === "run") return (sql: string, ...args: unknown[]) => {
+          runs.push(sql);
+          return target.run(sql, ...args);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    expect(setInboundReadFlag(e.id, true, recordingDb)).toBe(true);
+    expect(setInboundStarredFlag(e.id, true, recordingDb)).toBe(true);
+    expect(setInboundArchivedFlag(e.id, true, recordingDb)).toBe(true);
+
+    expect(runs).toHaveLength(3);
+    expect(queries).toHaveLength(3);
+    expect(queries.every((sql) => sql.includes("SELECT 1 AS ok"))).toBe(true);
+    expect(queries.join("\n")).not.toContain("SELECT *");
+    expect(queries.join("\n")).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
+    expect(getInboundEmail(e.id, db)).toMatchObject({ is_read: true, is_starred: true, is_archived: true });
+  });
+
+  it("returns lean summaries for state mutations without hydrating bodies", () => {
+    const e = storeInboundEmail({
+      provider_id: null,
+      message_id: "<wide-state@x.com>",
+      from_address: "s@x.com",
+      to_addresses: ["me@x.com"],
+      cc_addresses: [],
+      subject: "wide-state",
+      text_body: "large body ".repeat(1000),
+      html_body: `<p>${"large html ".repeat(1000)}</p>`,
+      attachments: [],
+      headers: { "x-large": "header" },
+      raw_size: 1,
+      received_at: new Date().toISOString(),
+    }, db);
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    const read = setInboundReadSummary(e.id, true, recordingDb);
+    const starred = setInboundStarredSummary(e.id, true, recordingDb);
+    const archived = setInboundArchivedSummary(e.id, true, recordingDb);
+
+    expect(read.is_read).toBe(true);
+    expect(starred.is_starred).toBe(true);
+    expect(archived.is_archived).toBe(true);
+    expect("text_body" in read).toBe(false);
+    expect("html_body" in read).toBe(false);
+    expect("headers" in read).toBe(false);
+    expect(queries.join("\n")).not.toContain("SELECT *");
+    expect(queries.join("\n")).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
+  });
 });
 
 describe("inbound archive / star", () => {
@@ -77,6 +180,67 @@ describe("inbound labels", () => {
     expect(getInboundEmail(e.id, db)!.label_ids).toEqual(["urgent"]);
     expect(listInboundEmails({ label: "work" }, db)).toHaveLength(0);
   });
+
+  it("mutates labels with a narrow label projection before hydrating", () => {
+    const e = seed("labels");
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    addInboundLabel(e.id, "work", recordingDb);
+
+    expect(queries[0]).toContain("SELECT label_ids_json");
+    expect(queries[0]).not.toContain("SELECT *");
+    expect(queries[0]).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
+    expect(queries.filter((sql) => sql.includes("SELECT * FROM inbound_emails WHERE id = ?"))).toHaveLength(1);
+  });
+
+  it("returns lean summaries for label mutations without hydrating bodies", () => {
+    const e = storeInboundEmail({
+      provider_id: null,
+      message_id: "<wide-label@x.com>",
+      from_address: "s@x.com",
+      to_addresses: ["me@x.com"],
+      cc_addresses: [],
+      subject: "wide-label",
+      text_body: "large body ".repeat(1000),
+      html_body: `<p>${"large html ".repeat(1000)}</p>`,
+      attachments: [],
+      headers: { "x-large": "header" },
+      raw_size: 1,
+      received_at: new Date().toISOString(),
+    }, db);
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") return (sql: string) => {
+          queries.push(sql);
+          return target.query(sql);
+        };
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as typeof db;
+
+    const added = addInboundLabelSummary(e.id, "work", recordingDb);
+    const removed = removeInboundLabelSummary(e.id, "work", recordingDb);
+
+    expect(added.label_ids).toEqual(["work"]);
+    expect(removed.label_ids).toEqual([]);
+    expect("text_body" in added).toBe(false);
+    expect("html_body" in added).toBe(false);
+    expect("headers" in added).toBe(false);
+    expect(queries.join("\n")).not.toContain("SELECT *");
+    expect(queries.join("\n")).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
+  });
 });
 
 describe("inbound filters + unread count", () => {
@@ -93,5 +257,42 @@ describe("inbound filters + unread count", () => {
     const r = seed("r1"); setInboundRead(r.id, true);
     const ar = seed("a1"); setInboundArchived(ar.id, true);
     expect(getUnreadCount(undefined, db)).toBe(1);
+  });
+
+  it("getUnreadCount excludes Gmail SENT rows", () => {
+    const providerId = "gmail-provider";
+    db.run("INSERT INTO providers (id, name, type) VALUES (?, 'gmail', 'gmail')", [providerId]);
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "<received@x.com>",
+      from_address: "external@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "received",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: new Date().toISOString(),
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "<sent@x.com>",
+      from_address: "me@example.com",
+      to_addresses: ["external@example.com"],
+      cc_addresses: [],
+      subject: "sent",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      label_ids: ["SENT"],
+      raw_size: 1,
+      received_at: new Date().toISOString(),
+    }, db);
+
+    expect(getUnreadCount(undefined, db)).toBe(1);
+    expect(getUnreadCount(providerId, db)).toBe(1);
   });
 });

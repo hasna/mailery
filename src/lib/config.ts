@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "fs";
 import { join } from "path";
 import { getDataDir } from "../db/database.js";
 import { resolveCloudflareAuth, type CloudflareAuth } from "./cloudflare-auth.js";
@@ -7,21 +7,93 @@ import { resolveCloudflareAuth, type CloudflareAuth } from "./cloudflare-auth.js
 function getConfigDir(): string { return getDataDir(); }
 function getConfigPath(): string { return join(getConfigDir(), "config.json"); }
 
-interface EmailsConfig {
+export interface EmailsConfig {
   default_provider?: string;
   [key: string]: unknown;
 }
 
+export const CANONICAL_OPEN_EMAILS_S3_BUCKET = "hasna-xyz-opensource-emails-prod";
+export const CANONICAL_OPEN_EMAILS_S3_REGION = "us-east-1";
+export const CANONICAL_OPEN_EMAILS_SECRETS_BASE = "hasna/xyz/opensource/emails/prod";
+export const CANONICAL_OPEN_EMAILS_SECRET_PATHS = {
+  env: `${CANONICAL_OPEN_EMAILS_SECRETS_BASE}/env`,
+  aws: `${CANONICAL_OPEN_EMAILS_SECRETS_BASE}/aws`,
+  s3: `${CANONICAL_OPEN_EMAILS_SECRETS_BASE}/s3`,
+  rds: `${CANONICAL_OPEN_EMAILS_SECRETS_BASE}/rds`,
+} as const;
+export const CANONICAL_OPEN_EMAILS_RDS_CLUSTER = "hasna-xyz-infra-apps-prod-postgres";
+export const CANONICAL_OPEN_EMAILS_RDS_DATABASE = "emails";
+export const CANONICAL_OPEN_EMAILS_RDS_SECRET_PATH = CANONICAL_OPEN_EMAILS_SECRET_PATHS.rds;
+
+export interface CanonicalOpenEmailsRdsConfig {
+  cluster: typeof CANONICAL_OPEN_EMAILS_RDS_CLUSTER;
+  database: typeof CANONICAL_OPEN_EMAILS_RDS_DATABASE;
+  runtimePath: typeof CANONICAL_OPEN_EMAILS_RDS_SECRET_PATH;
+  env: "HASNA_EMAILS_DATABASE_URL";
+  fallbackEnv: "EMAILS_DATABASE_URL";
+}
+
+export function getCanonicalOpenEmailsRdsConfig(): CanonicalOpenEmailsRdsConfig {
+  return {
+    cluster: CANONICAL_OPEN_EMAILS_RDS_CLUSTER,
+    database: CANONICAL_OPEN_EMAILS_RDS_DATABASE,
+    runtimePath: CANONICAL_OPEN_EMAILS_RDS_SECRET_PATH,
+    env: "HASNA_EMAILS_DATABASE_URL",
+    fallbackEnv: "EMAILS_DATABASE_URL",
+  };
+}
+
+interface ConfigCacheEntry {
+  path: string;
+  mtimeMs: number;
+  size: number;
+  config: EmailsConfig;
+}
+
+let configCache: ConfigCacheEntry | null = null;
+
+function cloneConfig(config: EmailsConfig): EmailsConfig {
+  try {
+    return JSON.parse(JSON.stringify(config)) as EmailsConfig;
+  } catch {
+    return { ...config };
+  }
+}
+
 export function loadConfig(): EmailsConfig {
   const path = getConfigPath();
-  if (!existsSync(path)) return {};
-  return JSON.parse(readFileSync(path, "utf-8"));
+  if (!existsSync(path)) {
+    if (configCache?.path === path) configCache = null;
+    return {};
+  }
+  let stats: ReturnType<typeof statSync>;
+  try {
+    stats = statSync(path);
+  } catch {
+    if (configCache?.path === path) configCache = null;
+    return {};
+  }
+  if (configCache?.path === path && configCache.mtimeMs === stats.mtimeMs && configCache.size === stats.size) {
+    return cloneConfig(configCache.config);
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8"));
+    const config = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as EmailsConfig) : {};
+    configCache = { path, mtimeMs: stats.mtimeMs, size: stats.size, config: cloneConfig(config) };
+    return cloneConfig(config);
+  } catch {
+    configCache = { path, mtimeMs: stats.mtimeMs, size: stats.size, config: {} };
+    return {};
+  }
 }
 
 export function saveConfig(config: EmailsConfig): void {
   const dir = getConfigDir();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(getConfigPath(), JSON.stringify(config, null, 2));
+  const path = getConfigPath();
+  writeFileSync(path, JSON.stringify(config, null, 2));
+  const stats = statSync(path);
+  configCache = { path, mtimeMs: stats.mtimeMs, size: stats.size, config: cloneConfig(config) };
 }
 
 export function getConfigValue(key: string): unknown {
@@ -57,9 +129,9 @@ export interface GmailSyncConfig {
   s3_prefix?: string;
   /** S3 region (default: us-east-1) */
   s3_region?: string;
-  /** S3 bucket for durable Gmail archive objects, usually "hasna-xyz-prod-emails" */
+  /** S3 bucket for durable Gmail archive objects. */
   archive_s3_bucket?: string;
-  /** S3 region for durable Gmail archive objects (default: us-west-2) */
+  /** S3 region for durable Gmail archive objects (default: us-east-1) */
   archive_s3_region?: string;
   /** S3 prefix for Gmail archive objects (default: "gmail") */
   archive_s3_prefix?: string;
@@ -132,7 +204,7 @@ export function getCloudflareToken(): string | undefined {
 
 /**
  * Resolve Cloudflare auth (scoped token OR global key + email) from the emails
- * config file, standard env vars, or the HASNAXYZ vault env names. Returns
+ * config file or standard env vars. Returns
  * undefined when nothing is configured.
  */
 export function getCloudflareAuth(): CloudflareAuth | undefined {
@@ -151,8 +223,31 @@ export function getGmailSyncConfig(): GmailSyncConfig {
     s3_bucket: config["gmail_s3_bucket"] as string | undefined,
     s3_prefix: (config["gmail_s3_prefix"] as string | undefined) ?? "emails",
     s3_region: (config["gmail_s3_region"] as string | undefined) ?? "us-east-1",
-    archive_s3_bucket: config["gmail_archive_s3_bucket"] as string | undefined,
-    archive_s3_region: (config["gmail_archive_s3_region"] as string | undefined) ?? "us-west-2",
-    archive_s3_prefix: (config["gmail_archive_s3_prefix"] as string | undefined) ?? "gmail",
+    archive_s3_bucket: (config["gmail_archive_s3_bucket"] as string | undefined)
+      ?? process.env["HASNA_EMAILS_ARCHIVE_S3_BUCKET"]
+      ?? process.env["EMAILS_ARCHIVE_S3_BUCKET"],
+    archive_s3_region: getDefaultGmailArchiveS3Region(config),
+    archive_s3_prefix: getDefaultGmailArchiveS3Prefix(config),
   };
+}
+
+export function getDefaultGmailArchiveS3Bucket(config: EmailsConfig = loadConfig()): string {
+  return (config["gmail_archive_s3_bucket"] as string | undefined)
+    ?? process.env["HASNA_EMAILS_ARCHIVE_S3_BUCKET"]
+    ?? process.env["EMAILS_ARCHIVE_S3_BUCKET"]
+    ?? CANONICAL_OPEN_EMAILS_S3_BUCKET;
+}
+
+export function getDefaultGmailArchiveS3Region(config: EmailsConfig = loadConfig()): string {
+  return (config["gmail_archive_s3_region"] as string | undefined)
+    ?? process.env["HASNA_EMAILS_ARCHIVE_S3_REGION"]
+    ?? process.env["EMAILS_ARCHIVE_S3_REGION"]
+    ?? CANONICAL_OPEN_EMAILS_S3_REGION;
+}
+
+export function getDefaultGmailArchiveS3Prefix(config: EmailsConfig = loadConfig()): string {
+  return (config["gmail_archive_s3_prefix"] as string | undefined)
+    ?? process.env["HASNA_EMAILS_ARCHIVE_S3_PREFIX"]
+    ?? process.env["EMAILS_ARCHIVE_S3_PREFIX"]
+    ?? "gmail";
 }

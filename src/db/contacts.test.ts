@@ -7,9 +7,13 @@ import {
   suppressContact,
   unsuppressContact,
   incrementSendCount,
+  incrementSendCounts,
   incrementBounceCount,
+  incrementBounceCounts,
   incrementComplaintCount,
+  incrementComplaintCounts,
   isContactSuppressed,
+  getSuppressedEmailSet,
 } from "./contacts.js";
 
 beforeEach(() => {
@@ -81,6 +85,19 @@ describe("listContacts", () => {
     expect(active.length).toBe(1);
     expect(active[0]!.email).toBe("a@example.com");
   });
+
+  it("paginates contacts after applying suppression filters", () => {
+    for (let i = 0; i < 5; i++) {
+      suppressContact(`suppressed-${i}@example.com`);
+    }
+    upsertContact("active@example.com");
+
+    const page = listContacts({ suppressed: true, limit: 2, offset: 1 });
+
+    expect(page).toHaveLength(2);
+    expect(page.every((contact) => contact.suppressed)).toBe(true);
+    expect(page.map((contact) => contact.email)).not.toContain("active@example.com");
+  });
 });
 
 describe("suppressContact / unsuppressContact", () => {
@@ -122,6 +139,23 @@ describe("incrementSendCount", () => {
   });
 });
 
+describe("incrementSendCounts", () => {
+  it("increments multiple contacts and preserves duplicate counts", () => {
+    upsertContact("alice@example.com");
+
+    incrementSendCounts(["alice@example.com", "bob@example.com", "alice@example.com"]);
+
+    expect(getContact("alice@example.com")?.send_count).toBe(2);
+    expect(getContact("bob@example.com")?.send_count).toBe(1);
+  });
+
+  it("does nothing for an empty input", () => {
+    incrementSendCounts([]);
+
+    expect(listContacts()).toEqual([]);
+  });
+});
+
 describe("incrementBounceCount", () => {
   it("increments bounce count", () => {
     upsertContact("test@example.com");
@@ -148,6 +182,32 @@ describe("incrementBounceCount", () => {
   });
 });
 
+describe("incrementBounceCounts", () => {
+  it("increments multiple contacts and preserves duplicate bounce counts", () => {
+    upsertContact("alice@example.com");
+
+    incrementBounceCounts(["alice@example.com", "bob@example.com", "alice@example.com"]);
+
+    expect(getContact("alice@example.com")?.bounce_count).toBe(2);
+    expect(getContact("bob@example.com")?.bounce_count).toBe(1);
+  });
+
+  it("auto-suppresses contacts that cross the bounce threshold in one batch", () => {
+    upsertContact("bouncy@example.com");
+    incrementBounceCounts(["bouncy@example.com", "bouncy@example.com", "bouncy@example.com"]);
+
+    const contact = getContact("bouncy@example.com");
+    expect(contact?.bounce_count).toBe(3);
+    expect(contact?.suppressed).toBe(true);
+  });
+
+  it("does nothing for an empty input", () => {
+    incrementBounceCounts([]);
+
+    expect(listContacts()).toEqual([]);
+  });
+});
+
 describe("incrementComplaintCount", () => {
   it("increments complaint count", () => {
     upsertContact("test@example.com");
@@ -155,6 +215,23 @@ describe("incrementComplaintCount", () => {
     incrementComplaintCount("test@example.com");
     const c = getContact("test@example.com");
     expect(c?.complaint_count).toBe(2);
+  });
+});
+
+describe("incrementComplaintCounts", () => {
+  it("increments multiple contacts and preserves duplicate complaint counts", () => {
+    upsertContact("alice@example.com");
+
+    incrementComplaintCounts(["alice@example.com", "bob@example.com", "alice@example.com"]);
+
+    expect(getContact("alice@example.com")?.complaint_count).toBe(2);
+    expect(getContact("bob@example.com")?.complaint_count).toBe(1);
+  });
+
+  it("does nothing for an empty input", () => {
+    incrementComplaintCounts([]);
+
+    expect(listContacts()).toEqual([]);
   });
 });
 
@@ -171,5 +248,42 @@ describe("isContactSuppressed", () => {
   it("returns true for suppressed contact", () => {
     suppressContact("test@example.com");
     expect(isContactSuppressed("test@example.com")).toBe(true);
+  });
+});
+
+describe("getSuppressedEmailSet", () => {
+  it("returns only suppressed emails from the input list", () => {
+    upsertContact("active@example.com");
+    suppressContact("blocked@example.com");
+    suppressContact("also-blocked@example.com");
+
+    const suppressed = getSuppressedEmailSet([
+      "active@example.com",
+      "blocked@example.com",
+      "blocked@example.com",
+      "also-blocked@example.com",
+      "unknown@example.com",
+    ]);
+
+    expect(suppressed).toEqual(new Set(["blocked@example.com", "also-blocked@example.com"]));
+  });
+
+  it("chunks large input lists", () => {
+    for (let i = 0; i < 525; i++) {
+      if (i % 100 === 0) suppressContact(`user-${i}@example.com`);
+    }
+
+    const suppressed = getSuppressedEmailSet(
+      Array.from({ length: 525 }, (_, i) => `user-${i}@example.com`),
+    );
+
+    expect(suppressed).toEqual(new Set([
+      "user-0@example.com",
+      "user-100@example.com",
+      "user-200@example.com",
+      "user-300@example.com",
+      "user-400@example.com",
+      "user-500@example.com",
+    ]));
   });
 });

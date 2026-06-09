@@ -1,29 +1,50 @@
 import type { Command } from "commander";
-import chalk from "chalk";
-import { fromIni } from "@aws-sdk/credential-provider-ini";
-import { S3Client } from "@aws-sdk/client-s3";
-import { runConnectorOperation } from "@hasna/connectors";
-import { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory, listGmailConnectorProfiles, listGmailLabels } from "../../lib/gmail-sync.js";
+import type { EmailSystemStatus } from "../../lib/agent-context.js";
+import chalk from "../../lib/chalk-lite.js";
 import {
-  listInboundEmails, getInboundEmail, deleteInboundEmail, clearInboundEmails, getInboundCount,
-  setInboundRead, setInboundArchived, setInboundStarred,
-  addInboundLabel, removeInboundLabel, getUnreadCount,
+  listInboundEmailSummaries, getInboundEmail, getInboundEmailSummary, deleteInboundEmail, clearInboundEmails,
+  getReceivedInboundCount, getLatestReceivedInboundAt,
+  getInboundAttachmentPaths,
+  setInboundRead, setInboundReadSummary, setInboundArchivedSummary, setInboundStarredSummary,
+  addInboundLabelSummary, removeInboundLabelSummary, getUnreadCount, normalizeEmailAddress,
 } from "../../db/inbound.js";
 import { updateLastSynced } from "../../db/gmail-sync-state.js";
-import { createProvider, listProviders } from "../../db/providers.js";
-import { getDatabase, resolvePartialId } from "../../db/database.js";
+import { createProvider, getProviderByNameAndType, listActiveProviderSummaries, listProviderNamesByIds } from "../../db/providers.js";
+import { getDatabase, resolvePartialIdOrThrow } from "../../db/database.js";
 import { confirmDestructiveAction, handleError } from "../utils.js";
-import { autoPull } from "../tui/autopull.js";
-import { findVerificationCode } from "../../lib/verification-code.js";
-import { getEmailSystemStatus } from "../../lib/agent-context.js";
-import { getAddressOwnershipDetail } from "../../lib/address-ownership.js";
+import { findVerificationCode, listVerificationCodeCandidates } from "../../lib/verification-code.js";
+import { enrichAddresses } from "../../lib/address-ownership.js";
 import { resolveAlias } from "../../db/aliases.js";
-import { listAddresses } from "../../db/addresses.js";
-import { listDomains } from "../../db/domains.js";
-import { getAddressProvisioning, getDomainProvisioning } from "../../db/provisioning.js";
+import { findAddressesByEmail } from "../../db/addresses.js";
+import { findDomainsByName } from "../../db/domains.js";
+import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.js";
+import { sqlEmailAddress } from "../../db/email-address-sql.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
 
-const DEFAULT_GMAIL_ARCHIVE_BUCKET = "hasna-xyz-prod-emails";
+const MAX_INBOX_CLI_LIMIT = 1000;
+const MAX_GMAIL_SYNC_CONCURRENCY = 64;
+const MAX_ARCHIVE_MIGRATE_LIMIT = 10_000;
+
+function resolveInboundEmailId(id: string): string {
+  return resolvePartialIdOrThrow(getDatabase(), "inbound_emails", id);
+}
+
+function parsePositiveIntOption(value: string | undefined, fallback: number, max = MAX_INBOX_CLI_LIMIT): number {
+  const parsed = Number.parseInt(value ?? String(fallback), 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.min(max, parsed);
+}
+
+function parseNonNegativeIntOption(value: string | undefined, fallback = 0): number {
+  const parsed = Number.parseInt(value ?? String(fallback), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
+}
+
+async function runAutoPull(opts: { s3?: boolean; gmail?: boolean; limit?: number }) {
+  const { autoPull } = await import("../tui/autopull.js");
+  return autoPull(opts);
+}
 
 interface CodeOptions {
   from?: string;
@@ -43,22 +64,24 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
   async function runCodeCommand(address: string, opts: CodeOptions): Promise<void> {
     const normalized = address.trim().toLowerCase();
-    const limit = Math.max(1, parseInt(opts.limit ?? "50", 10) || 50);
+    const limit = parsePositiveIntOption(opts.limit, 50);
     const watching = opts.watch || opts.wait;
     const timeoutMs = Math.max(1, parseInt(opts.timeout ?? "120", 10) || 120) * 1000;
     const intervalMs = Math.max(1, parseInt(opts.interval ?? "5", 10) || 5) * 1000;
     const deadline = Date.now() + timeoutMs;
 
+    const findLocalMatch = () => {
+      const candidates = listVerificationCodeCandidates(normalized, {
+        limit,
+        since: opts.since,
+        from: opts.from,
+        subject: opts.subject,
+      }, getDatabase());
+      return findVerificationCode(candidates, { from: opts.from, subject: opts.subject });
+    };
+
     while (true) {
-      if (opts.refresh !== false) {
-        await autoPull({ s3: true, gmail: opts.gmail === true, limit: Math.max(limit, 1000) });
-      }
-
-      const local = listInboundEmails({ recipients: [normalized], limit, since: opts.since }, getDatabase());
-      const archived = listInboundEmails({ recipients: [normalized], limit, since: opts.since, archived: true }, getDatabase());
-      const byId = new Map([...local, ...archived].map((email) => [email.id, email]));
-      const match = findVerificationCode([...byId.values()], { from: opts.from, subject: opts.subject });
-
+      let match = findLocalMatch();
       if (match) {
         output({
           code: match.code,
@@ -69,6 +92,22 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           confidence: match.confidence,
         }, match.code);
         return;
+      }
+
+      if (opts.refresh !== false) {
+        await runAutoPull({ s3: true, gmail: opts.gmail === true, limit: Math.max(limit, 1000) });
+        match = findLocalMatch();
+        if (match) {
+          output({
+            code: match.code,
+            email_id: match.email.id,
+            from: match.email.from_address,
+            subject: match.email.subject,
+            received_at: match.email.received_at,
+            confidence: match.confidence,
+          }, match.code);
+          return;
+        }
       }
 
       if (!watching || Date.now() >= deadline) {
@@ -135,24 +174,37 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     since?: string;
   }): Promise<void> {
     const normalized = address.trim().toLowerCase();
-    const limit = Math.max(1, parseInt(opts.limit ?? "50", 10) || 50);
+    const limit = parsePositiveIntOption(opts.limit, 50);
     const timeoutMs = Math.max(1, parseInt(opts.timeout ?? "120", 10) || 120) * 1000;
     const intervalMs = Math.max(1, parseInt(opts.interval ?? "5", 10) || 5) * 1000;
     const deadline = Date.now() + timeoutMs;
-    const from = opts.from?.toLowerCase();
-    const subject = opts.subject?.toLowerCase();
+
+    const findLocalEmail = () => {
+      const db = getDatabase();
+      const summary = listInboundEmailSummaries({
+        recipients: [normalized],
+        limit: 1,
+        since: opts.since,
+        from: opts.from,
+        subject: opts.subject,
+      }, db)[0];
+      return summary ? getInboundEmail(summary.id, db) : null;
+    };
 
     while (true) {
-      if (opts.refresh !== false) {
-        await autoPull({ s3: true, gmail: opts.gmail === true, limit: Math.max(limit, 1000) });
-      }
-      const email = listInboundEmails({ recipients: [normalized], limit, since: opts.since }, getDatabase())
-        .find((candidate) =>
-          (!from || candidate.from_address.toLowerCase().includes(from)) &&
-          (!subject || candidate.subject.toLowerCase().includes(subject)));
+      let email = findLocalEmail();
       if (email) {
         output(email, email.id);
         return;
+      }
+
+      if (opts.refresh !== false) {
+        await runAutoPull({ s3: true, gmail: opts.gmail === true, limit: Math.max(limit, 1000) });
+        email = findLocalEmail();
+        if (email) {
+          output(email, email.id);
+          return;
+        }
       }
       if (Date.now() >= deadline) {
         output({ email: null, address: normalized }, chalk.dim(`No email found for ${normalized}.`));
@@ -188,13 +240,16 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action(async (address: string, opts: { from?: string; subject?: string; limit?: string; refresh?: boolean; gmail?: boolean; since?: string }) => {
       try {
         const normalized = address.trim().toLowerCase();
-        if (opts.refresh) await autoPull({ s3: true, gmail: opts.gmail === true, limit: Math.max(1000, parseInt(opts.limit ?? "50", 10) || 50) });
-        const from = opts.from?.toLowerCase();
-        const subject = opts.subject?.toLowerCase();
-        const email = listInboundEmails({ recipients: [normalized], limit: parseInt(opts.limit ?? "50", 10), since: opts.since }, getDatabase())
-          .find((candidate) =>
-            (!from || candidate.from_address.toLowerCase().includes(from)) &&
-            (!subject || candidate.subject.toLowerCase().includes(subject)));
+        if (opts.refresh) await runAutoPull({ s3: true, gmail: opts.gmail === true, limit: Math.max(1000, parsePositiveIntOption(opts.limit, 50)) });
+        const db = getDatabase();
+        const summary = listInboundEmailSummaries({
+          recipients: [normalized],
+          limit: 1,
+          since: opts.since,
+          from: opts.from,
+          subject: opts.subject,
+        }, db)[0];
+        const email = summary ? getInboundEmail(summary.id, db) : null;
         if (!email) {
           output({ email: null, address: normalized }, chalk.dim(`No email found for ${normalized}.`));
           process.exitCode = 1;
@@ -218,7 +273,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--since <date>", "Only sync messages after this date (ISO 8601 or YYYY-MM-DD)")
     .option("--all", "Sync all pages until done (use for initial backfill)")
     .option("--history", "Use stored Gmail history cursor for incremental sync")
-    .option("--archive-s3 [bucket]", `Archive raw MIME and metadata to S3 bucket (default: ${DEFAULT_GMAIL_ARCHIVE_BUCKET})`)
+    .option("--archive-s3 [bucket]", "Archive raw MIME and metadata to S3 bucket (default: configured Gmail archive bucket)")
     .option("--no-attachments", "Skip attachment download")
     .action(async (opts: {
       provider?: string;
@@ -235,9 +290,14 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       attachments: boolean;
     }) => {
       try {
+        const { syncGmailInbox, syncGmailInboxAll, syncGmailInboxHistory, listGmailConnectorProfiles } = await import("../../lib/gmail-sync.js");
         const db = getDatabase();
+        const batchSize = parsePositiveIntOption(opts.limit, 50);
+        const messageConcurrency = parsePositiveIntOption(opts.concurrency, 1, MAX_GMAIL_SYNC_CONCURRENCY);
         const archiveBucket = opts.archiveS3
-          ? (typeof opts.archiveS3 === "string" ? opts.archiveS3 : DEFAULT_GMAIL_ARCHIVE_BUCKET)
+          ? typeof opts.archiveS3 === "string"
+            ? opts.archiveS3
+            : (await import("../../lib/config.js")).getDefaultGmailArchiveS3Bucket()
           : undefined;
 
         if (opts.allProfiles) {
@@ -263,8 +323,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
               profile,
               labelFilter: opts.label,
               query: opts.query,
-              batchSize: parseInt(opts.limit ?? "50", 10),
-              messageConcurrency: parseInt(opts.concurrency ?? "1", 10),
+              batchSize,
+              messageConcurrency,
               since: opts.since,
               archiveS3Bucket: archiveBucket,
               downloadAttachments: opts.attachments !== false,
@@ -299,8 +359,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           labelFilter: opts.label,
           profile: opts.profile,
           query: opts.query,
-          batchSize: parseInt(opts.limit ?? "50", 10),
-          messageConcurrency: parseInt(opts.concurrency ?? "1", 10),
+          batchSize,
+          messageConcurrency,
           since: opts.since,
           archiveS3Bucket: archiveBucket,
           downloadAttachments: opts.attachments !== false,
@@ -312,13 +372,12 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         let result;
         if (opts.all) {
           // Paginate manually so we can print progress per page
-          const { syncGmailInbox: syncPage } = await import("../../lib/gmail-sync.js");
           const aggregate = { synced: 0, skipped: 0, attachments_saved: 0, errors: [] as string[], done: true };
           let pageToken: string | undefined;
           let page = 0;
           do {
             page++;
-            const pageResult = await syncPage({ ...syncOpts, pageToken });
+            const pageResult = await syncGmailInbox({ ...syncOpts, pageToken });
             aggregate.synced += pageResult.synced;
             aggregate.skipped += pageResult.skipped;
             aggregate.attachments_saved += pageResult.attachments_saved ?? 0;
@@ -361,7 +420,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--since <date>", "Only show emails after this date")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N emails", "0")
-    .option("--search <query>", "Filter by subject/from (local, not Gmail API)")
+    .option("--search <query>", "Filter by subject/from/to/body (local, not Gmail API)")
     .option("--to <addr-or-domain>", "Only mail addressed to this address or domain (e.g. el@elyratelier.com or elyratelier.com)")
     .option("--unread", "Only unread mail")
     .option("--read", "Only read mail")
@@ -371,23 +430,16 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action((opts: { provider?: string; since?: string; limit?: string; offset?: string; search?: string; to?: string; unread?: boolean; read?: boolean; starred?: boolean; archived?: boolean; label?: string }) => {
       try {
         const db = getDatabase();
-        const limit = parseInt(opts.limit ?? "20", 10);
-        const offset = parseInt(opts.offset ?? "0", 10);
+        const limit = parsePositiveIntOption(opts.limit, 20);
+        const offset = parseNonNegativeIntOption(opts.offset);
         const toFilter = opts.to?.trim().toLowerCase();
-        let emails = listInboundEmails({
+        const emails = listInboundEmailSummaries({
           provider_id: opts.provider, since: opts.since, limit, offset,
           unread: opts.unread, read: opts.read, starred: opts.starred,
-          archived: opts.archived, label: opts.label,
+          archived: opts.archived, label: opts.label, search: opts.search,
           recipients: toFilter?.includes("@") ? [toFilter] : undefined,
           recipientDomains: toFilter && !toFilter.includes("@") ? [toFilter] : undefined,
         }, db);
-
-        if (opts.search) {
-          const q = opts.search.toLowerCase();
-          emails = emails.filter(
-            (e) => e.subject.toLowerCase().includes(q) || e.from_address.toLowerCase().includes(q),
-          );
-        }
 
         if (emails.length === 0) {
           output([], chalk.dim("No emails found locally. Try `emails inbox sync-status`, `emails refresh`, or `emails inbox wait <address>`."));
@@ -404,7 +456,9 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .command("unread-count")
     .description("Show unread inbox counts")
     .option("--by-address", "Group unread counts by recipient address")
-    .action((opts: { byAddress?: boolean }) => {
+    .option("--limit <n>", "Maximum grouped addresses to show", "50")
+    .option("--offset <n>", "Number of grouped addresses to skip", "0")
+    .action((opts: { byAddress?: boolean; limit?: string; offset?: string }) => {
       try {
         const db = getDatabase();
         if (!opts.byAddress) {
@@ -412,19 +466,31 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           output({ unread: count }, String(count));
           return;
         }
+        const limit = parsePositiveIntOption(opts.limit, 50);
+        const offset = parseNonNegativeIntOption(opts.offset);
+        const recipientSql = sqlEmailAddress("r.address");
         const rows = db.query(
-          `SELECT LOWER(json_each.value) AS address, COUNT(*) AS unread
-             FROM inbound_emails, json_each(inbound_emails.to_addresses)
-            WHERE inbound_emails.is_read = 0
-              AND inbound_emails.is_archived = 0
-              AND json_valid(inbound_emails.to_addresses)
-            GROUP BY LOWER(json_each.value)
-            ORDER BY unread DESC, address ASC`,
-        ).all() as Array<{ address: string; unread: number }>;
-        const formatted = rows.length
-          ? rows.map((row) => `${row.address}\t${row.unread}`).join("\n")
+          `SELECT address, unread
+             FROM (
+               SELECT ${recipientSql} AS address, COUNT(*) AS unread
+                 FROM inbound_emails e
+                 JOIN inbound_recipients r ON r.inbound_email_id = e.id
+                WHERE e.is_sent = 0
+                  AND e.is_read = 0
+                  AND e.is_archived = 0
+                GROUP BY ${recipientSql}
+             )
+            WHERE instr(address, '@') > 1
+            ORDER BY unread DESC, address ASC
+            LIMIT ? OFFSET ?`,
+        ).all(limit, offset) as Array<{ address: string; unread: unknown }>;
+        const outputRows = rows
+          .map((row) => ({ address: row.address, unread: Number(row.unread) || 0 }))
+          .filter((row) => row.unread > 0);
+        const formatted = outputRows.length
+          ? outputRows.map((row) => `${row.address}\t${row.unread}`).join("\n")
           : chalk.dim("No unread mail.");
-        output(rows, formatted);
+        output(outputRows, formatted);
       } catch (e) {
         handleError(e);
       }
@@ -436,39 +502,53 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action((emailId: string) => {
       try {
         const db = getDatabase();
-        const fullId = resolvePartialId(db, "inbound_emails", emailId) ?? emailId;
-        const email = getInboundEmail(fullId, db);
+        const fullId = resolveInboundEmailId(emailId);
+        const email = getInboundEmailSummary(fullId, db);
         if (!email) handleError(new Error(`Email not found: ${emailId}`));
-        const providers = listProviders(db);
-        const domains = listDomains(undefined, db);
-        const addresses = listAddresses(undefined, db);
-        const recipients = email!.to_addresses.map((recipient) => {
-          const normalized = recipient.toLowerCase();
-          const domainName = normalized.split("@")[1] ?? "";
-          const aliasTarget = resolveAlias(normalized, db);
-          const exactAddresses = addresses.filter((address) => address.email.toLowerCase() === normalized);
-          const domainRows = domains.filter((domain) => domain.domain.toLowerCase() === domainName);
+        const routedRecipients = email!.to_addresses.map((recipient) => {
+          const normalized = normalizeEmailAddress(recipient) ?? recipient.toLowerCase();
+          const domainName = normalized.includes("@") ? normalized.split("@")[1] ?? "" : "";
           return {
             recipient: normalized,
+            aliasTarget: resolveAlias(normalized, db),
+            exactAddresses: findAddressesByEmail(normalized, db),
+            domainRows: domainName ? findDomainsByName(domainName, db) : [],
+          };
+        });
+        const allAddresses = routedRecipients.flatMap((recipient) => recipient.exactAddresses);
+        const allDomains = routedRecipients.flatMap((recipient) => recipient.domainRows);
+        const enrichedAddresses = new Map(enrichAddresses(allAddresses, db).map((address) => [address.id, address]));
+        const addressProvisioning = listAddressProvisioningByIds(allAddresses.map((address) => address.id), db);
+        const domainProvisioning = listDomainProvisioningByIds(allDomains.map((domain) => domain.id), db);
+        const readyAddressCounts = listReadyAddressCountsByDomains(allDomains.map((domain) => domain.id), db);
+        const providerNames = listProviderNamesByIds([
+          ...(email!.provider_id ? [email!.provider_id] : []),
+          ...allAddresses.map((address) => address.provider_id),
+          ...allDomains.map((domain) => domain.provider_id),
+        ], db);
+        const providerName = (providerId: string): string | null => providerNames.get(providerId) ?? null;
+        const recipients = routedRecipients.map(({ recipient, aliasTarget, exactAddresses, domainRows }) => {
+          return {
+            recipient,
             alias_target: aliasTarget,
             configured_addresses: exactAddresses.map((address) => {
-              const detail = getAddressOwnershipDetail(address.id, db);
+              const enriched = enrichedAddresses.get(address.id);
               return {
                 id: address.id,
                 provider_id: address.provider_id,
-                provider_name: providers.find((provider) => provider.id === address.provider_id)?.name ?? null,
-                provisioning: getAddressProvisioning(address.id, db),
-                owner: detail.address.owner,
-                administrator: detail.address.administrator,
+                provider_name: providerName(address.provider_id),
+                provisioning: addressProvisioning.get(address.id) ?? null,
+                owner: enriched?.owner ?? null,
+                administrator: enriched?.administrator ?? null,
               };
             }),
             domains: domainRows.map((domain) => {
-              const readyAddresses = addresses.filter((address) => getAddressProvisioning(address.id, db)?.domain_id === domain.id && getAddressProvisioning(address.id, db)?.provisioning_status === "ready").length;
-              const readiness = assessDomainReadiness(domain, getDomainProvisioning(domain.id, db), { ready_addresses: readyAddresses });
+              const readyAddresses = readyAddressCounts.get(domain.id) ?? 0;
+              const readiness = assessDomainReadiness(domain, domainProvisioning.get(domain.id) ?? null, { ready_addresses: readyAddresses });
               return {
                 id: domain.id,
                 provider_id: domain.provider_id,
-                provider_name: providers.find((provider) => provider.id === domain.provider_id)?.name ?? null,
+                provider_name: providerName(domain.provider_id),
                 readiness,
               };
             }),
@@ -486,7 +566,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const lines = [chalk.bold(`\nRouting for ${email!.id.slice(0, 8)}`)];
         lines.push(`  From:     ${email!.from_address}`);
         lines.push(`  Subject:  ${email!.subject || "(no subject)"}`);
-        lines.push(`  Source:   ${email!.provider_id ? providers.find((provider) => provider.id === email!.provider_id)?.name ?? email!.provider_id : "unknown/local"}`);
+        lines.push(`  Source:   ${email!.provider_id ? providerName(email!.provider_id) ?? email!.provider_id : "unknown/local"}`);
         for (const recipient of recipients) {
           lines.push(`\n  To:       ${recipient.recipient}`);
           lines.push(`  Alias:    ${recipient.alias_target ?? chalk.dim("none")}`);
@@ -506,18 +586,21 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Search synced emails locally (add --remote to search live Gmail)")
     .option("--provider <id>", "Filter by provider ID")
     .option("--limit <n>", "Max results", "20")
+    .option("--offset <n>", "Skip first N local results", "0")
     .option("--remote", "Search live Gmail via connector (not just local DB)")
-    .action(async (query: string, opts: { provider?: string; limit?: string; remote?: boolean }) => {
+    .action(async (query: string, opts: { provider?: string; limit?: string; offset?: string; remote?: boolean }) => {
       try {
         const db = getDatabase();
-        const limit = parseInt(opts.limit ?? "20", 10);
+        const limit = parsePositiveIntOption(opts.limit, 20);
+        const offset = parseNonNegativeIntOption(opts.offset);
 
         if (opts.remote) {
           // Live Gmail search via connectors SDK
+          const { runConnectorOperation } = await import("@hasna/connectors");
           const r = await runConnectorOperation<{ messages?: { id: string; from: string; subject: string; date: string }[] } | { id: string; from: string; subject: string; date: string }[]>({
             connector: "gmail",
             operation: "messages.list",
-            input: { query, max: opts.limit ?? "20" },
+            input: { query, max: limit },
           });
           if (!r.success) {
             console.error(chalk.red(`Gmail search failed: ${r.stderr}`));
@@ -530,13 +613,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         }
 
         // Local DB search
-        const q = query.toLowerCase();
-        const emails = listInboundEmails({ provider_id: opts.provider, limit: limit * 4 }, db).filter(
-          (e) =>
-            e.subject.toLowerCase().includes(q) ||
-            e.from_address.toLowerCase().includes(q) ||
-            (e.text_body ?? "").toLowerCase().includes(q),
-        ).slice(0, limit);
+        const emails = listInboundEmailSummaries({ provider_id: opts.provider, limit, offset, search: query }, db);
 
         if (emails.length === 0) {
           console.log(chalk.dim(`No results for "${query}". Try --remote to search live Gmail.`));
@@ -553,8 +630,9 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("status")
     .description("Show sync status for all inbox sources")
-    .action(() => {
+    .action(async () => {
       try {
+        const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
         const status = getEmailSystemStatus();
         output(status.inbox, formatInboxSyncStatus(status));
       } catch (e) {
@@ -565,8 +643,9 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("sync-status")
     .description("Show source-aware inbox sync status")
-    .action(() => {
+    .action(async () => {
       try {
+        const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
         const status = getEmailSystemStatus();
         output({ inbox: status.inbox, gmail: status.providers.gmail, cli_equivalents: status.cli_equivalents }, formatInboxSyncStatus(status));
       } catch (e) {
@@ -586,6 +665,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           console.error(chalk.red("No Gmail provider found. Add one with: emails provider add-gmail"));
           process.exit(1);
         }
+        const { listGmailLabels } = await import("../../lib/gmail-sync.js");
         const labels = await listGmailLabels(providerId);
         if (labels.length === 0) {
           console.log(chalk.dim("No labels found. Is this Gmail provider authenticated?"));
@@ -609,7 +689,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action((id: string, opts: { keepUnread?: boolean }) => {
       try {
         const db = getDatabase();
-        const fullId = resolvePartialId(db, "inbound_emails", id) ?? id;
+        const fullId = resolveInboundEmailId(id);
         let email = getInboundEmail(fullId, db);
         if (!email) {
           console.error(chalk.red(`Email not found: ${id}`));
@@ -636,6 +716,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         WHERE i.id = ?`,
     ).get(emailId) as { message_id: string | null; provider_type: string | null } | null;
     if (!row || row.provider_type !== "gmail" || !row.message_id) return false;
+    const { runConnectorOperation } = await import("@hasna/connectors");
     const r = await runConnectorOperation({
       connector: "gmail",
       operation: connectorArgs.join("."),
@@ -647,8 +728,8 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
   function requireLocal(id: string): string {
     const db = getDatabase();
-    const fullId = resolvePartialId(db, "inbound_emails", id) ?? id;
-    const e = getInboundEmail(fullId, db);
+    const fullId = resolveInboundEmailId(id);
+    const e = getInboundEmailSummary(fullId, db);
     if (!e) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
     return e.id;
   }
@@ -660,7 +741,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action(async (emailId: string, opts: { unread?: boolean }) => {
       try {
         const id = requireLocal(emailId);
-        const e = setInboundRead(id, !opts.unread, getDatabase());
+        const e = setInboundReadSummary(id, !opts.unread, getDatabase());
         await gmailMirror(id, ["messages", opts.unread ? "mark-unread" : "mark-read"]).catch(() => false);
         output(e, chalk.green(`✓ Marked ${opts.unread ? "unread" : "read"}: ${e.subject.slice(0, 40)}`));
       } catch (e) { handleError(e); }
@@ -673,7 +754,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action(async (emailId: string, opts: { undo?: boolean }) => {
       try {
         const id = requireLocal(emailId);
-        const e = setInboundArchived(id, !opts.undo, getDatabase());
+        const e = setInboundArchivedSummary(id, !opts.undo, getDatabase());
         if (!opts.undo) await gmailMirror(id, ["messages", "archive"]).catch(() => false);
         output(e, chalk.green(`✓ ${opts.undo ? "Unarchived" : "Archived"}: ${e.subject.slice(0, 40)}`));
       } catch (e) { handleError(e); }
@@ -686,7 +767,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action(async (emailId: string, opts: { undo?: boolean }) => {
       try {
         const id = requireLocal(emailId);
-        const e = setInboundStarred(id, !opts.undo, getDatabase());
+        const e = setInboundStarredSummary(id, !opts.undo, getDatabase());
         if (!opts.undo) await gmailMirror(id, ["messages", "star"]).catch(() => false);
         output(e, chalk[opts.undo ? "green" : "yellow"](`${opts.undo ? "✓ Unstarred" : "★ Starred"}: ${e.subject.slice(0, 40)}`));
       } catch (e) { handleError(e); }
@@ -699,7 +780,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action((emailId: string, label: string, opts: { remove?: boolean }) => {
       try {
         const id = requireLocal(emailId);
-        const e = opts.remove ? removeInboundLabel(id, label, getDatabase()) : addInboundLabel(id, label, getDatabase());
+        const e = opts.remove ? removeInboundLabelSummary(id, label, getDatabase()) : addInboundLabelSummary(id, label, getDatabase());
         output(e, chalk.green(`✓ ${opts.remove ? "Removed" : "Added"} label "${label}": ${e.label_ids.join(", ") || "(none)"}`));
       } catch (e) { handleError(e); }
     });
@@ -719,6 +800,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           process.exit(1);
         }
         console.log(chalk.dim(`Replying to: ${email.subject}`));
+        const { runConnectorOperation } = await import("@hasna/connectors");
         const r = await runConnectorOperation({
           connector: "gmail",
           operation: "messages.reply",
@@ -738,19 +820,18 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action((emailId: string, opts: { filename?: string }) => {
       try {
         const db = getDatabase();
-        const row = db.query("SELECT attachment_paths FROM inbound_emails WHERE id = ?").get(emailId) as { attachment_paths: string } | null;
-        if (!row) {
+        const fullId = resolveInboundEmailId(emailId);
+        const paths = getInboundAttachmentPaths(fullId, db);
+        if (!paths) {
           console.error(chalk.red(`Email not found: ${emailId}`));
           process.exit(1);
         }
-        type AttPath = { filename: string; content_type: string; size: number; local_path?: string; s3_url?: string };
-        const paths = JSON.parse(row.attachment_paths ?? "[]") as AttPath[];
         const filtered = opts.filename ? paths.filter((p) => p.filename === opts.filename) : paths;
         if (filtered.length === 0) {
           console.log(chalk.dim("No attachments found for this email."));
           return;
         }
-        console.log(chalk.bold(`\nAttachments for ${emailId.slice(0, 8)}:`));
+        console.log(chalk.bold(`\nAttachments for ${fullId.slice(0, 8)}:`));
         for (const p of filtered) {
           const loc = p.local_path ? chalk.cyan(p.local_path) : p.s3_url ? chalk.blue(p.s3_url) : chalk.dim("(not downloaded)");
           console.log(`  ${p.filename.padEnd(40)} ${chalk.dim(p.content_type)}  ${loc}`);
@@ -828,7 +909,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           prefix,
           region,
           providerId: opts.provider,
-          limit: parseInt(opts.limit, 10),
+          limit: parsePositiveIntOption(opts.limit, 100),
         });
         const lines = [chalk.bold("\nS3 sync complete:")];
         lines.push(`  Synced:      ${chalk.green(String(result.synced))}`);
@@ -890,14 +971,13 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         const config = loadConfig();
         const db = getDatabase();
         const buckets = getInboundBuckets();
-        const lastReceived = db.query("SELECT MAX(received_at) AS last_received_at FROM inbound_emails").get() as { last_received_at: string | null } | null;
         const data = {
           queue_url: config["inbound_realtime_queue_url"] ?? null,
           topic_arn: config["inbound_realtime_topic_arn"] ?? null,
           buckets,
-          total_inbound_emails: getInboundCount(undefined, db),
+          total_inbound_emails: getReceivedInboundCount(undefined, db),
           unread_inbound_emails: getUnreadCount(undefined, db),
-          last_received_at: lastReceived?.last_received_at ?? null,
+          last_received_at: getLatestReceivedInboundAt(db),
           last_poll_at: config["inbound_realtime_last_poll_at"] ?? null,
           last_error: config["inbound_realtime_last_error"] ?? null,
         };
@@ -954,7 +1034,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         };
         const sync = async () => {
           if (opts.allBuckets) {
-            const r = await autoPull({ s3: true, gmail: false, limit: 1000 });
+            const r = await runAutoPull({ s3: true, gmail: false, limit: 1000 });
             if (r.pulled > 0) console.log(chalk.green(`  ✓ ${r.pulled} new email(s) delivered across configured buckets`));
             return { synced: r.pulled };
           }
@@ -990,33 +1070,34 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   inboxCmd
     .command("archive-verify")
     .description("Verify a Gmail message archive in S3")
-    .requiredOption("--bucket <name>", "Archive bucket name", DEFAULT_GMAIL_ARCHIVE_BUCKET)
+    .option("--bucket <name>", "Archive bucket name (default: configured Gmail archive bucket)")
     .requiredOption("--profile <profile>", "Gmail connector profile")
     .requiredOption("--message-id <id>", "Gmail message ID")
     .option("--prefix <prefix>", "Archive prefix", "gmail")
-    .option("--region <region>", "AWS region", "us-west-2")
+    .option("--region <region>", "AWS region (default: configured Gmail archive region)")
     .option("--aws-profile <profile>", "AWS profile")
     .option("--attachment <filename...>", "Expected attachment filename(s)")
     .option("--no-raw", "Do not require the raw MIME object")
     .action(async (opts: {
-      bucket: string;
+      bucket?: string;
       profile: string;
       messageId: string;
       prefix: string;
-      region: string;
+      region?: string;
       awsProfile?: string;
       attachment?: string[];
       raw: boolean;
     }) => {
       try {
         if (opts.awsProfile) process.env["AWS_PROFILE"] = opts.awsProfile;
+        const { getDefaultGmailArchiveS3Bucket, getDefaultGmailArchiveS3Region } = await import("../../lib/config.js");
         const { verifyGmailArchive } = await import("../../lib/gmail-archive.js");
         const result = await verifyGmailArchive({
-          bucket: opts.bucket,
+          bucket: opts.bucket ?? getDefaultGmailArchiveS3Bucket(),
           profile: opts.profile,
           messageId: opts.messageId,
           prefix: opts.prefix,
-          region: opts.region,
+          region: opts.region ?? getDefaultGmailArchiveS3Region(),
           expectedAttachments: opts.attachment ?? [],
           requireRaw: opts.raw !== false,
         });
@@ -1029,21 +1110,22 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 
   inboxCmd
     .command("archive-migrate")
-    .description(`Copy a legacy Gmail-to-S3 bucket/prefix into ${DEFAULT_GMAIL_ARCHIVE_BUCKET}`)
+    .description("Copy a legacy Gmail-to-S3 bucket/prefix into the configured Gmail archive bucket")
     .requiredOption("--source-bucket <name>", "Legacy source bucket, e.g. hasna-mail-maximstaris")
-    .option("--target-bucket <name>", "Target archive bucket", DEFAULT_GMAIL_ARCHIVE_BUCKET)
+    .option("--target-bucket <name>", "Target archive bucket (default: configured Gmail archive bucket)")
     .option("--source-prefix <prefix>", "Source key prefix", "")
     .option("--target-prefix <prefix>", "Target key prefix", "legacy/maximstaris")
     .option("--region <region>", "AWS region", "us-east-1")
-    .option("--target-region <region>", "Target AWS region", "us-west-2")
+    .option("--target-region <region>", "Target AWS region (default: configured Gmail archive region)")
     .option("--aws-profile <profile>", "AWS profile")
     .option("--source-aws-profile <profile>", "AWS profile for reading the source bucket")
     .option("--target-aws-profile <profile>", "AWS profile for writing the target bucket")
     .option("--limit <n>", "Maximum objects to scan in this run")
+    .option("--continuation-token <token>", "Resume a previous bounded migration from this S3 continuation token")
     .option("--dry-run", "Plan copies without writing to target")
     .action(async (opts: {
       sourceBucket: string;
-      targetBucket: string;
+      targetBucket?: string;
       sourcePrefix?: string;
       targetPrefix?: string;
       region: string;
@@ -1052,28 +1134,47 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
       sourceAwsProfile?: string;
       targetAwsProfile?: string;
       limit?: string;
+      continuationToken?: string;
       dryRun?: boolean;
     }) => {
       try {
         if (opts.awsProfile) process.env["AWS_PROFILE"] = opts.awsProfile;
+        const { getDefaultGmailArchiveS3Bucket, getDefaultGmailArchiveS3Region } = await import("../../lib/config.js");
         const { migrateS3Prefix } = await import("../../lib/gmail-archive.js");
         const sourceProfile = opts.sourceAwsProfile ?? opts.awsProfile;
         const targetProfile = opts.targetAwsProfile ?? opts.awsProfile;
-        const sourceClient = sourceProfile
-          ? new S3Client({ region: opts.region, credentials: fromIni({ profile: sourceProfile }) })
-          : undefined;
-        const targetClient = targetProfile
-          ? new S3Client({ region: opts.targetRegion ?? opts.region, credentials: fromIni({ profile: targetProfile }) })
-          : undefined;
+        const targetBucket = opts.targetBucket ?? getDefaultGmailArchiveS3Bucket();
+        const targetRegion = opts.targetRegion ?? getDefaultGmailArchiveS3Region();
+        let sourceClient;
+        let targetClient;
+        if (sourceProfile || targetProfile || targetRegion !== opts.region) {
+          const [{ S3Client }, { fromIni }] = await Promise.all([
+            import("@aws-sdk/client-s3"),
+            import("@aws-sdk/credential-provider-ini"),
+          ]);
+          if (sourceProfile || targetRegion !== opts.region) {
+            sourceClient = new S3Client({
+              region: opts.region,
+              credentials: sourceProfile ? fromIni({ profile: sourceProfile }) : undefined,
+            });
+          }
+          if (targetProfile || targetRegion !== opts.region) {
+            targetClient = new S3Client({
+              region: targetRegion,
+              credentials: targetProfile ? fromIni({ profile: targetProfile }) : undefined,
+            });
+          }
+        }
         const result = await migrateS3Prefix({
           sourceBucket: opts.sourceBucket,
-          targetBucket: opts.targetBucket,
+          targetBucket,
           sourcePrefix: opts.sourcePrefix,
           targetPrefix: opts.targetPrefix,
+          continuationToken: opts.continuationToken,
           region: opts.region,
           sourceClient,
           targetClient,
-          limit: opts.limit ? parseInt(opts.limit, 10) : undefined,
+          limit: opts.limit ? parsePositiveIntOption(opts.limit, 1000, MAX_ARCHIVE_MIGRATE_LIMIT) : undefined,
           dryRun: opts.dryRun,
         });
         output(result, formatArchiveMigrationResult(result));
@@ -1109,9 +1210,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action(async (id: string) => {
       try {
         const db = getDatabase();
-        const { resolvePartialId } = await import("../../db/database.js");
-        const resolvedId = resolvePartialId(db, "inbound_emails", id);
-        if (!resolvedId) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
+        const resolvedId = resolveInboundEmailId(id);
         const email = db.query("SELECT html_body, text_body FROM inbound_emails WHERE id = ?").get(resolvedId) as { html_body: string | null; text_body: string | null } | null;
         if (!email) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
         const body = email.html_body ?? email.text_body;
@@ -1133,14 +1232,14 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
 function ensureGmailProviderForProfile(profile: string): string {
   const db = getDatabase();
   const providerName = `Gmail (${profile})`;
-  const existing = listProviders(db).find((p) => p.type === "gmail" && p.name === providerName);
+  const existing = getProviderByNameAndType(providerName, "gmail", db);
   if (existing) return existing.id;
   return createProvider({ name: providerName, type: "gmail" }, db).id;
 }
 
 function resolveGmailProvider(idOrName?: string): string | null {
   const db = getDatabase();
-  const providers = listProviders(db).filter((p) => p.type === "gmail" && p.active);
+  const providers = listActiveProviderSummaries("gmail", db);
 
   if (!idOrName) return providers[0]?.id ?? null;
 
@@ -1150,7 +1249,7 @@ function resolveGmailProvider(idOrName?: string): string | null {
   return match?.id ?? null;
 }
 
-function formatInboxSyncStatus(status: ReturnType<typeof getEmailSystemStatus>): string {
+function formatInboxSyncStatus(status: EmailSystemStatus): string {
   const lines: string[] = [chalk.bold("\nInbox sync status:")];
   lines.push(`  Local inbox: ${status.inbox.total} total, ${status.inbox.unread} unread`);
   lines.push(`  Latest mail: ${status.inbox.latest_received_at ? chalk.green(status.inbox.latest_received_at) : chalk.dim("never")}`);
@@ -1240,7 +1339,10 @@ function formatArchiveMigrationResult(result: { scanned: number; copied: number;
   lines.push(`  Copied:  ${String(result.copied)}`);
   for (const obj of result.objects.slice(0, 10)) lines.push(`  ${chalk.dim(obj.source)} -> ${chalk.cyan(obj.target)}`);
   if (result.objects.length > 10) lines.push(chalk.dim(`  ... ${result.objects.length - 10} more`));
-  if (result.nextContinuationToken) lines.push(chalk.dim("  More objects are available; rerun with a larger limit or continuation support."));
+  if (result.nextContinuationToken) {
+    lines.push(chalk.dim(`  Next token: ${result.nextContinuationToken}`));
+    lines.push(chalk.dim("  More objects are available; rerun with --continuation-token <token>."));
+  }
   lines.push("");
   return lines.join("\n");
 }

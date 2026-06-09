@@ -1,25 +1,9 @@
-import {
-  CopyObjectCommand,
-  GetObjectCommand,
-  HeadObjectCommand,
-  ListObjectsV2Command,
-  PutObjectCommand,
-  S3Client,
-  type PutObjectCommandInput,
-} from "@aws-sdk/client-s3";
+import type { PutObjectCommandInput } from "@aws-sdk/client-s3";
+import { buildGmailArchiveKeys, safeGmailArchiveSegment } from "./gmail-archive-keys.js";
+import type { GmailArchiveKeyInput } from "./gmail-archive-keys.js";
 
-export interface GmailArchiveKeyInput {
-  profile: string;
-  messageId: string;
-  prefix?: string;
-}
-
-export interface GmailArchiveKeys {
-  raw: string;
-  metadata: string;
-  manifest: string;
-  attachmentsPrefix: string;
-}
+export { buildGmailArchiveKeys } from "./gmail-archive-keys.js";
+export type { GmailArchiveKeyInput, GmailArchiveKeys } from "./gmail-archive-keys.js";
 
 export interface GmailArchiveUploadInput extends GmailArchiveKeyInput {
   bucket: string;
@@ -93,6 +77,7 @@ export interface S3PrefixMigrationInput {
   targetBucket: string;
   sourcePrefix?: string;
   targetPrefix?: string;
+  continuationToken?: string;
   region?: string;
   limit?: number;
   dryRun?: boolean;
@@ -113,23 +98,17 @@ export interface S3Like {
   send(command: unknown): Promise<unknown>;
 }
 
-function safeSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._=-]+/g, "_");
-}
+type S3Sdk = typeof import("@aws-sdk/client-s3");
 
-export function buildGmailArchiveKeys(input: GmailArchiveKeyInput): GmailArchiveKeys {
-  const prefix = (input.prefix ?? "gmail").replace(/^\/+|\/+$/g, "");
-  const profile = safeSegment(input.profile || "default");
-  const messageId = safeSegment(input.messageId);
-  return {
-    raw: `${prefix}/${profile}/raw/${messageId}.eml`,
-    metadata: `${prefix}/${profile}/metadata/${messageId}.json`,
-    manifest: `${prefix}/${profile}/manifests/${messageId}.json`,
-    attachmentsPrefix: `${prefix}/${profile}/attachments/${messageId}/`,
-  };
+let s3SdkPromise: Promise<S3Sdk> | undefined;
+
+function loadS3Sdk(): Promise<S3Sdk> {
+  s3SdkPromise ??= import("@aws-sdk/client-s3");
+  return s3SdkPromise;
 }
 
 export async function uploadGmailArchive(input: GmailArchiveUploadInput): Promise<GmailArchiveUploadResult> {
+  const { PutObjectCommand, S3Client } = await loadS3Sdk();
   const client = input.client ?? new S3Client({ region: input.region ?? "us-east-1" });
   const keys = buildGmailArchiveKeys(input);
 
@@ -159,9 +138,10 @@ export async function uploadGmailArchive(input: GmailArchiveUploadInput): Promis
 }
 
 export async function uploadGmailArchiveAttachment(input: GmailArchiveAttachmentInput): Promise<GmailArchiveAttachmentResult> {
+  const { PutObjectCommand, S3Client } = await loadS3Sdk();
   const client = input.client ?? new S3Client({ region: input.region ?? "us-east-1" });
   const keys = buildGmailArchiveKeys(input);
-  const filename = safeSegment(input.filename);
+  const filename = safeGmailArchiveSegment(input.filename);
   const key = `${keys.attachmentsPrefix}${filename}`;
   await client.send(new PutObjectCommand({
     Bucket: input.bucket,
@@ -177,6 +157,7 @@ export async function uploadGmailArchiveAttachment(input: GmailArchiveAttachment
 }
 
 export async function uploadGmailArchiveManifest(input: GmailArchiveManifestInput): Promise<string> {
+  const { PutObjectCommand, S3Client } = await loadS3Sdk();
   const client = input.client ?? new S3Client({ region: input.region ?? "us-east-1" });
   const keys = buildGmailArchiveKeys(input);
   await client.send(new PutObjectCommand({
@@ -189,13 +170,14 @@ export async function uploadGmailArchiveManifest(input: GmailArchiveManifestInpu
 }
 
 export async function verifyGmailArchive(input: GmailArchiveVerifyInput): Promise<GmailArchiveVerifyResult> {
+  const { HeadObjectCommand, S3Client } = await loadS3Sdk();
   const client = input.client ?? new S3Client({ region: input.region ?? "us-east-1" });
   const keys = buildGmailArchiveKeys(input);
   const required = [
     keys.metadata,
     keys.manifest,
     ...(input.requireRaw === false ? [] : [keys.raw]),
-    ...(input.expectedAttachments ?? []).map((filename) => `${keys.attachmentsPrefix}${safeSegment(filename)}`),
+    ...(input.expectedAttachments ?? []).map((filename) => `${keys.attachmentsPrefix}${safeGmailArchiveSegment(filename)}`),
   ];
   const checked: string[] = [];
   const missing: string[] = [];
@@ -218,6 +200,7 @@ export async function verifyGmailArchive(input: GmailArchiveVerifyInput): Promis
 }
 
 export async function migrateS3Prefix(input: S3PrefixMigrationInput): Promise<S3PrefixMigrationResult> {
+  const { CopyObjectCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } = await loadS3Sdk();
   const client = input.client ?? new S3Client({ region: input.region ?? "us-east-1" });
   const sourceClient = input.sourceClient ?? client;
   const targetClient = input.targetClient ?? client;
@@ -225,7 +208,7 @@ export async function migrateS3Prefix(input: S3PrefixMigrationInput): Promise<S3
   const sourcePrefix = input.sourcePrefix ?? "";
   const targetPrefix = (input.targetPrefix ?? "").replace(/^\/+|\/+$/g, "");
   const migrated: Array<{ source: string; target: string }> = [];
-  let continuationToken: string | undefined;
+  let continuationToken: string | undefined = input.continuationToken;
   let nextContinuationToken: string | undefined;
 
   do {

@@ -41,4 +41,33 @@ describe("resolveInboundOrSent — reply/forward id resolution", () => {
     expect(r.inbound).toBeNull();
     expect(r.sent).toBeNull();
   });
+
+  it("throws on ambiguous sent-email prefixes instead of falling back to raw ids", () => {
+    const db = getDatabase();
+    const first = "mail1111-1111-1111-1111-111111111111";
+    const second = "mail2222-2222-2222-2222-222222222222";
+    for (const [id, subject] of [[first, "First"], [second, "Second"]] as Array<[string, string]>) {
+      db.run(
+        `INSERT INTO emails
+          (id, provider_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, sent_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          providerId,
+          "me@x.com",
+          JSON.stringify(["you@x.com"]),
+          "[]",
+          "[]",
+          subject,
+          "sent",
+          "2026-01-01T00:00:00.000Z",
+          "2026-01-01T00:00:00.000Z",
+          "2026-01-01T00:00:00.000Z",
+        ],
+      );
+    }
+
+    expect(() => resolveInboundOrSent("mail", db))
+      .toThrow("Ambiguous ID 'mail' in table 'emails'. Use a longer prefix or full ID.");
+  });
 });

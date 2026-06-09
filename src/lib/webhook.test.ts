@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { readFileSync } from "node:fs";
 import { parseResendWebhook, parseSesWebhook, createWebhookServer } from "./webhook.js";
 import { closeDatabase, resetDatabase } from "../db/database.js";
 
@@ -17,6 +18,21 @@ async function post(url: string, body: unknown): Promise<Response> {
 }
 
 // ─── createWebhookServer tests ────────────────────────────────────────────────
+
+describe("webhook module startup contract", () => {
+  it("keeps DB persistence and console coloring lazy until a request is handled", () => {
+    const source = readFileSync(`${import.meta.dir}/webhook.ts`, "utf8");
+    const staticImports = [...source.matchAll(/^\s*import\s+(?!type\b)[\s\S]*?\sfrom\s+["']([^"']+)["'];/gm)]
+      .map((match) => match[1]);
+
+    expect(staticImports).not.toContain("../db/database.js");
+    expect(staticImports).not.toContain("../db/events.js");
+    expect(staticImports).not.toContain("chalk");
+    expect(source).toContain('import("../db/database.js")');
+    expect(source).toContain('import("../db/events.js")');
+    expect(source).toContain('import("chalk")');
+  });
+});
 
 describe("createWebhookServer", () => {
   let server: ReturnType<typeof createWebhookServer>;

@@ -1,13 +1,14 @@
 import type { Database } from "../db/database.js";
 import { getDatabase } from "../db/database.js";
-import { listAddresses } from "../db/addresses.js";
-import { listDomains } from "../db/domains.js";
-import { listInboundEmails } from "../db/inbound.js";
+import { findAddressesByEmail } from "../db/addresses.js";
+import { findDomainsByName } from "../db/domains.js";
+import { normalizeEmailAddress } from "../db/inbound.js";
 import { resolveAlias } from "../db/aliases.js";
-import { getAddressProvisioning, getDomainProvisioning } from "../db/provisioning.js";
+import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../db/provisioning.js";
+import { listAddressOwnershipEvents } from "../db/owners.js";
 import { assessDomainReadiness } from "./domain-readiness.js";
-import { getEmailSystemStatus } from "./agent-context.js";
-import { getAddressOwnershipDetail } from "./address-ownership.js";
+import { enrichAddresses } from "./address-ownership.js";
+import { getInboundBuckets, loadConfig } from "./config.js";
 
 export interface DeliveryDoctorCheck {
   name: string;
@@ -30,15 +31,46 @@ function check(status: DeliveryDoctorCheck["status"], name: string, message: str
   return { name, status, message, fix_command };
 }
 
+function countGmailProviders(db: Database): number {
+  const row = db.query("SELECT COUNT(*) AS count FROM providers WHERE type = 'gmail'").get() as { count: unknown } | null;
+  const value = Number(row?.count ?? 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function recentLocalMailSummary(address: string, db: Database): { count: number; latest_received_at: string | null } {
+  const normalized = normalizeEmailAddress(address);
+  if (!normalized) return { count: 0, latest_received_at: null };
+  const rows = db.query(
+    `SELECT e.received_at
+     FROM inbound_recipients recipient
+     JOIN inbound_emails e ON e.id = recipient.inbound_email_id
+     WHERE recipient.address = ?
+       AND e.is_archived = 0
+     ORDER BY e.received_at DESC
+     LIMIT 10`,
+  ).all(normalized) as Array<{ received_at: string }>;
+  return {
+    count: rows.length,
+    latest_received_at: rows[0]?.received_at ?? null,
+  };
+}
+
 export function diagnoseInboundDelivery(address: string, db: Database = getDatabase()): DeliveryDoctorReport {
   const normalized = address.trim().toLowerCase();
   const domain = normalized.includes("@") ? normalized.split("@")[1] ?? null : null;
   const checks: DeliveryDoctorCheck[] = [];
-  const exactAddresses = listAddresses(undefined, db).filter((candidate) => candidate.email.toLowerCase() === normalized);
-  const domainRows = domain ? listDomains(undefined, db).filter((candidate) => candidate.domain.toLowerCase() === domain) : [];
+  const exactAddresses = normalized.includes("@") ? findAddressesByEmail(normalized, db) : [];
+  const domainRows = domain ? findDomainsByName(domain, db) : [];
   const aliasTarget = normalized.includes("@") ? resolveAlias(normalized, db) : null;
-  const recent = listInboundEmails({ recipients: [normalized], limit: 10 }, db);
-  const status = getEmailSystemStatus(db);
+  const recent = recentLocalMailSummary(normalized, db);
+  const inboundBuckets = getInboundBuckets();
+  const gmailProviderCount = countGmailProviders(db);
+  const config = loadConfig();
+  const realtimeQueueConfigured = typeof config["inbound_realtime_queue_url"] === "string";
+  const enrichedExactAddresses = exactAddresses.length > 0 ? enrichAddresses(exactAddresses, db) : [];
+  const addressProvisioning = listAddressProvisioningByIds(exactAddresses.map((exact) => exact.id), db);
+  const domainProvisioning = listDomainProvisioningByIds(domainRows.map((row) => row.id), db);
+  const readyAddressesByDomain = listReadyAddressCountsByDomains(domainRows.map((row) => row.id), db);
 
   if (!normalized.includes("@")) {
     checks.push(check("fail", "Address format", "Expected a full email address.", undefined));
@@ -47,18 +79,18 @@ export function diagnoseInboundDelivery(address: string, db: Database = getDatab
   }
 
   if (exactAddresses.length > 0) {
-    for (const exact of exactAddresses) {
-      const ownership = getAddressOwnershipDetail(exact.id, db);
-      const provisioning = getAddressProvisioning(exact.id, db);
+    for (const exact of enrichedExactAddresses) {
+      const provisioning = addressProvisioning.get(exact.id);
       checks.push(check("pass", "Configured address", `${exact.email} is configured on provider ${exact.provider_id.slice(0, 8)}.`));
       checks.push(provisioning?.provisioning_status === "ready"
         ? check("pass", "Address receive readiness", "Address provisioning is ready.")
         : check("warn", "Address receive readiness", `Address provisioning is ${provisioning?.provisioning_status ?? "unknown"}.`, `emails address provision ${normalized} --provider ${exact.provider_id} --wait`));
-      checks.push(ownership.ownership
-        ? check("pass", "Ownership", `Owned by ${ownership.address.owner?.name ?? ownership.ownership.owner_id}.`)
+      checks.push(exact.owner
+        ? check("pass", "Ownership", `Owned by ${exact.owner.name}.`)
         : check("warn", "Ownership", "No owner/admin assigned.", `emails address set-owner ${exact.id} --owner <owner>`));
-      if (ownership.history[0]) {
-        const event = ownership.history[0];
+      const history = listAddressOwnershipEvents(exact.id, 1, db);
+      if (history[0]) {
+        const event = history[0];
         checks.push(check("pass", "Ownership audit", `Last ${event.action} at ${event.created_at}${event.actor ? ` by ${event.actor}` : ""}.`));
       }
     }
@@ -70,11 +102,9 @@ export function diagnoseInboundDelivery(address: string, db: Database = getDatab
 
   if (domainRows.length > 0) {
     for (const d of domainRows) {
-      const readyAddresses = listAddresses(undefined, db).filter((candidate) => {
-        const provisioning = getAddressProvisioning(candidate.id, db);
-        return provisioning?.domain_id === d.id && provisioning.provisioning_status === "ready";
-      }).length;
-      const readiness = assessDomainReadiness(d, getDomainProvisioning(d.id, db), { ready_addresses: readyAddresses });
+      const readiness = assessDomainReadiness(d, domainProvisioning.get(d.id) ?? null, {
+        ready_addresses: readyAddressesByDomain.get(d.id) ?? 0,
+      });
       checks.push(readiness.receive_ready
         ? check("pass", "Domain receive readiness", `${d.domain} is receive-ready (${readiness.state}).`)
         : check("warn", "Domain receive readiness", `${d.domain} is not receive-ready (${readiness.state}).`, readiness.fix_commands[0]));
@@ -86,20 +116,20 @@ export function diagnoseInboundDelivery(address: string, db: Database = getDatab
     checks.push(check("warn", "Domain", `${domain} is not configured locally.`, `emails domain adopt ${domain} --provider <provider>`));
   }
 
-  if (status.inbox.inbound_buckets.length > 0 || status.providers.gmail.length > 0) {
-    checks.push(check("pass", "Inbound sources", `${status.inbox.inbound_buckets.length} S3 bucket(s), ${status.providers.gmail.length} Gmail provider(s) configured.`));
+  if (inboundBuckets.length > 0 || gmailProviderCount > 0) {
+    checks.push(check("pass", "Inbound sources", `${inboundBuckets.length} S3 bucket(s), ${gmailProviderCount} Gmail provider(s) configured.`));
   } else {
     checks.push(check("fail", "Inbound sources", "No S3 inbound bucket or Gmail provider configured.", "emails inbox sync-status"));
   }
 
-  if (status.inbox.realtime.queue_configured) {
+  if (realtimeQueueConfigured) {
     checks.push(check("pass", "Realtime", "Realtime queue is configured."));
   } else {
     checks.push(check("warn", "Realtime", "Realtime queue is not configured; manual refresh/sync is required.", domain ? `emails inbox setup-realtime ${domain}` : undefined));
   }
 
-  if (recent.length > 0) {
-    checks.push(check("pass", "Recent local mail", `${recent.length} local message(s) found for ${normalized}.`));
+  if (recent.count > 0) {
+    checks.push(check("pass", "Recent local mail", `${recent.count} local message(s) found for ${normalized}.`));
   } else {
     checks.push(check("warn", "Recent local mail", "No local messages found for this address.", `emails inbox wait ${normalized} --timeout 120`));
   }
@@ -108,8 +138,8 @@ export function diagnoseInboundDelivery(address: string, db: Database = getDatab
     address: normalized,
     domain,
     alias_target: aliasTarget,
-    recent_local_messages: recent.length,
-    latest_received_at: recent[0]?.received_at ?? null,
+    recent_local_messages: recent.count,
+    latest_received_at: recent.latest_received_at,
     checks,
     cli_equivalent: `emails doctor delivery ${normalized} --json`,
   };

@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { closeDatabase, resetDatabase } from "../db/database.js";
+import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.js";
 import { createDomain, updateDnsStatus } from "../db/domains.js";
 import { createAddress } from "../db/addresses.js";
@@ -7,10 +7,18 @@ import { createTemplate } from "../db/templates.js";
 import { suppressContact, upsertContact } from "../db/contacts.js";
 import { runDiagnostics, formatDiagnostics } from "./doctor.js";
 import type { DoctorCheck } from "./doctor.js";
+import type { Database } from "../db/database.js";
+
+const runConnectorCommand = mock(async () => ({
+  success: true,
+  stdout: JSON.stringify({ emailAddress: "doctor@example.com" }),
+  stderr: "",
+}));
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
+  runConnectorCommand.mockClear();
 });
 
 afterEach(() => {
@@ -25,6 +33,24 @@ describe("runDiagnostics", () => {
     expect(dbCheck).toBeDefined();
     expect(dbCheck!.status).toBe("pass");
     expect(dbCheck!.message).toContain("accessible");
+  });
+
+  it("returns a database failure instead of continuing with a broken handle", async () => {
+    const brokenDb = {
+      query: () => ({
+        get: () => {
+          throw new Error("cannot open database");
+        },
+      }),
+    } as unknown as Database;
+
+    const checks = await runDiagnostics(brokenDb);
+    expect(checks).toHaveLength(1);
+    expect(checks[0]).toMatchObject({
+      name: "Database",
+      status: "fail",
+    });
+    expect(checks[0]?.message).toContain("cannot open database");
   });
 
   it("warns when no providers configured", async () => {
@@ -106,11 +132,98 @@ describe("runDiagnostics", () => {
     expect(tmplCheck!.message).toContain("1 template(s)");
   });
 
+  it("aggregates large diagnostic counts without hydrating list rows", async () => {
+    const provider = createProvider({ name: "Local", type: "sandbox" });
+    const db = getDatabase();
+    const timestamp = new Date().toISOString();
+    const total = 10025;
+    db.run("BEGIN");
+    try {
+      for (let i = 0; i < total; i++) {
+        db.run(
+          `INSERT INTO domains (id, provider_id, domain, dkim_status, spf_status, dmarc_status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'pending', 'pending', ?, ?)`,
+          [`diag-domain-${i}`, provider.id, `diag-${i}.example.com`, i % 2 === 0 ? "verified" : "pending", timestamp, timestamp],
+        );
+        db.run(
+          `INSERT INTO addresses (id, provider_id, email, display_name, verified, created_at, updated_at)
+           VALUES (?, ?, ?, NULL, 0, ?, ?)`,
+          [`diag-address-${i}`, provider.id, `diag-${i}@example.com`, timestamp, timestamp],
+        );
+        db.run(
+          `INSERT INTO contacts (id, email, name, send_count, bounce_count, complaint_count, last_sent_at, suppressed, created_at, updated_at)
+           VALUES (?, ?, NULL, 0, 0, 0, NULL, ?, ?, ?)`,
+          [`diag-contact-${i}`, `diag-${i}@example.com`, i % 4 === 0 ? 1 : 0, timestamp, timestamp],
+        );
+        db.run(
+          `INSERT INTO templates (id, name, subject_template, html_template, text_template, metadata, created_at, updated_at)
+           VALUES (?, ?, 'Subject', NULL, 'Text', '{}', ?, ?)`,
+          [`diag-template-${i}`, `diag-template-${i}`, timestamp, timestamp],
+        );
+      }
+      db.run("COMMIT");
+    } catch (error) {
+      db.run("ROLLBACK");
+      throw error;
+    }
+
+    const checks = await runDiagnostics(db);
+    expect(checks.find((c) => c.name === "Domains")?.message).toContain("5013/10025 domains verified");
+    expect(checks.find((c) => c.name === "Addresses")?.message).toContain("10025 sender address(es)");
+    expect(checks.find((c) => c.name === "Contacts")?.message).toContain("10025 contacts (2507 suppressed)");
+    expect(checks.find((c) => c.name === "Templates")?.message).toContain("10025 template(s)");
+  });
+
   it("includes provider health checks for active providers", async () => {
     createProvider({ name: "MyResend", type: "resend", api_key: "re_test" });
     const checks = await runDiagnostics();
     const provHealthCheck = checks.find((c) => c.name.startsWith("Provider: MyResend"));
     expect(provHealthCheck).toBeDefined();
+    expect(provHealthCheck?.message).toContain("live credential check skipped");
+  });
+
+  it("can run live provider credential checks explicitly", async () => {
+    createProvider({ name: "BrokenResend", type: "resend" });
+    const checks = await runDiagnostics(undefined, { liveProviderChecks: true });
+    const provHealthCheck = checks.find((c) => c.name.startsWith("Provider: BrokenResend"));
+    expect(provHealthCheck).toBeDefined();
+    expect(provHealthCheck?.message).toContain("Credentials invalid");
+  });
+
+  it("does not run live Gmail connector auth checks by default", async () => {
+    createProvider({
+      name: "Gmail",
+      type: "gmail",
+      oauth_refresh_token: "refresh-token",
+      oauth_token_expiry: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+
+    const checks = await runDiagnostics(undefined, { gmailAuthCheck: runConnectorCommand });
+    const gmailCheck = checks.find((c) => c.name === "Gmail: Gmail");
+
+    expect(gmailCheck).toMatchObject({
+      status: "pass",
+    });
+    expect(gmailCheck?.message).toContain("live auth check skipped");
+    expect(runConnectorCommand).not.toHaveBeenCalled();
+  });
+
+  it("runs Gmail connector auth checks only when live diagnostics are requested", async () => {
+    createProvider({
+      name: "Gmail",
+      type: "gmail",
+      oauth_refresh_token: "refresh-token",
+      oauth_token_expiry: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+
+    const checks = await runDiagnostics(undefined, { liveProviderChecks: true, gmailAuthCheck: runConnectorCommand });
+    const gmailCheck = checks.find((c) => c.name === "Gmail: Gmail");
+
+    expect(runConnectorCommand).toHaveBeenCalledTimes(1);
+    expect(gmailCheck).toMatchObject({
+      status: "pass",
+    });
+    expect(gmailCheck?.message).toContain("Authenticated as doctor@example.com");
   });
 });
 

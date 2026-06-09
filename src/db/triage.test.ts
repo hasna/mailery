@@ -5,6 +5,7 @@ import {
   getTriage,
   getTriageById,
   listTriaged,
+  listTriagedSummaries,
   getUntriaged,
   deleteTriage,
   deleteTriageByEmail,
@@ -188,6 +189,52 @@ describe("listTriaged", () => {
     const page2 = listTriaged({ limit: 2, offset: 2 });
     expect(page2.length).toBe(2);
   });
+
+  it("clamps bad limit and offset values", () => {
+    const db = getDatabase();
+    for (let i = 0; i < 5; i++) {
+      seedEmail(db, `clamp-${i}`, `Clamp ${i}`);
+      saveTriage({ email_id: `clamp-${i}`, label: "fyi", priority: 3 });
+    }
+
+    expect(listTriaged({ limit: 0 }).length).toBe(1);
+    expect(listTriaged({ limit: -10 }).length).toBe(1);
+    expect(listTriaged({ limit: Number.NaN }).length).toBe(5);
+    expect(listTriaged({ limit: Number.POSITIVE_INFINITY, offset: Number.POSITIVE_INFINITY }).length).toBe(5);
+  });
+
+  it("lists summaries without projecting draft replies", () => {
+    const db = getDatabase();
+    seedEmail(db, "summary-heavy", "Summary heavy");
+    saveTriage({
+      email_id: "summary-heavy",
+      label: "action-required",
+      priority: 1,
+      summary: "needs review",
+      draft_reply: "large draft ".repeat(1000),
+    });
+    const queries: string[] = [];
+    const recordingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "query") {
+          return (sql: string) => {
+            queries.push(sql);
+            return target.query(sql);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const [summary] = listTriagedSummaries({ limit: 1 }, recordingDb);
+
+    expect(summary).toBeDefined();
+    expect(summary?.summary).toBe("needs review");
+    expect("draft_reply" in summary!).toBe(false);
+    expect(JSON.stringify(summary)).not.toContain("large draft");
+    expect(queries[0]).not.toContain("SELECT *");
+    expect(queries[0]).not.toContain("draft_reply");
+  });
 });
 
 describe("getUntriaged", () => {
@@ -209,6 +256,19 @@ describe("getUntriaged", () => {
     const untriaged = getUntriaged("inbound", 50);
     expect(untriaged.length).toBe(1);
     expect(untriaged[0]!.id).toBe("ui1");
+  });
+
+  it("clamps bad sent and inbound limits", () => {
+    const db = getDatabase();
+    for (let i = 0; i < 5; i++) {
+      seedEmail(db, `us-${i}`, `Untriaged sent ${i}`);
+      seedInbound(db, `ui-clamp-${i}`, `Untriaged inbound ${i}`);
+    }
+
+    expect(getUntriaged("sent", 0).length).toBe(1);
+    expect(getUntriaged("sent", -10).length).toBe(1);
+    expect(getUntriaged("sent", Number.NaN).length).toBe(5);
+    expect(getUntriaged("inbound", Number.POSITIVE_INFINITY).length).toBe(5);
   });
 });
 

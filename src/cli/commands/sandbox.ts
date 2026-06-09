@@ -1,9 +1,9 @@
 import type { Command } from "commander";
-import chalk from "chalk";
+import chalk from "../../lib/chalk-lite.js";
 import { execSync } from "node:child_process";
-import { listSandboxEmails, getSandboxEmail, clearSandboxEmails, getSandboxCount } from "../../db/sandbox.js";
+import { listSandboxEmailSummaries, getSandboxEmail, clearSandboxEmails, getSandboxCount } from "../../db/sandbox.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
-import { confirmDestructiveAction, handleError, resolveId } from "../utils.js";
+import { confirmDestructiveAction, handleError, parseCliPage, resolveId } from "../utils.js";
 
 export function registerSandboxCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const sandboxCmd = program.command("sandbox").description("Inspect emails captured by sandbox providers");
@@ -17,9 +17,8 @@ export function registerSandboxCommands(program: Command, output: (data: unknown
     .action((opts: { provider?: string; limit?: string; offset?: string }) => {
       try {
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const limit = parseInt(opts.limit ?? "20", 10);
-        const offset = parseInt(opts.offset ?? "0", 10);
-        const emails = listSandboxEmails(providerId, limit, offset);
+        const page = parseCliPage(opts, 20);
+        const emails = listSandboxEmailSummaries(providerId, page.limit, page.offset);
         if (emails.length === 0) {
           output([], chalk.dim("No sandbox emails captured yet."));
           return;

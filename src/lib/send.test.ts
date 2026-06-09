@@ -121,6 +121,17 @@ describe("sendWithFailover — shared send safety guards", () => {
     ).rejects.toThrow(/warming limit reached/i);
   });
 
+  it("blocks warming limits when existing sends used display-name From values", async () => {
+    createWarmingSchedule({ domain: "warm.test", target_daily_volume: 50 });
+    for (let i = 0; i < 50; i++) {
+      createEmail(providerId, { from: `Warm Sender <sender@warm.test>`, to: `r${i}@x.com`, subject: "sent", text: "body" }, `display-msg-${i}`);
+    }
+
+    await expect(
+      sendWithFailover(providerId, { from: "Warm Sender <sender@warm.test>", to: "next@x.com", subject: "hi", text: "yo" }),
+    ).rejects.toThrow(/warming limit reached/i);
+  });
+
   it("allows trusted local callers to bypass warming limits explicitly", async () => {
     createWarmingSchedule({ domain: "warm.test", target_daily_volume: 50 });
     for (let i = 0; i < 50; i++) {

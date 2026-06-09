@@ -76,9 +76,9 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
 
 /** Incremental sync of the newest messages for each active Gmail account. */
 async function pullGmail(): Promise<number> {
-  const { listProviders } = await import("../../db/providers.js");
+  const { listActiveProviderSummaries } = await import("../../db/providers.js");
   const { syncGmailInbox } = await import("../../lib/gmail-sync.js");
-  const gmails = listProviders().filter((p) => p.type === "gmail" && p.active);
+  const gmails = listActiveProviderSummaries("gmail");
   let n = 0;
   for (const p of gmails) {
     // Provider name "Gmail (andreihasnacom)" → connector profile "andreihasnacom".

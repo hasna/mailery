@@ -69,6 +69,22 @@ describe("warming CRUD", () => {
     expect(paused.some((s) => s.domain === "paused1.com")).toBe(true);
   });
 
+  it("listWarmingSchedules paginates after status filtering", () => {
+    const db = getDatabase();
+    for (let i = 1; i <= 4; i++) {
+      const schedule = createWarmingSchedule({ domain: `warm-${i}.example.com`, target_daily_volume: 100 });
+      db.run("UPDATE warming_schedules SET created_at = ? WHERE id = ?", [`2026-01-0${i} 00:00:00`, schedule.id]);
+    }
+    updateWarmingStatus("warm-4.example.com", "paused");
+
+    const page = listWarmingSchedules("active", db, { limit: 2, offset: 1 });
+
+    expect(page.map((schedule) => schedule.domain)).toEqual([
+      "warm-2.example.com",
+      "warm-1.example.com",
+    ]);
+  });
+
   it("updateWarmingStatus changes status", () => {
     createWarmingSchedule({ domain: "status-test.com", target_daily_volume: 300 });
     const paused = updateWarmingStatus("status-test.com", "paused");

@@ -92,6 +92,29 @@ describe("emails serve REST parity smoke", () => {
     expect(detail.summary).toBe("Managed agent summary");
   });
 
+  it("serves a local digest snapshot through the dashboard API", async () => {
+    storeInboundEmail({
+      provider_id: null,
+      message_id: "<digest-api@example.com>",
+      from_address: "sender@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "Digest API",
+      text_body: "Needs review",
+      html_body: null,
+      attachments: [],
+      label_ids: ["important"],
+      headers: {},
+      raw_size: 12,
+      received_at: new Date().toISOString(),
+    });
+
+    const digest = await json<{ period: string; provider: string; status: string; summary: string; message_count: number }>("/api/digest?period=today");
+    expect(digest).toMatchObject({ period: "today", provider: "local", status: "ok" });
+    expect(digest.summary).toContain("1 inbound message");
+    expect(digest.message_count).toBe(1);
+  });
+
   it("serves core dashboard APIs without leaking provider credentials", async () => {
     const provider = createProvider({
       name: "sandbox",

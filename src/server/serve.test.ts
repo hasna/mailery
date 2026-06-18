@@ -42,7 +42,11 @@ describe("resolveDashboardStaticPath", () => {
     const dashboard = readFileSync(dashboardPath, "utf8");
     expect(dashboard).toContain("<title>Mailery Dashboard</title>");
     expect(dashboard).toContain("openInboundFilter()");
+    expect(dashboard).toContain("openInboundGroup()");
+    expect(dashboard).toContain("openInboundDigest()");
     expect(dashboard).toContain("inbound-filter-summary");
+    expect(dashboard).toContain("modal-inbound-digest");
+    expect(dashboard).toContain("message-group-heading");
     expect(dashboard).toContain("Summary:");
     expect(existsSync(openSourcePath)).toBe(true);
     expect(dirname(openSourcePath)).toBe(dirname(dashboardPath));

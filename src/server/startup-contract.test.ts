@@ -52,6 +52,8 @@ describe("server startup contract", () => {
     expect(routeModulesFor("/api/providers")).toEqual(["core"]);
     expect(routeModulesFor("/api/providers/abc/auth")).toEqual(["core"]);
     expect(routeModulesFor("/api/templates/welcome")).toEqual(["contacts-groups"]);
+    expect(routeModulesFor("/api/digest")).toEqual(["inbound-sequences"]);
+    expect(routeModulesFor("/api/agents/organize")).toEqual(["inbound-sequences"]);
     expect(routeModulesFor("/api/sequences/abc/enrollments")).toEqual(["inbound-sequences"]);
     expect(routeModulesFor("/track/open/email-1")).toEqual(["inbound-sequences"]);
     expect(routeModulesFor("/api/unknown")).toEqual([

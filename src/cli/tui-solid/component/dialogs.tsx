@@ -8,11 +8,12 @@ import { SelectDialog, type SelectDialogItem } from "../ui/select-dialog.js";
 import { copyTextToClipboardAsync } from "../../tui/clipboard.js";
 import { useToast } from "../context/toast.js";
 import { Button, EmptyState, Row } from "../ui/primitives.js";
-import { labelDisplayName, mailboxLabel, type Mailbox } from "../../tui/data.js";
+import { labelDisplayName, mailboxGroupModeLabel, mailboxLabel, MAILBOX_GROUP_MODES, type Mailbox, type MailboxGroupMode } from "../../tui/data.js";
 import { formatDate, wrapText } from "../../tui/format.js";
 import { formatAttachmentSize, mergeAttachmentDetails, type AttachmentDetail, type AttachmentPathLike } from "../../../lib/attachment-actions.js";
 import { openLocalTarget } from "../../../lib/local-actions.js";
 import { ensureEmailAgentSettings } from "../../../db/email-agents.js";
+import { emailDigestPeriodLabel, type EmailDigestPeriod } from "../../../db/email-digests.js";
 import { DEFAULT_GROQ_EMAIL_AGENT_MODEL } from "../../../lib/mailery-ai.js";
 
 export function MaileryDialogs() {
@@ -159,6 +160,16 @@ export function MaileryDialogs() {
       return;
     }
 
+    if (kind === "group") {
+      dialog.replace(() => <GroupDialog close={close} />, { size: "large", onClose: mailery.actions.closeDialog });
+      return;
+    }
+
+    if (kind === "digest") {
+      dialog.replace(() => <DigestDialog close={close} />, { size: "large", onClose: mailery.actions.closeDialog });
+      return;
+    }
+
     if (kind === "search") {
       dialog.replace(() => (
         <box flexDirection="column" width="100%" rowGap={1}>
@@ -297,6 +308,121 @@ export function MaileryDialogs() {
   });
 
   return null;
+}
+
+function GroupDialog(props: { close: () => void }) {
+  const mailery = useMailery();
+  const theme = useTheme();
+  const items: SelectDialogItem[] = MAILBOX_GROUP_MODES.map((mode) => ({
+    id: mode,
+    title: mailboxGroupModeLabel(mode),
+    detail: groupModeDetail(mode),
+    marker: mailery.state.groupMode === mode ? "●" : " ",
+    markerColor: theme.primary,
+  }));
+
+  useKeyboard((key) => {
+    if (key.name === "escape") props.close();
+  });
+
+  return (
+    <SelectDialog
+      title="Group Mail"
+      placeholder="Choose grouping"
+      items={items}
+      query=""
+      onQuery={() => undefined}
+      onSelect={(item) => {
+        mailery.actions.setGroupMode(item.id as MailboxGroupMode);
+        props.close();
+      }}
+      onClose={props.close}
+    />
+  );
+}
+
+function groupModeDetail(mode: MailboxGroupMode): string {
+  switch (mode) {
+    case "priority": return "Important and Unread, Starred, Everything Else";
+    case "read-state": return "Unread, Read";
+    case "category": return "Primary, Social, Promotions, Updates, Forums";
+    default: return "Chronological list";
+  }
+}
+
+const DIGEST_PERIODS: EmailDigestPeriod[] = ["today", "yesterday", "last7", "month"];
+
+function DigestDialog(props: { close: () => void }) {
+  const mailery = useMailery();
+  const theme = useTheme();
+  const toast = useToast();
+  const lines = createMemo(() => {
+    const digest = mailery.state.digest;
+    if (mailery.state.digestLoading) return ["Loading digest..."];
+    if (!digest) return ["No digest available."];
+    const out = [`Summary: ${digest.summary ?? "(no summary)"}`, ""];
+    if (digest.highlights.length) {
+      out.push("Highlights:");
+      for (const item of digest.highlights) out.push(`- ${item}`);
+      out.push("");
+    }
+    if (digest.action_items.length) {
+      out.push("Action Items:");
+      for (const item of digest.action_items) out.push(`- ${item}`);
+      out.push("");
+    }
+    if (digest.important_email_ids.length) {
+      out.push(`Important: ${digest.important_email_ids.map((id) => id.slice(0, 8)).join(", ")}`);
+      out.push("");
+    }
+    out.push(`${digest.message_count} message${digest.message_count === 1 ? "" : "s"} · ${digest.provider} ${digest.model}`);
+    return out.flatMap((line) => wrapText(line, 96, 4));
+  });
+
+  useKeyboard((key) => {
+    if (key.name === "escape") props.close();
+  });
+
+  return (
+    <box flexDirection="column" width="100%" rowGap={1}>
+      <box height={1} flexDirection="row" justifyContent="space-between">
+        <text fg={theme.text}>Mail Digest</text>
+        <Button label="Close" onPress={props.close} />
+      </box>
+      <box height={1} flexDirection="row" columnGap={1}>
+        <For each={DIGEST_PERIODS}>
+          {(period) => (
+            <Button
+              label={emailDigestPeriodLabel(period)}
+              active={mailery.state.digestPeriod === period}
+              onPress={() => void mailery.actions.loadDigest(period, { local: true })}
+            />
+          )}
+        </For>
+      </box>
+      <scrollbox height={18} width="100%">
+        <For each={lines()}>
+          {(line) => <text fg={line.endsWith(":") ? theme.textMuted : theme.text} wrapMode="word" width="100%">{line || " "}</text>}
+        </For>
+      </scrollbox>
+      <box height={1} flexDirection="row" columnGap={1}>
+        <Button
+          label="Refresh"
+          tone="primary"
+          active={!mailery.state.digestLoading}
+          onPress={() => {
+            void mailery.actions.generateDigest(mailery.state.digestPeriod).then((digest) => {
+              toast.show({
+                title: digest ? "Digest refreshed" : "Digest failed",
+                message: digest ? `${emailDigestPeriodLabel(digest.period)} · ${digest.provider}` : mailery.state.lastError ?? "Could not generate digest.",
+                tone: digest ? "success" : "error",
+              });
+            });
+          }}
+        />
+      </box>
+    </box>
+  );
 }
 
 

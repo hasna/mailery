@@ -5,7 +5,7 @@ import { useMailery } from "../context/mailery-state.js";
 import { labelColor, selectedForeground, useTheme } from "../context/theme.js";
 import { Button, EmptyState, Row } from "../ui/primitives.js";
 import { bareAddress, listDateTime, truncate } from "../../tui/format.js";
-import { labelDisplayName } from "../../tui/data.js";
+import { isImportantMessage, labelDisplayName, mailboxGroupModeLabel } from "../../tui/data.js";
 import { sidebarWidth } from "./sidebar.js";
 import { useToast } from "../context/toast.js";
 
@@ -29,7 +29,7 @@ function MessageRow(props: { message: ReturnType<typeof useMailery>["state"]["me
     <Row active={props.selected} onPress={() => mailery.actions.selectMessage(message().id)}>
       <box flexDirection="row" width="100%" columnGap={1} backgroundColor={rowBg()}>
         <box width={2} flexShrink={0}>
-          <Show when={message().is_starred || message().labels.includes("urgent") || message().labels.includes("important")}>
+          <Show when={isImportantMessage(message())}>
             <text fg={props.selected ? rowFg() : theme.warning}>■</text>
           </Show>
         </box>
@@ -115,7 +115,13 @@ export function MailboxRoute() {
             active={!!mailery.state.search || !!mailery.state.activeLabel || mailery.state.mailbox !== "inbox"}
             onPress={() => mailery.actions.openDialog("filter")}
           />
+          <Button
+            label="Group"
+            active={mailery.state.groupMode !== "none"}
+            onPress={() => mailery.actions.openDialog("group")}
+          />
           <Button label="Search" onPress={() => mailery.actions.openDialog("search")} />
+          <Button label="Digest" onPress={() => mailery.actions.openDialog("digest")} />
           <Button label="Pull" onPress={() => void pullNow()} />
         </box>
         <text fg={theme.textMuted}>Page {mailery.state.page + 1}</text>
@@ -146,8 +152,19 @@ export function MailboxRoute() {
         fallback={<EmptyState title="No messages" detail={emptyDetail()} />}
       >
         <scrollbox flexGrow={1} width="100%">
-          <For each={mailery.state.messages}>
-            {(message) => <MessageRow message={message} selected={mailery.state.selectedMessageId === message.id} showTo={showTo()} columns={columns()} />}
+          <For each={mailery.groupedMessages()}>
+            {(group) => (
+              <>
+                <Show when={mailery.state.groupMode !== "none"}>
+                  <box height={1} paddingLeft={1}>
+                    <text fg={theme.textMuted}>{group.title}</text>
+                  </box>
+                </Show>
+                <For each={group.messages}>
+                  {(message) => <MessageRow message={message} selected={mailery.state.selectedMessageId === message.id} showTo={showTo()} columns={columns()} />}
+                </For>
+              </>
+            )}
           </For>
         </scrollbox>
       </Show>
@@ -163,6 +180,9 @@ export function MailboxRoute() {
         </Show>
         <Show when={mailery.state.activeLabel}>
           <text fg={theme.textMuted}>Label: {labelDisplayName(mailery.state.activeLabel!)}</text>
+        </Show>
+        <Show when={mailery.state.groupMode !== "none"}>
+          <text fg={theme.textMuted}>Group: {mailboxGroupModeLabel(mailery.state.groupMode)}</text>
         </Show>
       </box>
 

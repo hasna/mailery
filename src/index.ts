@@ -162,16 +162,30 @@ export {
   buildManagedEmailAgentTools,
   formatEmailAgentRun,
   formatEmailAgentSetting,
+  formatEmailOrganizationResult,
   runAlwaysOnEmailAgents,
   runEmailAgentBatch,
+  runEmailOrganization,
   runManagedEmailAgent,
 } from "./lib/email-agents.js";
 export type {
   AlwaysOnEmailAgentsResult,
+  EmailOrganizationResult,
   RunEmailAgentBatchOptions,
   RunEmailAgentBatchResult,
   RunManagedEmailAgentOptions,
 } from "./lib/email-agents.js";
+export {
+  formatEmailDigest,
+  generateEmailDigest,
+  loadEmailDigest,
+  resolveEmailDigestWindow,
+} from "./lib/email-digest.js";
+export type {
+  EmailDigestWindow,
+  GenerateEmailDigestOptions,
+  LoadEmailDigestOptions,
+} from "./lib/email-digest.js";
 export {
   EMAIL_AGENT_DEFINITIONS,
   ensureEmailAgentSettings,
@@ -198,6 +212,22 @@ export type {
   SaveEmailAgentRunInput,
   SaveEmailAgentSettingInput,
 } from "./db/email-agents.js";
+export {
+  emailDigestPeriodLabel,
+  getEmailDigest,
+  getLatestEmailDigest,
+  listEmailDigests,
+  normalizeEmailDigestPeriod,
+  saveEmailDigest,
+} from "./db/email-digests.js";
+export type {
+  EmailDigest,
+  EmailDigestPeriod,
+  EmailDigestProvider,
+  EmailDigestStatus,
+  ListEmailDigestsOptions,
+  SaveEmailDigestInput,
+} from "./db/email-digests.js";
 export { formatDnsCheck } from "./lib/dns-check-format.js";
 export type { DnsCheckResult } from "./lib/dns-check-format.js";
 export { formatDiagnostics } from "./lib/diagnostics-format.js";

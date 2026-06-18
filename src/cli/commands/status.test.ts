@@ -80,4 +80,14 @@ describe("managed agent CLI commands", () => {
     const runs = await runStatusCommand(["agent", "runs", "--agent", "categorizer"]);
     expect(runs.formatted).toContain("categorizer skipped");
   });
+
+  it("generates a local inbox digest from the agent CLI", async () => {
+    seedInbound();
+    const digest = await runStatusCommand(["agent", "digest", "today", "--local"]);
+
+    expect(digest.formatted).toContain("Today digest");
+    expect(digest.formatted).toContain("Summary:");
+    expect(digest.formatted).toContain("provider: local local-mailery-digest");
+    expect(digest.data).toMatchObject({ period: "today", provider: "local", status: "ok" });
+  });
 });

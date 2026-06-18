@@ -3,7 +3,7 @@ import { z } from "zod";
 import { tool } from "ai";
 import type { Database } from "../db/database.js";
 import { getDatabase, now } from "../db/database.js";
-import { addInboundLabel, getInboundEmail, listInboundEmailSummaries } from "../db/inbound.js";
+import { addInboundLabel, getInboundEmail, listInboundEmailSummaries, setInboundArchivedFlag } from "../db/inbound.js";
 import {
   EMAIL_AGENT_DEFINITIONS,
   getEmailAgentDefinition,
@@ -46,6 +46,13 @@ export interface AlwaysOnEmailAgentsResult {
   errors: { agent_key: EmailAgentKey; inbound_email_id: string; error: string }[];
 }
 
+export interface EmailOrganizationResult {
+  agents: EmailAgentKey[];
+  emails: number;
+  runs: EmailAgentRun[];
+  errors: { agent_key: EmailAgentKey; inbound_email_id: string; error: string }[];
+}
+
 export interface EmailAgentCredentialStatus {
   provider: EmailAgentProvider;
   configured: boolean;
@@ -83,7 +90,9 @@ const MANAGED_AGENT_PROMPT_VERSION = "mailery-managed-email-agent-v1";
 const MAX_EMAIL_BODY_CHARS = 16_000;
 const MAX_SEARCH_RESULTS = 5;
 const MAX_ALWAYS_ON_PER_AGENT = 50;
+const MAX_ORGANIZATION_EMAILS = 2_000;
 const MANAGED_AGENT_DEFAULT_PROVIDER: EmailAgentProvider = "groq";
+const DEFAULT_ORGANIZATION_AGENTS: EmailAgentKey[] = ["categorizer", "labeler", "fraud"];
 
 function credentialStatus(provider: EmailAgentProvider): EmailAgentCredentialStatus {
   const config = loadConfig();
@@ -397,7 +406,7 @@ export async function runEmailAgentBatch(
   deps: GenerateTextDeps = {},
 ): Promise<RunEmailAgentBatchResult> {
   const db = opts.db || getDatabase();
-  const limit = Math.max(1, Math.min(opts.limit ?? 10, 200));
+  const limit = Math.max(1, Math.min(opts.limit ?? 10, 500));
   const candidates = opts.all
     ? listInboundEmailSummaries({ limit }, db).map((email) => ({ id: email.id }))
     : listPendingInboundEmailsForAgent(agentKey, limit, db);
@@ -427,6 +436,53 @@ export async function runAlwaysOnEmailAgents(opts: { limitPerAgent?: number; db?
     errors.push(...result.errors);
   }
   return { agents: settings.length, runs, errors };
+}
+
+export async function runEmailOrganization(
+  opts: RunEmailAgentBatchOptions & { agents?: EmailAgentKey[]; applyActions?: boolean } = {},
+  deps: GenerateTextDeps = {},
+): Promise<EmailOrganizationResult> {
+  const db = opts.db || getDatabase();
+  const agentKeys = opts.agents?.length ? opts.agents : DEFAULT_ORGANIZATION_AGENTS;
+  const limit = Math.max(1, Math.min(opts.limit ?? 100, MAX_ORGANIZATION_EMAILS));
+  const runs: EmailAgentRun[] = [];
+  const errors: EmailOrganizationResult["errors"] = [];
+
+  if (opts.all) {
+    const emails = listInboundEmailSummaries({ limit }, db).filter((email) => !email.is_sent);
+    for (const agentKey of agentKeys) {
+      for (const email of emails) {
+        const run = await runManagedEmailAgent(agentKey, email.id, {
+          ...opts,
+          db,
+          force: opts.force ?? true,
+          applyLabels: opts.applyLabels ?? true,
+        }, deps);
+        runs.push(run);
+        if (run.status === "ok" && opts.applyActions) applyOrganizationActions(run, db);
+        if (run.status === "error") errors.push({ agent_key: agentKey, inbound_email_id: email.id, error: run.error ?? "unknown error" });
+      }
+    }
+    return { agents: agentKeys, emails: emails.length, runs, errors };
+  }
+
+  const emailIds = new Set<string>();
+  for (const agentKey of agentKeys) {
+    const result = await runEmailAgentBatch(agentKey, {
+      ...opts,
+      db,
+      limit,
+      force: opts.force ?? true,
+      applyLabels: opts.applyLabels ?? true,
+    }, deps);
+    for (const run of result.runs) {
+      runs.push(run);
+      emailIds.add(run.inbound_email_id);
+      if (run.status === "ok" && opts.applyActions) applyOrganizationActions(run, db);
+    }
+    errors.push(...result.errors);
+  }
+  return { agents: agentKeys, emails: emailIds.size, runs, errors };
 }
 
 function resolveAgentProvider(setting: EmailAgentSetting, opts: RunManagedEmailAgentOptions): { provider: EmailAgentProvider; model: string } {
@@ -491,14 +547,54 @@ function normalizeAgentOutput(value: unknown): AgentOutput {
   };
 }
 
+function normalizeAgentLabel(value: string | null | undefined): string {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-")
+    .replace(/[^a-z0-9:-]/g, "")
+    .replace(/^ai:/, "")
+    .slice(0, 64);
+}
+
+function categoryLabels(category: string): string[] {
+  const label = normalizeAgentLabel(category);
+  if (!label) return [];
+  if (["social"].includes(label)) return ["category_social"];
+  if (["promotion", "promotions", "marketing", "offer", "deal", "newsletter"].includes(label)) return ["category_promotions", "newsletter"];
+  if (["update", "updates", "receipt", "transactional", "notification", "statement", "billing", "reminder"].includes(label)) return ["category_updates", "transactional"];
+  if (["forum", "forums", "mailing-list", "group", "discussion"].includes(label)) return ["category_forums"];
+  if (["personal", "customer", "security", "action-required", "fyi", "follow-up"].includes(label)) return ["category_personal"];
+  return [];
+}
+
 function labelsForAgent(agentKey: EmailAgentKey, output: AgentOutput): string[] {
-  const labels = new Set<string>(output.labels);
-  labels.add(output.category);
+  const labels = new Set<string>();
+  for (const label of output.labels) {
+    const normalized = normalizeAgentLabel(label);
+    if (normalized) labels.add(normalized);
+  }
+  const category = normalizeAgentLabel(output.category);
+  if (category) labels.add(category);
+  for (const label of categoryLabels(category)) labels.add(label);
   if (agentKey === "fraud") {
-    if (output.risk_score >= 70) labels.add("fraud-risk");
+    if (output.risk_score >= 70) {
+      labels.add("fraud-risk");
+      labels.add("spam");
+    }
     else if (output.risk_score >= 40) labels.add("review-risk");
   }
-  if (agentKey === "categorizer" && output.priority <= 2) labels.add("priority");
+  if (output.priority <= 2) {
+    labels.add("important");
+    labels.add("priority");
+  }
+  if (["important", "urgent", "action-required", "security", "customer", "follow-up"].some((label) => labels.has(label))) {
+    labels.add("important");
+  }
+  if (["spam", "scam", "phishing", "fraud", "fraud-risk"].some((label) => labels.has(label) || category.includes(label))) {
+    labels.add("spam");
+  }
+  if (["trash", "junk", "delete"].some((label) => labels.has(label))) labels.add("trash");
   return [...labels];
 }
 
@@ -510,7 +606,36 @@ function shouldApplyLabels(agentKey: EmailAgentKey, setting: EmailAgentSetting, 
 
 function applyAgentLabels(inboundEmailId: string, labels: string[], db: Database): void {
   for (const label of labels) {
-    addInboundLabel(inboundEmailId, `ai:${label}`, db);
+    const normalized = normalizeAgentLabel(label);
+    if (!normalized) continue;
+    addInboundLabel(inboundEmailId, `ai:${normalized}`, db);
+    for (const raw of rawLabelsForAgentLabel(normalized)) {
+      addInboundLabel(inboundEmailId, raw, db);
+    }
+  }
+}
+
+function rawLabelsForAgentLabel(label: string): string[] {
+  const normalized = normalizeAgentLabel(label);
+  if (!normalized) return [];
+  const raw = new Set<string>();
+  if (
+    normalized === "important"
+    || normalized === "priority"
+    || normalized === "urgent"
+    || normalized === "action-required"
+    || normalized === "follow-up"
+  ) raw.add(normalized === "priority" ? "important" : normalized);
+  if (normalized === "spam" || normalized === "trash") raw.add(normalized);
+  if (normalized === "newsletter" || normalized === "transactional") raw.add(normalized);
+  if (normalized.startsWith("category-") || normalized.startsWith("category_")) raw.add(normalized.replace(/-/g, "_"));
+  return [...raw];
+}
+
+function applyOrganizationActions(run: EmailAgentRun, db: Database): void {
+  const labels = new Set(run.labels.map(normalizeAgentLabel));
+  if (labels.has("archive") || labels.has("archived") || labels.has("archive-suggested")) {
+    setInboundArchivedFlag(run.inbound_email_id, true, db);
   }
 }
 
@@ -545,4 +670,24 @@ export function formatEmailAgentRun(run: EmailAgentRun): string {
   const labels = run.labels.length ? run.labels.join(", ") : "none";
   const risk = run.risk_score == null ? "n/a" : `${run.risk_score}/100`;
   return `${run.agent_key} ${run.status} ${run.inbound_email_id.slice(0, 8)} category=${run.category ?? "n/a"} labels=${labels} risk=${risk}`;
+}
+
+export function formatEmailOrganizationResult(result: EmailOrganizationResult): string {
+  const ok = result.runs.filter((run) => run.status === "ok").length;
+  const skipped = result.runs.filter((run) => run.status === "skipped").length;
+  const lines = [
+    `Organized ${result.emails} email${result.emails === 1 ? "" : "s"} with ${result.agents.join(", ")}.`,
+    `Runs: ${ok} ok, ${skipped} skipped, ${result.errors.length} error${result.errors.length === 1 ? "" : "s"}.`,
+  ];
+  if (result.runs.length) {
+    lines.push("", ...result.runs.slice(0, 20).map(formatEmailAgentRun));
+    if (result.runs.length > 20) lines.push(`... ${result.runs.length - 20} more run(s)`);
+  }
+  if (result.errors.length) {
+    lines.push("", "Errors:");
+    for (const error of result.errors.slice(0, 20)) {
+      lines.push(`- ${error.agent_key} ${error.inbound_email_id.slice(0, 8)} ${error.error}`);
+    }
+  }
+  return lines.join("\n");
 }

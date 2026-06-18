@@ -80,12 +80,25 @@ Created: 2026-06-18
 - [x] Publish only after credentials/auth and release gates are clean.
 - [x] Update local/global install and smoke `mailery --version`, `mailery ui --help`, and representative CLI commands.
 
+### Goal 8: Digest + Intelligent Inbox Organization
+
+- [x] Audit existing managed Groq agent, label, digest, TUI, web dashboard, REST, and CLI surfaces.
+- [x] Add project-scoped Goal 8 plan and tasks to the local `todos` CLI.
+- [x] Add persisted `email_digests` storage with local fallback and Groq-backed generation.
+- [x] Add `mailery agent digest` and `mailery agent organize`.
+- [x] Normalize managed-agent labels so priority/security/action mail creates visible `important` labels and spam/trash labels drive folders.
+- [x] Add TUI Group and Digest controls, grouped mailbox sections, and broader important-square detection.
+- [x] Add web dashboard Group and Digest controls, digest API calls, grouped list rendering, and important-square detection.
+- [x] Add focused tests for digest generation, organization labels, grouping helpers, CLI digest, REST digest, and dashboard contracts.
+- [ ] Run full release gates, categorize existing local mail, commit, push, publish, update local install, and smoke all commands.
+
 ## External Guidance Applied
 
 - Attachment handling should avoid trusting MIME types and filenames, limit size, keep files outside public webroot, and require explicit access paths.
 - Untrusted email HTML should use safe sinks/sanitization and avoid raw `innerHTML` where possible.
 - Browser link opening should avoid opener access for untrusted links.
 - Embedded email HTML should be sandboxed and escaped correctly when using `srcdoc`.
+- Gmail-inspired grouping should keep fixed category sections (`Primary`, `Social`, `Promotions`, `Updates`, `Forums`) and a Priority Inbox style grouping (`Important and Unread`, `Starred`, `Everything Else`) rather than inventing many custom top-level folders.
 
 ## Verification Log
 
@@ -125,3 +138,15 @@ Created: 2026-06-18
 - Goal 7: published `@hasna/mailery@0.6.47` to npm with public access.
 - Goal 7: updated Bun global install to `@hasna/mailery@0.6.47` using `--minimum-release-age=0` because the local Bun security policy blocks packages newer than 604800 seconds by default.
 - Goal 7: installed `mailery` smoke passed for `mailery --version` (`0.6.47`), `mailery ui --help`, `mailery inbox --help`, `provider list --json`, `inbox list --json`, `sandbox count --json`, and `agent defaults --json`.
+- Goal 8: `./node_modules/.bin/tsc --noEmit` passed after digest/organization/TUI/web/API integration.
+- Goal 8: `EMAILS_DB_PATH=:memory: bun test src/lib/email-digest.test.ts src/lib/email-agents.test.ts src/cli/commands/status.test.ts src/cli/tui/data.test.ts src/server/routes/rest-parity.test.ts src/server/serve.test.ts src/server/startup-contract.test.ts` passed: 106 tests, 0 failures.
+- Goal 8: package metadata bumped from `0.6.47` to `0.6.48` because npm registry latest was already `0.6.47`.
+- Goal 8: `git diff --check` passed.
+- Goal 8: `./node_modules/.bin/tsc --noEmit` passed after the `0.6.48` version bump.
+- Goal 8: `EMAILS_DB_PATH=:memory: bun test` passed: 1592 tests, 0 failures, 4822 expect calls across 146 files.
+- Goal 8: `bun run build` passed after the `0.6.48` version bump.
+- Goal 8: `npm pack --dry-run --silent` passed and produced `hasna-mailery-0.6.48.tgz`.
+- Goal 8: package dry-run content check confirmed `dashboard/index.html`, `dashboard/open-source.html`, and digest build artifacts are included: 796 packed entries.
+- Goal 8: built CLI smoke passed for `mailery --version` (`0.6.48`), `agent defaults --json`, `agent digest today --local --json`, and `agent organize --help`.
+- Goal 8: local digest smoke against the real default DB succeeded with 78 messages for today; live Groq organization over existing local mail was not run because `GROQ_API_KEY` / `groq_api_key` is not configured locally.
+- Goal 8: built dashboard smoke on isolated `http://127.0.0.1:3992` served `/`, `/open-source`, and `/api/digest?period=today`; server was stopped after verification.

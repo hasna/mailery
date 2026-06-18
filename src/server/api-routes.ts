@@ -72,6 +72,8 @@ export function routeModulesFor(path: string): readonly RouteKey[] {
       "/api/inbound",
       "/api/doctor",
       "/api/pull",
+      "/api/digest",
+      "/api/agents",
       "/api/sequences",
       "/api/warming",
       "/api/triage",

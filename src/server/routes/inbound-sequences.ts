@@ -8,6 +8,7 @@ import { getTriage, listTriagedSummaries, getTriageStats } from '../../db/triage
 import { updateEmailStatus } from '../../db/emails.js';
 import { upsertEvent } from '../../db/events.js';
 import { getDatabase } from '../../db/database.js';
+import { getLatestEmailDigest, normalizeEmailDigestPeriod } from '../../db/email-digests.js';
 import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, checkRateLimit, tooManyRequests, parseInteger, queryInteger, optionalQueryInteger, queryPage } from './helpers.js';
 
 
@@ -175,6 +176,66 @@ if (path === "/api/pull" && method === "POST") {
       const { syncAll } = await import('../../lib/sync.js');
       result = await syncAll();
     }
+    return json(result);
+  } catch (e) { return internalError(e); }
+}
+
+// GET /api/digest?period=today — latest saved digest, local snapshot if missing
+if (path === "/api/digest" && method === "GET") {
+  try {
+    const period = normalizeEmailDigestPeriod(url.searchParams.get("period") ?? "today");
+    const latest = getLatestEmailDigest(period);
+    if (latest) return json(latest);
+    const { generateEmailDigest } = await import('../../lib/email-digest.js');
+    return json(await generateEmailDigest({ period, offline: true }));
+  } catch (e) { return internalError(e); }
+}
+
+// POST /api/digest — generate a fresh Groq/Cerebras digest, or local with { local: true }
+if (path === "/api/digest" && method === "POST") {
+  const ip = req.headers.get("x-forwarded-for") ?? "local";
+  if (!checkRateLimit(ip, "digest", 3)) return tooManyRequests();
+  try {
+    const body = await parseBody(req) as Record<string, unknown>;
+    const period = normalizeEmailDigestPeriod(String(body.period ?? "today"));
+    const local = body.local === true || body.offline === true;
+    const { generateEmailDigest, loadEmailDigest } = await import('../../lib/email-digest.js');
+    const digest = local
+      ? await generateEmailDigest({ period, offline: true, limit: Number(body.limit) || undefined })
+      : await loadEmailDigest({
+          period,
+          fresh: true,
+          allowLocalFallback: body.fallback_local === true,
+          limit: Number(body.limit) || undefined,
+          provider: body.provider === "cerebras" || body.provider === "groq" ? body.provider : undefined,
+          model: typeof body.model === "string" ? body.model : undefined,
+        });
+    return json(digest);
+  } catch (e) { return internalError(e); }
+}
+
+// POST /api/agents/organize — categorize/label existing inbound mail
+if (path === "/api/agents/organize" && method === "POST") {
+  const ip = req.headers.get("x-forwarded-for") ?? "local";
+  if (!checkRateLimit(ip, "organize", 3)) return tooManyRequests();
+  try {
+    const body = await parseBody(req) as Record<string, unknown>;
+    const { normalizeEmailAgentKey } = await import('../../db/email-agents.js');
+    const { runEmailOrganization } = await import('../../lib/email-agents.js');
+    const agentList = typeof body.agents === "string"
+      ? body.agents.split(",").map((agent) => normalizeEmailAgentKey(agent))
+      : undefined;
+    const result = await runEmailOrganization({
+      limit: Math.max(1, Math.min(Number(body.limit) || 100, 2000)),
+      all: body.all === true,
+      agents: agentList,
+      force: true,
+      applyLabels: body.skip_labels === true ? false : true,
+      useNetworkTools: body.skip_network === true ? false : undefined,
+      applyActions: body.apply_actions === true,
+      provider: body.provider === "cerebras" || body.provider === "groq" ? body.provider : undefined,
+      model: typeof body.model === "string" ? body.model : undefined,
+    });
     return json(result);
   } catch (e) { return internalError(e); }
 }

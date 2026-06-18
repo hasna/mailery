@@ -750,6 +750,32 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (38) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 39: persisted inbound digest snapshots for dashboard/TUI/CLI.
+  `
+  CREATE TABLE IF NOT EXISTS email_digests (
+    id TEXT PRIMARY KEY,
+    period TEXT NOT NULL CHECK(period IN ('today','yesterday','last7','month')),
+    since TIMESTAMPTZ NOT NULL,
+    until TIMESTAMPTZ NOT NULL,
+    provider TEXT NOT NULL CHECK(provider IN ('local','cerebras','groq')),
+    model TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('ok','error')),
+    message_count INTEGER NOT NULL DEFAULT 0,
+    summary TEXT,
+    highlights_json TEXT NOT NULL DEFAULT '[]',
+    action_items_json TEXT NOT NULL DEFAULT '[]',
+    important_email_ids_json TEXT NOT NULL DEFAULT '[]',
+    label_counts_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT,
+    started_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS idx_email_digests_period_completed ON email_digests(period, status, completed_at);
+  CREATE INDEX IF NOT EXISTS idx_email_digests_window ON email_digests(period, since, until);
+  INSERT INTO _migrations (id) VALUES (39) ON CONFLICT DO NOTHING;
+  `,
+
   // Feedback table
   `
   CREATE TABLE IF NOT EXISTS feedback (

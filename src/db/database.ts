@@ -1011,6 +1011,32 @@ const MIGRATIONS = [
   CREATE INDEX IF NOT EXISTS idx_email_agent_runs_completed ON email_agent_runs(completed_at);
   INSERT OR IGNORE INTO _migrations (id) VALUES (38);
   `,
+
+  // Migration 39: persisted inbound digest snapshots for dashboard/TUI/CLI.
+  `
+  CREATE TABLE IF NOT EXISTS email_digests (
+    id TEXT PRIMARY KEY,
+    period TEXT NOT NULL CHECK(period IN ('today','yesterday','last7','month')),
+    since TEXT NOT NULL,
+    until TEXT NOT NULL,
+    provider TEXT NOT NULL CHECK(provider IN ('local','cerebras','groq')),
+    model TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('ok','error')),
+    message_count INTEGER NOT NULL DEFAULT 0,
+    summary TEXT,
+    highlights_json TEXT NOT NULL DEFAULT '[]',
+    action_items_json TEXT NOT NULL DEFAULT '[]',
+    important_email_ids_json TEXT NOT NULL DEFAULT '[]',
+    label_counts_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT,
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_email_digests_period_completed ON email_digests(period, status, completed_at);
+  CREATE INDEX IF NOT EXISTS idx_email_digests_window ON email_digests(period, since, until);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (39);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -1543,6 +1569,28 @@ function ensureSchema(db: Database): void {
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_email_agent_runs_agent_status ON email_agent_runs(agent_key, status, completed_at)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_email_agent_runs_inbound ON email_agent_runs(inbound_email_id)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_email_agent_runs_completed ON email_agent_runs(completed_at)");
+
+  ensureTable(`CREATE TABLE IF NOT EXISTS email_digests (
+    id TEXT PRIMARY KEY,
+    period TEXT NOT NULL CHECK(period IN ('today','yesterday','last7','month')),
+    since TEXT NOT NULL,
+    until TEXT NOT NULL,
+    provider TEXT NOT NULL CHECK(provider IN ('local','cerebras','groq')),
+    model TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('ok','error')),
+    message_count INTEGER NOT NULL DEFAULT 0,
+    summary TEXT,
+    highlights_json TEXT NOT NULL DEFAULT '[]',
+    action_items_json TEXT NOT NULL DEFAULT '[]',
+    important_email_ids_json TEXT NOT NULL DEFAULT '[]',
+    label_counts_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT,
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_email_digests_period_completed ON email_digests(period, status, completed_at)");
+  ensureIndex("CREATE INDEX IF NOT EXISTS idx_email_digests_window ON email_digests(period, since, until)");
 
   ensureTable(`CREATE TABLE IF NOT EXISTS feedback (
     id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),

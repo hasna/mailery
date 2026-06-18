@@ -217,6 +217,67 @@ export function registerStatusCommands(program: Command, output: (data: unknown,
     });
 
   agent
+    .command("organize")
+    .description("Run managed agents to categorize, label, and prioritize inbound emails")
+    .option("--limit <n>", "Max emails to organize", "100")
+    .option("--all", "Re-run on latest emails even if agents already processed them")
+    .option("--agents <list>", "Comma-separated agents: categorizer,labeler,fraud")
+    .option("--provider <provider>", "AI provider override: groq or cerebras")
+    .option("--model <model>", "Model override")
+    .option("--skip-labels", "Do not apply returned labels locally")
+    .option("--skip-network", "Disable DNS/RDAP/search tools")
+    .option("--apply-actions", "Apply safe mailbox state actions such as archive-suggested")
+    .action(async (opts: { limit?: string; all?: boolean; agents?: string; provider?: string; model?: string; skipLabels?: boolean; skipNetwork?: boolean; applyActions?: boolean }) => {
+      try {
+        const { normalizeEmailAgentKey } = await import("../../db/email-agents.js");
+        const { formatEmailOrganizationResult, runEmailOrganization } = await import("../../lib/email-agents.js");
+        const agents = opts.agents
+          ? opts.agents.split(",").map((agentName) => normalizeEmailAgentKey(agentName))
+          : undefined;
+        const result = await runEmailOrganization({
+          limit: parseCliPositiveIntOption(opts.limit, 100, 2000),
+          all: opts.all,
+          agents,
+          force: true,
+          provider: normalizeProviderOption(opts.provider),
+          model: opts.model,
+          applyLabels: opts.skipLabels ? false : true,
+          useNetworkTools: opts.skipNetwork ? false : undefined,
+          applyActions: opts.applyActions,
+        });
+        output(result, formatEmailOrganizationResult(result));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  agent
+    .command("digest [period]")
+    .description("Show or generate an AI inbox digest for today, yesterday, last7, or month")
+    .option("--fresh", "Generate a new digest instead of showing the latest saved digest")
+    .option("--local", "Generate a deterministic local digest without AI credentials")
+    .option("--fallback-local", "Use a local digest if AI generation fails")
+    .option("--limit <n>", "Max emails to include in the digest prompt", "160")
+    .option("--provider <provider>", "AI provider override: groq or cerebras")
+    .option("--model <model>", "Model override")
+    .action(async (period: string | undefined, opts: { fresh?: boolean; local?: boolean; fallbackLocal?: boolean; limit?: string; provider?: string; model?: string }) => {
+      try {
+        const { formatEmailDigest, loadEmailDigest } = await import("../../lib/email-digest.js");
+        const digest = await loadEmailDigest(period ?? "today", {
+          fresh: opts.fresh || opts.local,
+          offline: opts.local,
+          allowLocalFallback: opts.fallbackLocal || opts.local,
+          limit: parseCliPositiveIntOption(opts.limit, 160, 500),
+          provider: normalizeProviderOption(opts.provider),
+          model: opts.model,
+        });
+        output(digest, formatEmailDigest(digest));
+      } catch (e) {
+        handleError(e);
+      }
+    });
+
+  agent
     .command("runs")
     .description("List managed email agent run records")
     .option("--agent <agent>", "Filter by agent")

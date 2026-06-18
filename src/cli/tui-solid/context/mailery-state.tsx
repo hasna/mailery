@@ -9,13 +9,16 @@ import {
   getConversationBodies,
   getMessageBody,
   getSettings,
+  groupMailboxMessages,
   listDomainSummaries,
   listInboxAddresses,
   listLabelSummaries,
   listMailbox,
   mailboxCounts,
+  mailboxGroupModeLabel,
   markRead,
   labelNameKey,
+  normalizeMailboxGroupMode,
   normalizedLabelName,
   replyDefaults,
   sendComposed,
@@ -28,17 +31,21 @@ import {
   type InboxAddressChoice,
   type LabelSummary,
   type Mailbox,
+  type MailboxGroupMode,
   type MailboxCounts,
   type MessageBody,
+  type TuiMessageGroup,
   type TuiMessage,
   type TuiSettings,
   type TuiThreadBody,
 } from "../../tui/data.js";
 import { autoPull } from "../../tui/autopull.js";
 import { extractEmailLinks, type ExtractedEmailLink } from "../../../lib/email-links.js";
+import { loadEmailDigest } from "../../../lib/email-digest.js";
+import type { EmailDigest, EmailDigestPeriod } from "../../../db/email-digests.js";
 
 export type RouteName = "mailbox" | "reader" | "domains";
-export type DialogName = "commands" | "address" | "filter" | "search" | "domains" | "settings" | "labels" | "links" | "attachments" | "raw" | null;
+export type DialogName = "commands" | "address" | "filter" | "search" | "group" | "digest" | "domains" | "settings" | "labels" | "links" | "attachments" | "raw" | null;
 export type ComposeMode = "new" | "reply" | "forward";
 export type ComposeField = "from" | "to" | "subject" | "body";
 
@@ -65,6 +72,7 @@ export interface MaileryState {
   search: string;
   searchDraft: string;
   sort: "newest" | "oldest";
+  groupMode: MailboxGroupMode;
   domains: DomainSummary[];
   domainsPage: number;
   domainsHasMore: boolean;
@@ -73,6 +81,9 @@ export interface MaileryState {
   labelSearch: string;
   commandSearch: string;
   linkIndex: number;
+  digestPeriod: EmailDigestPeriod;
+  digest: EmailDigest | null;
+  digestLoading: boolean;
   addressSearch: string;
   dialog: DialogName;
   readerScroll: number;
@@ -142,6 +153,7 @@ function createMaileryStore(initialMailbox?: Mailbox) {
     search: "",
     searchDraft: "",
     sort: "newest",
+    groupMode: "none",
     domains: [],
     domainsPage: 0,
     domainsHasMore: false,
@@ -150,6 +162,9 @@ function createMaileryStore(initialMailbox?: Mailbox) {
     labelSearch: "",
     commandSearch: "",
     linkIndex: 0,
+    digestPeriod: "today",
+    digest: null,
+    digestLoading: false,
     addressSearch: "",
     dialog: null,
     readerScroll: 0,
@@ -175,6 +190,27 @@ function createMaileryStore(initialMailbox?: Mailbox) {
     const body = currentBody();
     return body ? extractEmailLinks({ text: body.text, html: body.html, includeNonWeb: true, max: 200 }) : [];
   });
+  const groupedMessages = createMemo<TuiMessageGroup[]>(() => groupMailboxMessages(state.messages, state.groupMode));
+
+  const loadDigestSnapshot = async (period = state.digestPeriod, options?: { fresh?: boolean; local?: boolean }) => {
+    setState("digestLoading", true);
+    setState("digestPeriod", period);
+    try {
+      const digest = await loadEmailDigest(period, {
+        fresh: options?.fresh,
+        offline: options?.local,
+        allowLocalFallback: true,
+      });
+      setState("digest", digest);
+      setState("lastError", null);
+      return digest;
+    } catch (error) {
+      setState("lastError", error instanceof Error ? error.message : String(error));
+      return null;
+    } finally {
+      setState("digestLoading", false);
+    }
+  };
 
   const reload = (options?: { preserveSelection?: boolean; addressSearch?: string }) => {
     const preserveSelection = options?.preserveSelection ?? true;
@@ -316,6 +352,7 @@ function createMaileryStore(initialMailbox?: Mailbox) {
         setState("addresses", loadAddresses());
       }
       if (dialog === "filter" || dialog === "search") setState("searchDraft", state.search);
+      if (dialog === "digest") void loadDigestSnapshot(state.digestPeriod, { local: true });
       if (dialog === "domains") reloadWorkspace();
       if (dialog === "labels") setState("labels", listLabelSummaries({ limit: 80 }));
       setState("dialog", dialog);
@@ -354,6 +391,18 @@ function createMaileryStore(initialMailbox?: Mailbox) {
       setState("sort", state.sort === "newest" ? "oldest" : "newest");
       setState("page", 0);
       reload({ preserveSelection: false });
+    },
+    setGroupMode(mode: MailboxGroupMode | string) {
+      setState("groupMode", normalizeMailboxGroupMode(mode));
+    },
+    groupModeLabel(mode?: MailboxGroupMode) {
+      return mailboxGroupModeLabel(mode ?? state.groupMode);
+    },
+    async loadDigest(period?: EmailDigestPeriod, options?: { fresh?: boolean; local?: boolean }) {
+      return loadDigestSnapshot(period ?? state.digestPeriod, options);
+    },
+    async generateDigest(period?: EmailDigestPeriod) {
+      return loadDigestSnapshot(period ?? state.digestPeriod, { fresh: true });
     },
     page(delta: number) {
       const next = Math.max(0, state.page + delta);
@@ -486,6 +535,7 @@ function createMaileryStore(initialMailbox?: Mailbox) {
     selectedBody: currentBody,
     conversation: currentConversation,
     links: currentLinks,
+    groupedMessages,
   };
 }
 

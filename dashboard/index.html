@@ -60,8 +60,11 @@
     .message-row { padding: 12px 14px; border-bottom: 1px solid #253029; cursor: pointer; display: grid; gap: 4px; }
     .message-row:hover, .message-row.active { background: #253029; }
     .message-row .meta { display: flex; justify-content: space-between; gap: 12px; color: #9aa89d; font-size: 12px; }
-    .message-row .subject { color: #f5f7f3; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .message-row .subject { color: #f5f7f3; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 8px; }
+    .priority-square { width: 9px; height: 9px; border-radius: 2px; background: #f59e0b; display: inline-block; flex: 0 0 auto; }
+    .priority-square.empty { background: transparent; }
     .message-row .to { color: #b7c2ba; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .message-group-heading { color: #9aa89d; font-size: 11px; text-transform: uppercase; letter-spacing: .4px; padding: 10px 14px 6px; border-bottom: 1px solid #253029; background: #151a17; }
     .inbox-reader { padding: 18px; overflow: auto; }
     .inbox-reader h3 { font-size: 17px; line-height: 1.3; margin-bottom: 6px; color: #f5f7f3; }
     .reader-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
@@ -84,6 +87,10 @@
     .reader-body a:hover, .reader-panel a:hover { text-decoration: underline; }
     .raw-panel pre { white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.55; color: #dce5df; background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 12px; max-height: 420px; overflow: auto; }
     .filter-summary { color: #9aa89d; font-size: 13px; }
+    .digest-body { display: grid; gap: 12px; font-size: 13px; line-height: 1.55; color: #dce5df; }
+    .digest-body h4 { color: #9aa89d; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; margin: 4px 0; }
+    .digest-body ul { padding-left: 18px; display: grid; gap: 6px; }
+    .digest-meta { color: #9aa89d; font-size: 12px; }
     @media (max-width: 860px) { .main { padding: 14px; } .inbox-shell { grid-template-columns: 1fr; } .inbox-list, .inbox-reader { min-height: auto; } .reader-head { flex-direction: column; } }
     .pagination { display: flex; gap: 8px; align-items: center; margin-top: 14px; font-size: 13px; color: #94a3b8; }
     .pagination button { background: #1e293b; border: 1px solid #334155; color: #e2e8f0; padding: 5px 12px; border-radius: 5px; cursor: pointer; font-size: 12px; }
@@ -258,6 +265,8 @@
     <h2>Inbound</h2>
     <div class="toolbar inbox-toolbar">
       <button class="btn btn-secondary" onclick="openInboundFilter()">Filter</button>
+      <button class="btn btn-secondary" onclick="openInboundGroup()">Group</button>
+      <button class="btn btn-secondary" onclick="openInboundDigest()">Digest</button>
       <button class="btn btn-primary btn-sm" onclick="triggerSync()">&#8635; Sync</button>
       <span class="filter-summary" id="inbound-filter-summary">All inbound</span>
     </div>
@@ -398,6 +407,42 @@
   </div>
 </div>
 
+<!-- Inbound Group Modal -->
+<div class="modal-bg" id="modal-inbound-group">
+  <div class="modal">
+    <h3>Group Inbound</h3>
+    <label>Group By</label>
+    <select id="inbound-group-mode">
+      <option value="none">None</option>
+      <option value="priority">Priority Inbox</option>
+      <option value="read-state">Read State</option>
+      <option value="category">Categories</option>
+    </select>
+    <div class="actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-inbound-group')">Cancel</button>
+      <button class="btn btn-primary" onclick="applyInboundGroup()">Apply</button>
+    </div>
+  </div>
+</div>
+
+<!-- Inbound Digest Modal -->
+<div class="modal-bg" id="modal-inbound-digest">
+  <div class="modal modal-wide">
+    <h3>Mail Digest</h3>
+    <div class="toolbar" style="margin-bottom:12px;">
+      <button class="btn btn-secondary btn-sm" onclick="selectDigestPeriod('today')">Today</button>
+      <button class="btn btn-secondary btn-sm" onclick="selectDigestPeriod('yesterday')">Yesterday</button>
+      <button class="btn btn-secondary btn-sm" onclick="selectDigestPeriod('last7')">Last 7 Days</button>
+      <button class="btn btn-secondary btn-sm" onclick="selectDigestPeriod('month')">This Month</button>
+      <button class="btn btn-primary btn-sm" onclick="refreshInboundDigest()">Refresh</button>
+    </div>
+    <div id="inbound-digest-content" class="digest-body"><div class="loading">Loading...</div></div>
+    <div class="actions">
+      <button class="btn btn-secondary" onclick="closeModal('modal-inbound-digest')">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- Template Modal -->
 <div class="modal-bg" id="modal-template">
   <div class="modal modal-wide">
@@ -435,6 +480,8 @@ let inboundSelectedId = null;
 let inboundDetailCache = {};
 let inboundDetailToken = 0;
 let inboundFilters = { address: '', search: '', state: '' };
+let inboundGroupMode = 'none';
+let inboundDigestPeriod = 'today';
 
 async function api(path, opts = {}) {
   const res = await fetch(API + path, opts);
@@ -995,11 +1042,77 @@ function clearInboundFilter() {
   loadInbound();
 }
 
+function openInboundGroup() {
+  document.getElementById('inbound-group-mode').value = inboundGroupMode;
+  openModal('modal-inbound-group');
+}
+
+function applyInboundGroup() {
+  inboundGroupMode = document.getElementById('inbound-group-mode')?.value || 'none';
+  closeModal('modal-inbound-group');
+  updateInboundFilterSummary();
+  renderInboundList();
+}
+
+function openInboundDigest() {
+  openModal('modal-inbound-digest');
+  loadInboundDigest(false);
+}
+
+function selectDigestPeriod(period) {
+  inboundDigestPeriod = period;
+  loadInboundDigest(false);
+}
+
+async function loadInboundDigest(fresh) {
+  const content = document.getElementById('inbound-digest-content');
+  if (content) content.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const digest = fresh
+      ? await api('/api/digest', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ period: inboundDigestPeriod, fallback_local: true }),
+        })
+      : await api('/api/digest?period=' + encodeURIComponent(inboundDigestPeriod));
+    renderInboundDigest(digest);
+  } catch(e) {
+    if (content) content.innerHTML = `<div class="error">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function refreshInboundDigest() {
+  loadInboundDigest(true);
+}
+
+function digestPeriodLabel(period) {
+  return {
+    today: 'Today',
+    yesterday: 'Yesterday',
+    last7: 'Last 7 Days',
+    month: 'This Month',
+  }[period] || period;
+}
+
+function renderInboundDigest(digest) {
+  const content = document.getElementById('inbound-digest-content');
+  if (!content) return;
+  const highlights = (digest.highlights || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+  const actions = (digest.action_items || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+  content.innerHTML = `
+    <div><strong>Summary:</strong> ${escapeHtml(digest.summary || '(no summary)')}</div>
+    ${highlights ? `<div><h4>Highlights</h4><ul>${highlights}</ul></div>` : ''}
+    ${actions ? `<div><h4>Action Items</h4><ul>${actions}</ul></div>` : ''}
+    ${(digest.important_email_ids || []).length ? `<div class="digest-meta">Important: ${digest.important_email_ids.map(id => escapeHtml(String(id).slice(0, 8))).join(', ')}</div>` : ''}
+    <div class="digest-meta">${digestPeriodLabel(digest.period)} · ${digest.message_count || 0} message${digest.message_count === 1 ? '' : 's'} · ${escapeHtml(digest.provider || 'local')} ${escapeHtml(digest.model || '')}</div>`;
+}
+
 function updateInboundFilterSummary() {
   const parts = [];
   if (inboundFilters.address) parts.push(inboundFilters.address);
   if (inboundFilters.state) parts.push(inboundFilters.state[0].toUpperCase() + inboundFilters.state.slice(1));
   if (inboundFilters.search) parts.push(`Search "${inboundFilters.search}"`);
+  if (inboundGroupMode !== 'none') parts.push(`Group ${groupModeLabel(inboundGroupMode)}`);
   const el = document.getElementById('inbound-filter-summary');
   if (el) el.textContent = parts.length ? parts.join(' · ') : 'All inbound';
 }
@@ -1033,18 +1146,86 @@ async function loadInbound() {
   }
 }
 
+function labelBase(label) {
+  return String(label || '').trim().toLowerCase().replace(/[_\s]+/g, '-').replace(/^ai:/, '');
+}
+
+function isImportantInbound(e) {
+  const labels = (e.label_ids || []).map(labelBase);
+  return e.is_starred || labels.some(label => ['important','priority','urgent','action-required','follow-up','security','customer'].includes(label));
+}
+
+function groupModeLabel(mode) {
+  return {
+    none: 'None',
+    priority: 'Priority Inbox',
+    'read-state': 'Read State',
+    category: 'Categories',
+  }[mode] || 'None';
+}
+
+function inboundCategory(e) {
+  const labels = (e.label_ids || []).map(labelBase);
+  if (labels.some(label => label === 'category-social' || label === 'social')) return 'social';
+  if (labels.some(label => ['category-promotions','promotions','promotion','marketing','newsletter'].includes(label))) return 'promotions';
+  if (labels.some(label => ['category-updates','updates','update','transactional','receipt','notification'].includes(label))) return 'updates';
+  if (labels.some(label => ['category-forums','forums','forum','mailing-list'].includes(label))) return 'forums';
+  if (labels.some(label => ['category-personal','primary','personal'].includes(label)) || isImportantInbound(e)) return 'primary';
+  return 'other';
+}
+
+function groupedInboundEmails() {
+  if (inboundGroupMode === 'none') return [{ key: 'all', title: '', emails: inboundCache }];
+  const defs = inboundGroupMode === 'priority'
+    ? [
+        { key: 'important-unread', title: 'Important and Unread', match: e => isImportantInbound(e) && !e.is_read },
+        { key: 'starred', title: 'Starred', match: e => e.is_starred },
+        { key: 'everything-else', title: 'Everything Else', match: () => true },
+      ]
+    : inboundGroupMode === 'read-state'
+      ? [
+          { key: 'unread', title: 'Unread', match: e => !e.is_read },
+          { key: 'read', title: 'Read', match: e => e.is_read },
+        ]
+      : [
+          { key: 'primary', title: 'Primary', match: e => inboundCategory(e) === 'primary' },
+          { key: 'social', title: 'Social', match: e => inboundCategory(e) === 'social' },
+          { key: 'promotions', title: 'Promotions', match: e => inboundCategory(e) === 'promotions' },
+          { key: 'updates', title: 'Updates', match: e => inboundCategory(e) === 'updates' },
+          { key: 'forums', title: 'Forums', match: e => inboundCategory(e) === 'forums' },
+          { key: 'other', title: 'Other', match: () => true },
+        ];
+  const assigned = new Set();
+  return defs.map(def => {
+    const emails = inboundCache.filter(e => {
+      if (assigned.has(e.id) || !def.match(e)) return false;
+      assigned.add(e.id);
+      return true;
+    });
+    return { key: def.key, title: def.title, emails };
+  }).filter(group => group.emails.length);
+}
+
+function renderInboundRow(e) {
+  const marker = isImportantInbound(e) ? '<span class="priority-square"></span>' : '<span class="priority-square empty"></span>';
+  return `
+    <div class="message-row ${e.id === inboundSelectedId ? 'active' : ''}" onclick="selectInbound('${e.id}')">
+      <div class="meta"><span>${escapeHtml(e.from_address || '-')}</span><span>${fmt(e.received_at || e.created_at)}</span></div>
+      <div class="subject">${marker}<span>${escapeHtml(e.subject || '(no subject)')}</span></div>
+      <div class="to">${escapeHtml((e.to_addresses || []).join(', ') || '-')}</div>
+    </div>`;
+}
+
 function renderInboundList() {
   const list = document.getElementById('inbound-list');
   if (!inboundCache.length) {
     list.innerHTML = '<div class="empty">No inbound emails found.</div>';
     return;
   }
-  list.innerHTML = inboundCache.map(e => `
-    <div class="message-row ${e.id === inboundSelectedId ? 'active' : ''}" onclick="selectInbound('${e.id}')">
-      <div class="meta"><span>${escapeHtml(e.from_address || '-')}</span><span>${fmt(e.received_at || e.created_at)}</span></div>
-      <div class="subject">${escapeHtml(e.subject || '(no subject)')}</div>
-      <div class="to">${escapeHtml((e.to_addresses || []).join(', ') || '-')}</div>
-    </div>`).join('');
+  list.innerHTML = groupedInboundEmails().map(group => {
+    const heading = inboundGroupMode === 'none' ? '' : `<div class="message-group-heading">${escapeHtml(group.title)}</div>`;
+    return heading + group.emails.map(renderInboundRow).join('');
+  }).join('');
 }
 
 function selectInbound(id) {

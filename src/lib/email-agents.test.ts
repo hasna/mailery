@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { getInboundEmail, storeInboundEmail } from "../db/inbound.js";
 import { updateEmailAgentSetting } from "../db/email-agents.js";
-import { buildManagedEmailAgentTools, formatEmailAgentRuntimeStatus, getEmailAgentRuntimeStatus, runAlwaysOnEmailAgents, runManagedEmailAgent } from "./email-agents.js";
+import { buildManagedEmailAgentTools, formatEmailAgentRuntimeStatus, getEmailAgentRuntimeStatus, runAlwaysOnEmailAgents, runEmailOrganization, runManagedEmailAgent } from "./email-agents.js";
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
@@ -100,7 +100,52 @@ describe("managed email agents", () => {
     expect(run.status).toBe("ok");
     expect(run.labels).toContain("invoice");
     expect(run.tool_calls).toEqual(["current_email_links"]);
-    expect(getInboundEmail(email.id, getDatabase())?.label_ids).toEqual(expect.arrayContaining(["ai:invoice", "ai:billing", "ai:transactional"]));
+    expect(getInboundEmail(email.id, getDatabase())?.label_ids).toEqual(expect.arrayContaining(["ai:invoice", "ai:billing", "ai:transactional", "transactional"]));
+  });
+
+  it("projects priority and spam agent labels into raw UI/folder labels", async () => {
+    const email = seedInbound("agent-priority-labels");
+    const generateText = mock(async (opts: Record<string, unknown>) => ({
+      output: String(opts.prompt).includes("fraud")
+        ? {
+            category: "fraud-risk",
+            labels: ["phishing"],
+            priority: 1,
+            confidence: 0.97,
+            risk_score: 85,
+            summary: "Likely phishing.",
+            reasoning: "High risk.",
+          }
+        : {
+            category: "security",
+            labels: ["action-required"],
+            priority: 1,
+            confidence: 0.92,
+            risk_score: 10,
+            summary: "Security alert needs review.",
+            reasoning: "Security category and urgent action.",
+          },
+      steps: [],
+    }));
+
+    const deps = {
+      model: { provider: "test" },
+      generateText,
+      stepCountIs: (count: number) => ({ count }),
+      Output: { object: ({ schema }: { schema: unknown }) => ({ schema }) },
+    };
+
+    const result = await runEmailOrganization({
+      all: true,
+      limit: 1,
+      agents: ["categorizer", "fraud"],
+      useNetworkTools: false,
+      db: getDatabase(),
+    }, deps);
+
+    expect(result.runs).toHaveLength(2);
+    const labels = getInboundEmail(email.id, getDatabase())?.label_ids ?? [];
+    expect(labels).toEqual(expect.arrayContaining(["ai:important", "important", "action-required", "ai:spam", "spam"]));
   });
 
   it("runs enabled always-on agents over pending emails", async () => {

@@ -14,6 +14,7 @@ import {
   replyDefaults, sendComposed, listSources, listInboxAddresses, getSettings, setSetting,
   defaultFromAddress, providerIdForSender, listDomainSummaries, mailboxLabel, addressChoiceByAddress,
   listLabelSummaries, toggleMessageLabel, getConversation, labelDisplayName, isGmailCategoryLabel,
+  groupMailboxMessages, isImportantMessage,
 } from "./data.js";
 import { setConfigValue } from "../../lib/config.js";
 import { mkdtempSync, rmSync } from "fs";
@@ -451,6 +452,26 @@ describe("tui data — body + mutations", () => {
     expect(queries.every((sql) => sql.includes("SELECT 1 AS ok"))).toBe(true);
     expect(queries.join("\n")).not.toContain("SELECT *");
     expect(queries.join("\n")).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
+  });
+
+  it("groups messages by priority and Gmail-like categories", () => {
+    seed("contract", { labels: ["ai:priority"] });
+    seed("promo", { labels: ["category_promotions"] });
+    seed("update", { labels: ["transactional"] });
+    seed("plain");
+    const messages = listMailbox("inbox");
+    const important = messages.find((message) => message.subject === "contract")!;
+
+    expect(isImportantMessage(important)).toBe(true);
+
+    const priority = groupMailboxMessages(messages, "priority");
+    expect(priority[0]?.title).toBe("Important and Unread");
+    expect(priority[0]?.messages.map((message) => message.subject)).toContain("contract");
+
+    const categories = groupMailboxMessages(messages, "category");
+    expect(categories.find((group) => group.title === "Promotions")?.messages.map((message) => message.subject)).toContain("promo");
+    expect(categories.find((group) => group.title === "Updates")?.messages.map((message) => message.subject)).toContain("update");
+    expect(categories.find((group) => group.title === "Primary")?.messages.map((message) => message.subject)).toContain("contract");
   });
 });
 

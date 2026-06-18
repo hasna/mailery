@@ -634,6 +634,7 @@ export function archiveMessage(msg: TuiMessage, archived = true, db?: Database):
 }
 
 export const COMMON_LABELS = [
+  "important",
   "action-required",
   "urgent",
   "follow-up",
@@ -727,6 +728,94 @@ export function labelDisplayName(label: string): string {
     .replace(/[_-]+/g, " ")
     .replace(/\s+/g, " ")
     .replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+export type MailboxGroupMode = "none" | "priority" | "read-state" | "category";
+
+export const MAILBOX_GROUP_MODES: MailboxGroupMode[] = ["none", "priority", "read-state", "category"];
+
+export interface TuiMessageGroup {
+  key: string;
+  title: string;
+  messages: TuiMessage[];
+}
+
+export function normalizeMailboxGroupMode(value: string | undefined | null): MailboxGroupMode {
+  const normalized = (value ?? "none").trim().toLowerCase().replace(/[_\s]+/g, "-");
+  if (normalized === "priority" || normalized === "read-state" || normalized === "category" || normalized === "none") return normalized;
+  return "none";
+}
+
+export function mailboxGroupModeLabel(mode: MailboxGroupMode): string {
+  return {
+    none: "None",
+    priority: "Priority Inbox",
+    "read-state": "Read State",
+    category: "Categories",
+  }[mode];
+}
+
+function baseLabel(label: string): string {
+  return normalizeLabel(label).replace(/_/g, "-").replace(/^ai:/, "");
+}
+
+export function isImportantLabel(label: string): boolean {
+  const normalized = baseLabel(label);
+  return normalized === "important"
+    || normalized === "priority"
+    || normalized === "urgent"
+    || normalized === "action-required"
+    || normalized === "follow-up"
+    || normalized === "security"
+    || normalized === "customer";
+}
+
+export function isImportantMessage(message: Pick<TuiMessage, "is_starred" | "labels">): boolean {
+  return message.is_starred || message.labels.some(isImportantLabel);
+}
+
+function messageCategory(message: TuiMessage): string {
+  const labels = message.labels.map(baseLabel);
+  if (labels.some((label) => label === "category-social" || label === "social")) return "social";
+  if (labels.some((label) => label === "category-promotions" || label === "promotions" || label === "promotion" || label === "marketing" || label === "newsletter")) return "promotions";
+  if (labels.some((label) => label === "category-updates" || label === "updates" || label === "update" || label === "transactional" || label === "receipt" || label === "notification")) return "updates";
+  if (labels.some((label) => label === "category-forums" || label === "forums" || label === "forum" || label === "mailing-list")) return "forums";
+  if (labels.some((label) => label === "category-personal" || label === "primary" || label === "personal")) return "primary";
+  if (isImportantMessage(message)) return "primary";
+  return "other";
+}
+
+export function groupMailboxMessages(messages: TuiMessage[], mode: MailboxGroupMode): TuiMessageGroup[] {
+  if (mode === "none") return [{ key: "all", title: "", messages }];
+  const defs = mode === "priority"
+    ? [
+        { key: "important-unread", title: "Important and Unread", match: (message: TuiMessage) => isImportantMessage(message) && !message.is_read },
+        { key: "starred", title: "Starred", match: (message: TuiMessage) => message.is_starred },
+        { key: "everything-else", title: "Everything Else", match: () => true },
+      ]
+    : mode === "read-state"
+      ? [
+          { key: "unread", title: "Unread", match: (message: TuiMessage) => !message.is_read },
+          { key: "read", title: "Read", match: (message: TuiMessage) => message.is_read },
+        ]
+      : [
+          { key: "primary", title: "Primary", match: (message: TuiMessage) => messageCategory(message) === "primary" },
+          { key: "social", title: "Social", match: (message: TuiMessage) => messageCategory(message) === "social" },
+          { key: "promotions", title: "Promotions", match: (message: TuiMessage) => messageCategory(message) === "promotions" },
+          { key: "updates", title: "Updates", match: (message: TuiMessage) => messageCategory(message) === "updates" },
+          { key: "forums", title: "Forums", match: (message: TuiMessage) => messageCategory(message) === "forums" },
+          { key: "other", title: "Other", match: () => true },
+        ];
+  const assigned = new Set<string>();
+  return defs.map((def) => {
+    const groupMessagesForDef = messages.filter((message) => {
+      if (assigned.has(message.id)) return false;
+      if (!def.match(message)) return false;
+      assigned.add(message.id);
+      return true;
+    });
+    return { key: def.key, title: def.title, messages: groupMessagesForDef };
+  }).filter((group) => group.messages.length > 0);
 }
 
 export function toggleMessageLabel(msg: TuiMessage, label: string, db?: Database): string[] {

@@ -75,10 +75,10 @@ Created: 2026-06-18
 ### Goal 7: Release
 
 - [x] Review git diff and ensure no unrelated changes are included.
-- [ ] Commit with a focused message.
-- [ ] Push branch/main as requested.
-- [ ] Publish only after credentials/auth and release gates are clean.
-- [ ] Update local/global install and smoke `mailery --version`, `mailery ui --help`, and representative CLI commands.
+- [x] Commit with a focused message.
+- [x] Push branch/main as requested.
+- [x] Publish only after credentials/auth and release gates are clean.
+- [x] Update local/global install and smoke `mailery --version`, `mailery ui --help`, and representative CLI commands.
 
 ## External Guidance Applied
 
@@ -119,3 +119,9 @@ Created: 2026-06-18
 - Goal 7: built CLI smoke passed for `mailery --version` (`0.6.47`), `mailery ui --help`, `provider list --json`, and `agent defaults --json`.
 - Goal 7: built server smoke passed for `/` (`Mailery Dashboard`) and `/open-source` (`Mailery Open Source`) on an isolated local DB.
 - Goal 7: npm auth is available as `andreihasna2`; latest registry version before publish was `0.6.46`.
+- Goal 7: committed release work as `d728b78 feat: improve Mailery inbox UI and release gates`.
+- Goal 7: pushed `main` to `origin/main` (`https://github.com/hasna/emails.git`).
+- Goal 7: `EMAILS_DB_PATH=:memory: npm publish --access public --registry https://registry.npmjs.org` passed; prepublish tests passed: 1585 tests, 0 failures, 4780 expect calls.
+- Goal 7: published `@hasna/mailery@0.6.47` to npm with public access.
+- Goal 7: updated Bun global install to `@hasna/mailery@0.6.47` using `--minimum-release-age=0` because the local Bun security policy blocks packages newer than 604800 seconds by default.
+- Goal 7: installed `mailery` smoke passed for `mailery --version` (`0.6.47`), `mailery ui --help`, `mailery inbox --help`, `provider list --json`, `inbox list --json`, `sandbox count --json`, and `agent defaults --json`.

@@ -90,7 +90,7 @@ Created: 2026-06-18
 - [x] Add TUI Group and Digest controls, grouped mailbox sections, and broader important-square detection.
 - [x] Add web dashboard Group and Digest controls, digest API calls, grouped list rendering, and important-square detection.
 - [x] Add focused tests for digest generation, organization labels, grouping helpers, CLI digest, REST digest, and dashboard contracts.
-- [ ] Run full release gates, categorize existing local mail, commit, push, publish, update local install, and smoke all commands.
+- [x] Run full release gates, categorize existing local mail where local credentials allow it, commit, push, publish, update local install, and smoke all commands.
 
 ## External Guidance Applied
 
@@ -150,3 +150,9 @@ Created: 2026-06-18
 - Goal 8: built CLI smoke passed for `mailery --version` (`0.6.48`), `agent defaults --json`, `agent digest today --local --json`, and `agent organize --help`.
 - Goal 8: local digest smoke against the real default DB succeeded with 78 messages for today; live Groq organization over existing local mail was not run because `GROQ_API_KEY` / `groq_api_key` is not configured locally.
 - Goal 8: built dashboard smoke on isolated `http://127.0.0.1:3992` served `/`, `/open-source`, and `/api/digest?period=today`; server was stopped after verification.
+- Goal 8: committed implementation as `c29a619 feat: add Mailery inbox digests and grouping` and pushed `main` to `origin/main`.
+- Goal 8: `EMAILS_DB_PATH=:memory: npm publish --access public --registry https://registry.npmjs.org` passed; npm prepublish reran `bun test` (1592 tests, 0 failures, 4822 expect calls) and `bun run build`.
+- Goal 8: published `@hasna/mailery@0.6.48` to npm with public access.
+- Goal 8: updated Bun global install to `@hasna/mailery@0.6.48` using `--minimum-release-age=0`; Bun reported duplicate `@hasna/models` metadata warnings in the global package manifest, but installation and binary linking succeeded.
+- Goal 8: installed `mailery` smoke passed for `mailery --version` (`0.6.48`), `mailery ui --help`, `mailery agent digest today --local --json`, `mailery agent organize --help`, `mailery provider list --json`, `mailery inbox list --limit 1 --json`, and `mailery sandbox count --json`.
+- Goal 8: npm registry verification returned latest version `0.6.48`.

@@ -30,6 +30,7 @@ describe("CLI router", () => {
       [["links", "abc123"], ["inbox"]],
       [["ask", "latest"], ["status"]],
       [["logs"], ["daemon"]],
+      [["cloud", "status"], ["cloud"]],
     ];
 
     for (const [args, modules] of cases) {

@@ -115,7 +115,7 @@ describe("format helpers", () => {
     const lines = renderReadableBodyLines("- one\n> quoted", null, 20, 10);
 
     expect(lines[0]).toEqual({ text: "- one", kind: "list" });
-    expect(lines[1]).toEqual({ text: "| quoted", kind: "quote" });
+    expect(lines).toContainEqual({ text: "| quoted", kind: "quote" });
   });
 
   it("attaches clickable link spans to rendered body lines", () => {

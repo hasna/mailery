@@ -23,6 +23,26 @@ const MIME_TYPES: Record<string, string> = {
   ".woff2": "font/woff2",
 };
 
+export function staticResponseHeaders(mimeType: string): Headers {
+  return new Headers({
+    "Content-Type": mimeType,
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Content-Security-Policy": [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data:",
+      "connect-src 'self'",
+      "frame-src 'self'",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "form-action 'self'",
+    ].join("; "),
+  });
+}
+
 function resolveDashboardDir(): string {
   const candidates: string[] = [];
 
@@ -121,7 +141,7 @@ export async function startServer(port = 3900, hostname = "127.0.0.1"): Promise<
           const ext = extname(filePath);
           const mimeType = MIME_TYPES[ext] ?? "application/octet-stream";
           return new Response(readFileSync(filePath), {
-            headers: { "Content-Type": mimeType },
+            headers: staticResponseHeaders(mimeType),
           });
         }
 
@@ -129,7 +149,7 @@ export async function startServer(port = 3900, hostname = "127.0.0.1"): Promise<
         const indexPath = join(dashboardDir, "index.html");
         if (existsSync(indexPath)) {
           return new Response(readFileSync(indexPath), {
-            headers: { "Content-Type": "text/html; charset=utf-8" },
+            headers: staticResponseHeaders("text/html; charset=utf-8"),
           });
         }
 

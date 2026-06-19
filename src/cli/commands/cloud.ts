@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { getConfigValue, setConfigValue, loadConfig, saveConfig } from "../../lib/config.js";
 import { getInboundEmail, listInboundEmailSummaries } from "../../db/inbound.js";
+import { MaileryCloudClient, type MaileryCloudRequestOptions } from "../../lib/mailery-cloud-client.js";
 import { handleError, parseCliPositiveIntOption } from "../utils.js";
 
 type Output = (data: unknown, formatted: string) => void;
@@ -32,28 +33,11 @@ function configuredToken(apiKey?: string): string | undefined {
 
 async function cloudRequest<T>(
   path: string,
-  opts: CloudRequestOptions & { method?: string; body?: unknown; tokenRequired?: boolean } = {},
+  opts: CloudRequestOptions & MaileryCloudRequestOptions = {},
 ): Promise<T> {
   const apiUrl = configuredApiUrl(opts.apiUrl);
   const token = configuredToken(opts.apiKey);
-  if (opts.tokenRequired !== false && !token) {
-    throw new Error("Mailery Cloud is not authenticated. Run `mailery cloud login --api-key <key>` or set MAILERY_API_KEY.");
-  }
-  const res = await fetch(`${apiUrl}${path}`, {
-    method: opts.method ?? "GET",
-    headers: {
-      "content-type": "application/json",
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-    },
-    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-  });
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : {};
-  if (!res.ok) {
-    const message = data?.error?.message ?? data?.error ?? res.statusText;
-    throw new Error(`Mailery Cloud ${res.status}: ${message}`);
-  }
-  return data as T;
+  return new MaileryCloudClient({ apiUrl, token }).request<T>(path, opts);
 }
 
 function saveCloudAuth(input: { apiUrl: string; apiKey?: string; sessionToken?: string }): void {
@@ -206,6 +190,7 @@ export function registerCloudCommands(program: Command, output: Output): void {
           if (!email) continue;
           await cloudRequest("/api/v1/messages", {
             method: "POST",
+            idempotencyKey: `local:${email.id}`,
             body: {
               mailboxId: opts.mailboxId,
               externalId: `local:${email.id}`,
@@ -215,6 +200,21 @@ export function registerCloudCommands(program: Command, output: Output): void {
               cc: email.cc_addresses,
               text: email.text_body,
               html: email.html_body,
+              labels: email.label_ids,
+              flags: {
+                read: email.is_read,
+                starred: email.is_starred,
+                archived: email.is_archived,
+                sent: email.is_sent,
+              },
+              attachments: email.attachments,
+              attachmentPaths: email.attachment_paths.map((attachment) => ({
+                filename: attachment.filename,
+                contentType: attachment.content_type,
+                size: attachment.size,
+                localPath: attachment.local_path,
+                s3Url: attachment.s3_url,
+              })),
               receivedAt: email.received_at,
               parse: opts.parse === true,
             },

@@ -49,14 +49,24 @@ function nativeBundleCandidates(): string[] {
     if (process.arch === "arm64") return ["@opentui/core-darwin-arm64"];
   }
   if (process.platform === "linux") {
-    if (process.arch === "x64") return ["@opentui/core-linux-x64", "@opentui/core-linux-x64-musl"];
-    if (process.arch === "arm64") return ["@opentui/core-linux-arm64", "@opentui/core-linux-arm64-musl"];
+    const suffix = isLinuxMusl() ? "musl" : "";
+    if (process.arch === "x64") return [`@opentui/core-linux-x64${suffix ? `-${suffix}` : ""}`];
+    if (process.arch === "arm64") return [`@opentui/core-linux-arm64${suffix ? `-${suffix}` : ""}`];
   }
   if (process.platform === "win32") {
     if (process.arch === "x64") return ["@opentui/core-win32-x64"];
     if (process.arch === "arm64") return ["@opentui/core-win32-arm64"];
   }
   return [];
+}
+
+function isLinuxMusl(): boolean {
+  if (process.platform !== "linux") return false;
+  const report = typeof process.report?.getReport === "function" ? process.report.getReport() : undefined;
+  const glibc = report?.header && "glibcVersionRuntime" in report.header
+    ? report.header.glibcVersionRuntime
+    : undefined;
+  return !glibc;
 }
 
 const bundledNative = new Set(nativeBundleCandidates().filter(installedPackage));

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join, resolve } from "path";
-import { resolveDashboardStaticPath } from "./serve.js";
+import { resolveDashboardStaticPath, staticResponseHeaders } from "./serve.js";
 
 describe("resolveDashboardStaticPath", () => {
   const root = resolve("/tmp/open-emails-dashboard");
@@ -50,5 +50,25 @@ describe("resolveDashboardStaticPath", () => {
     expect(dashboard).toContain("Summary:");
     expect(existsSync(openSourcePath)).toBe(true);
     expect(dirname(openSourcePath)).toBe(dirname(dashboardPath));
+  });
+
+  it("ships hardened dashboard rendering contracts", () => {
+    const dashboardPath = resolve(import.meta.dir, "../../dashboard/index.html");
+    const dashboard = readFileSync(dashboardPath, "utf8");
+
+    expect(dashboard).not.toContain("srcdoc=");
+    expect(dashboard).not.toContain("content.html.replace");
+    expect(dashboard).toContain("safeOpenHref");
+    expect(dashboard).toContain("renderEmailBody(content.text_body, content.html)");
+  });
+
+  it("adds static security headers for the local dashboard", () => {
+    const headers = staticResponseHeaders("text/html; charset=utf-8");
+
+    expect(headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+    expect(headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(headers.get("Referrer-Policy")).toBe("no-referrer");
+    expect(headers.get("Content-Security-Policy")).toContain("object-src 'none'");
+    expect(headers.get("Content-Security-Policy")).toContain("base-uri 'none'");
   });
 });

@@ -551,7 +551,13 @@ function showError(containerId, message) {
   if (!container) return;
   const div = document.createElement('div');
   div.className = 'error';
-  div.innerHTML = `<span>${message}</span><span class="dismiss" onclick="this.parentElement.remove()">&#x2715;</span>`;
+  const span = document.createElement('span');
+  span.textContent = String(message || 'Unknown error');
+  const dismiss = document.createElement('span');
+  dismiss.className = 'dismiss';
+  dismiss.textContent = 'x';
+  dismiss.onclick = () => div.remove();
+  div.append(span, dismiss);
   container.innerHTML = '';
   container.appendChild(div);
   setTimeout(() => { if (div.parentElement) div.remove(); }, 5000);
@@ -566,7 +572,8 @@ function toggleProviderFields() {
 }
 
 function badge(text, type) {
-  return `<span class="badge ${type}">${text}</span>`;
+  const safeType = String(type || '').toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  return `<span class="badge ${safeType}">${escapeHtml(text || '')}</span>`;
 }
 
 function fmt(ts) {
@@ -852,11 +859,11 @@ async function loadEmails() {
     table.innerHTML = `
       <thead><tr><th>ID</th><th>From</th><th>To</th><th>Subject</th><th>Status</th><th>Sent</th></tr></thead>
       <tbody>${emails.map(e => `
-        <tr class="clickable" onclick="openEmailDetail('${e.id}')">
-          <td class="id">${e.id.slice(0,8)}</td>
-          <td>${e.from_address}</td>
-          <td>${(e.to_addresses || []).join(', ')}</td>
-          <td>${e.subject}</td>
+        <tr class="clickable" onclick="openEmailDetail('${escapeJs(e.id)}')">
+          <td class="id">${escapeHtml(String(e.id || '').slice(0,8))}</td>
+          <td>${escapeHtml(e.from_address || '-')}</td>
+          <td>${escapeHtml((e.to_addresses || []).join(', ') || '-')}</td>
+          <td>${escapeHtml(e.subject || '(no subject)')}</td>
           <td>${badge(e.status, e.status)}</td>
           <td>${fmt(e.sent_at)}</td>
         </tr>`).join('')}</tbody>`;
@@ -879,26 +886,24 @@ async function openEmailDetail(id) {
     let bodyHtml = '';
     try {
       const content = await api('/api/email-content/' + id);
-      if (content && content.html) {
-        bodyHtml = `<div style="margin-top:8px"><div style="font-size:12px;color:#94a3b8;margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px">Body (HTML)</div><iframe class="email-body-frame" srcdoc="${content.html.replace(/"/g,'&quot;')}"></iframe></div>`;
-      } else if (content && content.text) {
-        bodyHtml = `<div style="margin-top:8px"><div style="font-size:12px;color:#94a3b8;margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px">Body (Text)</div><pre class="email-body-pre">${content.text}</pre></div>`;
+      if (content && (content.html || content.text_body)) {
+        bodyHtml = `<div style="margin-top:8px"><div style="font-size:12px;color:#94a3b8;margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px">Body</div><div class="reader-body">${renderEmailBody(content.text_body, content.html)}</div></div>`;
       }
     } catch(_) {}
     document.getElementById('email-detail-content').innerHTML = `
       <div class="detail-grid">
-        <div class="dk">ID</div><div class="dv id">${email.id}</div>
-        <div class="dk">From</div><div class="dv">${email.from_address || '-'}</div>
-        <div class="dk">To</div><div class="dv">${(email.to_addresses || []).join(', ') || '-'}</div>
-        <div class="dk">CC</div><div class="dv">${(email.cc_addresses || []).join(', ') || '-'}</div>
-        <div class="dk">Subject</div><div class="dv">${email.subject || '-'}</div>
+        <div class="dk">ID</div><div class="dv id">${escapeHtml(email.id || '-')}</div>
+        <div class="dk">From</div><div class="dv">${escapeHtml(email.from_address || '-')}</div>
+        <div class="dk">To</div><div class="dv">${escapeHtml((email.to_addresses || []).join(', ') || '-')}</div>
+        <div class="dk">CC</div><div class="dv">${escapeHtml((email.cc_addresses || []).join(', ') || '-')}</div>
+        <div class="dk">Subject</div><div class="dv">${escapeHtml(email.subject || '-')}</div>
         <div class="dk">Status</div><div class="dv">${badge(email.status, email.status)}</div>
         <div class="dk">Sent At</div><div class="dv">${fmt(email.sent_at)}</div>
-        <div class="dk">Provider</div><div class="dv">${email.provider_id ? email.provider_id.slice(0,8) : '-'}</div>
+        <div class="dk">Provider</div><div class="dv">${escapeHtml(email.provider_id ? email.provider_id.slice(0,8) : '-')}</div>
       </div>
       ${bodyHtml}`;
   } catch(e) {
-    document.getElementById('email-detail-content').innerHTML = `<div class="error"><span>${e.message}</span></div>`;
+    document.getElementById('email-detail-content').innerHTML = `<div class="error"><span>${escapeHtml(e.message)}</span></div>`;
   }
 }
 
@@ -1345,15 +1350,21 @@ function renderInlineText(value) {
   let html = escapeHtml(value);
   const markdownLinks = [];
   html = html.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/gi, (_m, label, url) => {
-    const index = markdownLinks.push({ label, url }) - 1;
+    const href = normalizeWebUrl(url);
+    if (!href) return escapeHtml(label);
+    const index = markdownLinks.push({ label, url: href }) - 1;
     return `__MAILERY_LINK_${index}__`;
   });
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  html = html.replace(/(^|\s)(https?:\/\/[^\s<]+)/gi, (_m, lead, url) => `${lead}<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`);
+  html = html.replace(/(^|\s)(https?:\/\/[^\s<]+)/gi, (_m, lead, url) => {
+    const href = normalizeWebUrl(url);
+    if (!href) return `${lead}${escapeHtml(url)}`;
+    return `${lead}<a href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(href)}</a>`;
+  });
   html = html.replace(/__MAILERY_LINK_(\d+)__/g, (_m, index) => {
     const link = markdownLinks[Number(index)];
-    return link ? `<a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}</a>` : '';
+    return link ? `<a href="${escapeAttr(link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}</a>` : '';
   });
   return html;
 }
@@ -1376,7 +1387,19 @@ function normalizeWebUrl(value) {
   try {
     const parsed = new URL(String(value || '').trim());
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    parsed.protocol = parsed.protocol.toLowerCase();
+    parsed.hostname = parsed.hostname.toLowerCase();
     return parsed.toString();
+  } catch { return null; }
+}
+
+function safeOpenHref(value, options = {}) {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    const protocol = parsed.protocol.toLowerCase();
+    if (protocol === 'http:' || protocol === 'https:') return parsed.toString();
+    if (options.allowFile && protocol === 'file:') return parsed.toString();
+    return null;
   } catch { return null; }
 }
 
@@ -1397,6 +1420,7 @@ function mergeInboundAttachments(email) {
 
 function localFileUrl(path) {
   if (!path) return '';
+  if (!String(path).startsWith('/')) return '';
   const prefix = path.startsWith('/') ? 'file://' : 'file:///';
   return prefix + path.split('/').map(encodeURIComponent).join('/').replace(/%3A/g, ':');
 }
@@ -1412,15 +1436,21 @@ function formatBytes(value) {
 function renderAttachmentsPanel(attachments) {
   if (!attachments.length) return '';
   return `<div class="reader-panel hidden" id="inbound-attachments-panel"><h4>Attachments</h4>${attachments.map(attachment => {
-    const link = attachment.file_url || attachment.location || '';
-    const action = link ? `<div><a class="btn btn-secondary btn-sm" href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">Open</a> <button class="btn btn-secondary btn-sm" onclick="copyDashboardText('${escapeHtml(escapeJs(link))}')">Copy</button></div>` : '<span class="attachment-meta">No local link</span>';
-    return `<div class="attachment-row"><div><div class="attachment-name">${escapeHtml(attachment.filename || 'attachment')}</div><div class="attachment-meta">${escapeHtml(attachment.content_type || 'application/octet-stream')} · ${formatBytes(attachment.size)}${link ? ' · ' + escapeHtml(link) : ''}</div></div>${action}</div>`;
+    const rawLink = attachment.file_url || attachment.location || '';
+    const href = safeOpenHref(rawLink, { allowFile: true });
+    const copyTarget = rawLink || attachment.filename || '';
+    const action = copyTarget ? `<div>${href ? `<a class="btn btn-secondary btn-sm" href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">Open</a> ` : ''}<button class="btn btn-secondary btn-sm" onclick="copyDashboardText('${escapeAttr(escapeJs(copyTarget))}')">Copy</button></div>` : '<span class="attachment-meta">No local link</span>';
+    return `<div class="attachment-row"><div><div class="attachment-name">${escapeHtml(attachment.filename || 'attachment')}</div><div class="attachment-meta">${escapeHtml(attachment.content_type || 'application/octet-stream')} · ${formatBytes(attachment.size)}${rawLink ? ' · ' + escapeHtml(rawLink) : ''}</div></div>${action}</div>`;
   }).join('')}</div>`;
 }
 
 function renderLinksPanel(links) {
   if (!links.length) return '';
-  return `<div class="reader-panel hidden" id="inbound-links-panel"><h4>Links</h4>${links.map(link => `<div class="link-row"><div><div class="link-title">${escapeHtml(link.label)}</div><div class="link-url">${escapeHtml(link.url)}</div></div><div><a class="btn btn-secondary btn-sm" href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">Open</a> <button class="btn btn-secondary btn-sm" onclick="copyDashboardText('${escapeHtml(escapeJs(link.url))}')">Copy</button></div></div>`).join('')}</div>`;
+  return `<div class="reader-panel hidden" id="inbound-links-panel"><h4>Links</h4>${links.map(link => {
+    const href = safeOpenHref(link.url);
+    const open = href ? `<a class="btn btn-secondary btn-sm" href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">Open</a> ` : '';
+    return `<div class="link-row"><div><div class="link-title">${escapeHtml(link.label)}</div><div class="link-url">${escapeHtml(link.url)}</div></div><div>${open}<button class="btn btn-secondary btn-sm" onclick="copyDashboardText('${escapeAttr(escapeJs(link.url))}')">Copy</button></div></div>`;
+  }).join('')}</div>`;
 }
 
 function rawInboundText(e) {
@@ -1444,6 +1474,10 @@ function rawInboundText(e) {
 
 function escapeJs(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/\r/g, '');
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replace(/`/g, '&#96;');
 }
 
 // ─── SEQUENCES ───────────────────────────────────────────────────────────────

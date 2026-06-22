@@ -182,6 +182,24 @@ describe("runDiagnostics", () => {
     expect(provHealthCheck?.message).toContain("live credential check skipped");
   });
 
+  it("does not treat stored SES provider keys as full AWS/Route53 provisioning readiness", async () => {
+    createProvider({
+      name: "SES",
+      type: "ses",
+      region: "us-east-1",
+      access_key: "AKIA_TEST",
+      secret_key: "secret",
+    });
+
+    const checks = await runDiagnostics();
+    const awsProvisioning = checks.find((c) => c.name === "Provisioning: aws");
+    expect(awsProvisioning).toMatchObject({
+      status: "warn",
+    });
+    expect(awsProvisioning?.message).toContain("Stored SES provider credentials");
+    expect(awsProvisioning?.message).toContain("Route53");
+  });
+
   it("can run live provider credential checks explicitly", async () => {
     createProvider({ name: "BrokenResend", type: "resend" });
     const checks = await runDiagnostics(undefined, { liveProviderChecks: true });

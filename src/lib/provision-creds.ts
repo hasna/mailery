@@ -10,6 +10,7 @@ import { resolveCloudflareAuth, describeCloudflareAuth } from "./cloudflare-auth
 export interface ProvisionCredStatus {
   provider: string;
   configured: boolean;
+  status?: "pass" | "warn" | "fail";
   detail: string;
 }
 
@@ -29,12 +30,15 @@ export function checkProvisionCredentials(
 
   // AWS (SES send/inbound + Route53 buy via @hasna/domains), us-east-1.
   const hasEnvAws = !!(env["AWS_ACCESS_KEY_ID"] && env["AWS_SECRET_ACCESS_KEY"]) || !!env["AWS_PROFILE"];
-  const hasAws = hasEnvAws || !!config.aws_provider_credentials;
+  const hasStoredSesProviderCredentials = !!config.aws_provider_credentials;
   out.push({
     provider: "aws",
-    configured: hasAws,
-    detail: hasAws
-      ? `${hasEnvAws ? (env["AWS_PROFILE"] ? `profile:${env["AWS_PROFILE"]}` : "access-keys") : "stored SES provider credentials"} (us-east-1 for SES inbound + Route53)`
+    configured: hasEnvAws || hasStoredSesProviderCredentials,
+    status: hasEnvAws ? "pass" : hasStoredSesProviderCredentials ? "warn" : "fail",
+    detail: hasEnvAws
+      ? `${env["AWS_PROFILE"] ? `profile:${env["AWS_PROFILE"]}` : "access-keys"} (us-east-1 for SES inbound + Route53)`
+      : hasStoredSesProviderCredentials
+        ? "Stored SES provider credentials found for SES send/inbound; set AWS_PROFILE or AWS_ACCESS_KEY_ID/SECRET for Route53/domain purchase workflows"
       : "Set AWS_PROFILE or AWS_ACCESS_KEY_ID/SECRET",
   });
 
@@ -49,6 +53,7 @@ export function checkProvisionCredentials(
   out.push({
     provider: "cloudflare",
     configured: !!cf,
+    status: cf ? cfAccountId ? "pass" : "warn" : "fail",
     detail: cf ? describeCloudflareAuth(cf) + (cfAccountId ? " (+account)" : " (no account id — zone create needs it)") : "Set CLOUDFLARE_API_TOKEN or CLOUDFLARE_API_KEY+CLOUDFLARE_EMAIL",
   });
 

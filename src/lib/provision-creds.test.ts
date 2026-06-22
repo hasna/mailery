@@ -9,6 +9,7 @@ describe("checkProvisionCredentials", () => {
       RESEND_API_KEY: "re_x",
     });
     expect(s.find((x) => x.provider === "aws")!.configured).toBe(true);
+    expect(s.find((x) => x.provider === "aws")!.status).toBe("pass");
     const cf = s.find((x) => x.provider === "cloudflare")!;
     expect(cf.configured).toBe(true);
     expect(cf.detail).toContain("global key");
@@ -18,6 +19,7 @@ describe("checkProvisionCredentials", () => {
 
   it("flags missing cloudflare account id", () => {
     const cf = checkProvisionCredentials({ CLOUDFLARE_API_TOKEN: "t" }).find((x) => x.provider === "cloudflare")!;
+    expect(cf.status).toBe("warn");
     expect(cf.detail).toMatch(/account id/i);
   });
 
@@ -28,16 +30,19 @@ describe("checkProvisionCredentials", () => {
       cloudflare_account_id: "acct",
     }).find((x) => x.provider === "cloudflare")!;
     expect(cf.configured).toBe(true);
+    expect(cf.status).toBe("pass");
     expect(cf.detail).toContain("global key");
     expect(cf.detail).toContain("account");
   });
 
-  it("accepts stored SES provider credentials for AWS provisioning", () => {
+  it("warns that stored SES provider credentials do not prove full AWS provisioning", () => {
     const aws = checkProvisionCredentials({}, {
       aws_provider_credentials: true,
     }).find((x) => x.provider === "aws")!;
     expect(aws.configured).toBe(true);
-    expect(aws.detail).toContain("stored SES provider credentials");
+    expect(aws.status).toBe("warn");
+    expect(aws.detail).toContain("Stored SES provider credentials");
+    expect(aws.detail).toContain("Route53");
   });
 
   it("resend optional when absent", () => {

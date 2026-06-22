@@ -122,7 +122,7 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   })) {
     checks.push({
       name: `Provisioning: ${c.provider}`,
-      status: c.configured ? "pass" : c.provider === "resend" ? "warn" : "fail",
+      status: c.status ?? (c.configured ? "pass" : c.provider === "resend" ? "warn" : "fail"),
       message: c.detail,
     });
   }

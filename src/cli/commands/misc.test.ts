@@ -23,7 +23,9 @@ async function runMiscCommand(args: string[]) {
   program.exitOverride();
   const consoleLines: string[] = [];
   const originalLog = console.log;
-  registerMiscCommands(program, () => {});
+  registerMiscCommands(program, (_data, formatted) => {
+    if (formatted) consoleLines.push(String(formatted));
+  });
   console.log = (...values: unknown[]) => {
     consoleLines.push(values.map(String).join(" "));
   };

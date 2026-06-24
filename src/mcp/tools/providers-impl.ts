@@ -61,10 +61,11 @@ export async function runProviderTool(name: ProviderToolName, input: Record<stri
       case "list_providers": {
         const limit = typeof input["limit"] === "number" ? input["limit"] : undefined;
         const offset = typeof input["offset"] === "number" ? input["offset"] : undefined;
-        const providers = listProviderSummaries(undefined, { limit: limit ?? 100, offset: offset ?? 0 });
+        const effectiveLimit = limit ?? 100;
+        const providers = listProviderSummaries(undefined, { limit: effectiveLimit, offset: offset ?? 0 });
         return json({
           providers: redactSecrets(providers),
-          limit: limit ?? 100,
+          limit: effectiveLimit,
           offset: offset ?? 0,
           cli_equivalent: `mailery provider list${limit !== undefined ? ` --limit ${limit}` : ""}${offset !== undefined ? ` --offset ${offset}` : ""} --json`,
         });

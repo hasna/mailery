@@ -12,7 +12,7 @@ import {
   listAddressProvisioningByDomains,
   listProvisioningEvents,
 } from "../../db/provisioning.js";
-import { handleError, parseCliPage, resolveId } from "../utils.js";
+import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
 import { normalizeRoute53RegistrationContact } from "../../lib/route53-contact.js";
 import type { MxAssessment } from "../../lib/mx-ownership.js";
 
@@ -29,11 +29,14 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
   cmd
     .command("status [domain]")
     .description("Show provisioning status of domains and addresses")
-    .option("--limit <n>", "Maximum domains to show", "50")
+    .option("--limit <n>", "Maximum domains to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of domains to skip", "0")
-    .action((domainName: string | undefined, opts: { limit?: string; offset?: string }) => {
+    .option("--verbose", "Show all address provisioning rows per domain")
+    .action((domainName: string | undefined, opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       const db = getDatabase();
-      const domains = domainName ? findDomainsByName(domainName, db) : listDomains(undefined, db, parseCliPage(opts));
+      const page = parseCliListPage(opts);
+      const verbose = opts.verbose || isCliVerboseOutput();
+      const domains = domainName ? findDomainsByName(domainName, db) : listDomains(undefined, db, page);
       const domainIds = domains.map((domain) => domain.id);
       const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
       const addressProvisioning = listAddressProvisioningByDomains(domainIds, db);
@@ -41,9 +44,25 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
       for (const d of domains) {
         const p = domainProvisioning.get(d.id) ?? null;
         lines.push(`${chalk.bold(d.domain)}  ${chalk.cyan(p?.provisioning_status ?? "none")}  dns=${p?.dns_provider ?? "?"}  send=${p?.send_provider ?? "-"}${p?.last_error ? chalk.red(" err=" + p.last_error) : ""}`);
-        for (const a of addressProvisioning.get(d.id) ?? []) {
+        const addressRows = addressProvisioning.get(d.id) ?? [];
+        const visibleAddressRows = verbose ? addressRows : addressRows.slice(0, 4);
+        for (const a of visibleAddressRows) {
           lines.push(`  ${a.email}  ${chalk.cyan(a.provisioning.provisioning_status)}  recv=${a.provisioning.receive_strategy ?? "-"}`);
         }
+        if (!verbose && addressRows.length > visibleAddressRows.length) {
+          lines.push(chalk.dim(`  ... ${addressRows.length - visibleAddressRows.length} more address provisioning row(s); use --verbose`));
+        }
+      }
+      if (!domainName && lines.length) {
+        lines.push("");
+        lines.push(formatListHint({
+          shown: domains.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "domain",
+          detailCommand: "pass a domain name or use --verbose for address rows",
+          verbose,
+        }));
       }
       const text = lines.length ? lines.join("\n") : "No provisioned domains.";
       output({ domains: domains.map((d) => ({ domain: d.domain, provisioning: domainProvisioning.get(d.id) ?? null })) }, text);

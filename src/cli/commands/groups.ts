@@ -1,7 +1,8 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { createGroup, getGroupByName, listGroups, deleteGroup, addMember, removeMember, listMemberSummaries, getMemberCount, getMemberCounts } from "../../db/groups.js";
-import { confirmDestructiveAction, handleError, parseCliPage } from "../utils.js";
+import { truncate } from "../../lib/format.js";
+import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, parseCliPage } from "../utils.js";
 
 export function registerGroupCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const groupCmd = program.command("group").description("Manage recipient groups");
@@ -22,11 +23,12 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
   groupCmd
     .command("list")
     .description("List recipient groups")
-    .option("--limit <n>", "Maximum groups to show", "50")
+    .option("--limit <n>", "Maximum groups to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of groups to skip", "0")
-    .action((opts: { limit?: string; offset?: string }) => {
+    .option("--verbose", "Show group descriptions inline")
+    .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
-        const page = parseCliPage(opts);
+        const page = parseCliListPage(opts);
         const groups = listGroups(undefined, page);
         if (groups.length === 0) {
           output([], chalk.dim("No groups configured. Use 'mailery group create' to add one."));
@@ -38,12 +40,21 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
           member_count: counts.get(group.id) ?? 0,
         }));
         const lines: string[] = [chalk.bold("\nGroups:")];
+        const verbose = opts.verbose || isCliVerboseOutput();
         for (const g of groups) {
           const count = counts.get(g.id) ?? 0;
-          const desc = g.description ? chalk.dim(` — ${g.description}`) : "";
+          const desc = verbose && g.description ? chalk.dim(` — ${truncate(g.description, 80)}`) : "";
           lines.push(`  ${chalk.cyan(g.id.slice(0, 8))}  ${g.name}  (${count} members)${desc}`);
         }
         lines.push("");
+        lines.push(formatListHint({
+          shown: groups.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "group",
+          detailCommand: "use mailery group show <name> for members",
+          verbose,
+        }));
         output(result, lines.join("\n"));
       } catch (e) {
         handleError(e);
@@ -83,13 +94,14 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
   groupCmd
     .command("members <name>")
     .description("List members in a recipient group")
-    .option("--limit <n>", "Maximum members to show", "50")
+    .option("--limit <n>", "Maximum members to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of members to skip", "0")
-    .action((name: string, opts: { limit?: string; offset?: string }) => {
+    .option("--verbose", "Show expanded list hints")
+    .action((name: string, opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const group = getGroupByName(name);
         if (!group) handleError(new Error(`Group not found: ${name}`));
-        const page = parseCliPage(opts);
+        const page = parseCliListPage(opts);
         const members = listMemberSummaries(group!.id, undefined, page);
         if (members.length === 0) {
           output([], chalk.dim("No members."));
@@ -101,6 +113,14 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
           lines.push(`  ${m.email}${displayName}`);
         }
         lines.push("");
+        lines.push(formatListHint({
+          shown: members.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "member",
+          detailCommand: "use mailery group show <name> for group details",
+          verbose: opts.verbose || isCliVerboseOutput(),
+        }));
         output(members, lines.join("\n"));
       } catch (e) {
         handleError(e);

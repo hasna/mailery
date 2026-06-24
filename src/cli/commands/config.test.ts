@@ -62,10 +62,13 @@ describe("config command redaction", () => {
   it("shows canonical archive and actual inbound config keys", async () => {
     const result = await runConfigCommand(["config", "keys"]);
     expect(result.out).toContain("gmail_archive_s3_bucket");
-    expect(result.out).toContain("hasna-xyz-opensource-emails-prod");
     expect(result.out).toContain("inbound_s3_bucket");
     expect(result.out).toContain("inbound_s3_prefix");
     expect(result.out).toContain("inbound_s3_region");
     expect(result.out).not.toContain("aws_s3_inbound_bucket");
+    expect(result.out).toContain("Use --verbose for examples");
+
+    const verbose = await runConfigCommand(["config", "keys", "--verbose"]);
+    expect(verbose.out).toContain("hasna-xyz-opensource-emails-prod");
   });
 });

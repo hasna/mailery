@@ -6,7 +6,7 @@ import { getDatabase } from "../../db/database.js";
 import { getAdapter } from "../../providers/index.js";
 import { formatDnsTable } from "../../lib/dns.js";
 import { colorDnsStatus, truncate, tableRow } from "../../lib/format.js";
-import { confirmDestructiveAction, handleError, parseCliPage, resolveId } from "../utils.js";
+import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
 import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus } from "../../db/warming.js";
 import { formatWarmingStatus, generateWarmingPlan, getTodayLimit, getTodaySentCount } from "../../lib/warming.js";
 import { listDomainProvisioningByIds, listReadyAddressCountsByDomains, setDomainProvisioning } from "../../db/provisioning.js";
@@ -16,10 +16,11 @@ import { normalizeRoute53RegistrationContact } from "../../lib/route53-contact.j
 export function registerDomainCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const domainCmd = program.command("domain").description("Manage sending domains");
 
-  const listDomainsAction = (opts: { provider?: string; limit?: string; offset?: string }) => {
+  const listDomainsAction = (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
     try {
       const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-      const domains = listDomains(providerId, getDatabase(), parseCliPage(opts));
+      const page = parseCliListPage(opts);
+      const domains = listDomains(providerId, getDatabase(), page);
       if (domains.length === 0) {
         output([], chalk.dim("No domains configured."));
         return;
@@ -32,6 +33,14 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         lines.push(`  ${chalk.cyan(d.id.slice(0, 8))}  ${d.domain}  DKIM:${dkim}  SPF:${spf}  DMARC:${dmarc}`);
       }
       lines.push("");
+      lines.push(formatListHint({
+        shown: domains.length,
+        limit: page.limit,
+        offset: page.offset,
+        noun: "domain",
+        detailCommand: "use mailery domain status or mailery domain dns <domain> for details",
+        verbose: opts.verbose || isCliVerboseOutput(),
+      }));
       output(domains, lines.join("\n"));
     } catch (e) {
       handleError(e);
@@ -42,8 +51,9 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("domains")
     .description("List sending domains (alias: mailery domain list)")
     .option("--provider <id>", "Filter by provider ID")
-    .option("--limit <n>", "Maximum domains to show", "50")
+    .option("--limit <n>", "Maximum domains to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of domains to skip", "0")
+    .option("--verbose", "Show expanded list hints")
     .action(listDomainsAction);
 
   domainCmd
@@ -201,8 +211,9 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("list")
     .description("List domains")
     .option("--provider <id>", "Filter by provider ID")
-    .option("--limit <n>", "Maximum domains to show", "50")
+    .option("--limit <n>", "Maximum domains to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of domains to skip", "0")
+    .option("--verbose", "Show expanded list hints")
     .action(listDomainsAction);
 
   domainCmd
@@ -289,13 +300,16 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("status")
     .description("Show domain readiness summary table")
     .option("--provider <id>", "Filter by provider ID")
-    .option("--limit <n>", "Maximum domains to show", "50")
+    .option("--limit <n>", "Maximum domains to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of domains to skip", "0")
-    .action((opts: { provider?: string; limit?: string; offset?: string }) => {
+    .option("--verbose", "Show per-domain issues and first fix command")
+    .action((opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const db = getDatabase();
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const domains = listDomains(providerId, db, parseCliPage(opts));
+        const page = parseCliListPage(opts);
+        const verbose = opts.verbose || isCliVerboseOutput();
+        const domains = listDomains(providerId, db, page);
         if (domains.length === 0) {
           output([], chalk.dim("No domains configured."));
           return;
@@ -321,35 +335,47 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           [chalk.bold("Provider"), 14],
           [chalk.bold("Send"), 12],
           [chalk.bold("Receive"), 12],
-          [chalk.bold("DNS"), 22],
-          [chalk.bold("Readiness"), 28],
+          [chalk.bold("DNS"), 18],
+          [chalk.bold("Readiness"), 22],
         ));
         for (const row of rows) {
           const providerName = row.provider_name ? truncate(row.provider_name, 14) : row.provider_id.slice(0, 8);
           const send = row.readiness.send_ready ? chalk.green("ready") : chalk.yellow("not ready");
           const receive = row.readiness.receive_ready ? chalk.green("ready") : chalk.yellow("not ready");
-          const dns = `D:${colorDnsStatus(row.dkim_status)} S:${colorDnsStatus(row.spf_status)} M:${colorDnsStatus(row.dmarc_status)}`;
+          const dns = verbose
+            ? `D:${colorDnsStatus(row.dkim_status)} S:${colorDnsStatus(row.spf_status)} M:${colorDnsStatus(row.dmarc_status)}`
+            : `D:${row.dkim_status} S:${row.spf_status} M:${row.dmarc_status}`;
+          const dnsCell = verbose ? dns : truncate(dns, 18);
           const state = row.readiness.state === "broken"
             ? chalk.red(formatDomainReadinessState(row.readiness.state))
             : row.readiness.state.includes("ready")
               ? chalk.green(formatDomainReadinessState(row.readiness.state))
               : chalk.yellow(formatDomainReadinessState(row.readiness.state));
+          const stateCell = verbose ? state : truncate(state, 22);
           lines.push(tableRow(
             [truncate(row.domain, 18), 18],
             [providerName, 14],
             [send, 12],
             [receive, 12],
-            [dns, 22],
-            [state, 28],
+            [dnsCell, verbose ? 34 : 18],
+            [stateCell, verbose ? 28 : 22],
           ));
-          if (row.readiness.issues.length > 0) {
+          if (verbose && row.readiness.issues.length > 0) {
             lines.push(chalk.dim(`  ${row.domain}: ${row.readiness.issues.join(", ")}`));
           }
-          if (row.readiness.fix_commands.length > 0 && !row.readiness.receive_ready) {
+          if (verbose && row.readiness.fix_commands.length > 0 && !row.readiness.receive_ready) {
             lines.push(chalk.dim(`  fix: ${row.readiness.fix_commands[0]}`));
           }
         }
         lines.push("");
+        lines.push(formatListHint({
+          shown: rows.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "domain",
+          detailCommand: verbose ? "use mailery domain dns <domain> for DNS records" : "use --verbose for issue/fix lines or mailery domain dns <domain>",
+          verbose,
+        }));
         output(rows, lines.join("\n"));
       } catch (e) {
         handleError(e);
@@ -362,13 +388,14 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--receive", "Only domains ready to receive")
     .option("--send", "Only domains ready to send")
     .option("--provider <id>", "Filter by provider ID")
-    .option("--limit <n>", "Maximum domains to show", "50")
+    .option("--limit <n>", "Maximum domains to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of domains to skip after filtering", "0")
-    .action((opts: { receive?: boolean; send?: boolean; provider?: string; limit?: string; offset?: string }) => {
+    .option("--verbose", "Show expanded list hints")
+    .action((opts: { receive?: boolean; send?: boolean; provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const db = getDatabase();
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-        const page = parseCliPage(opts);
+        const page = parseCliListPage(opts);
         const domains = listUsableDomains({
           provider_id: providerId,
           send: opts.send,
@@ -401,6 +428,14 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           lines.push(`  ${chalk.cyan(row.domain)}  ${chalk.dim(row.provider_name ?? row.provider_id.slice(0, 8))}  ${chalk.green(modes || "none")}  ${chalk.dim(formatDomainReadinessState(row.readiness.state))}`);
         }
         lines.push("");
+        lines.push(formatListHint({
+          shown: visibleRows.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "domain",
+          detailCommand: "use mailery domain status for readiness details",
+          verbose: opts.verbose || isCliVerboseOutput(),
+        }));
         output(visibleRows, lines.join("\n"));
       } catch (e) {
         handleError(e);
@@ -790,11 +825,13 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .command("warm-list")
     .description("List all domain warming schedules")
     .option("--status <status>", "Filter by status (active, paused, completed)")
-    .option("--limit <n>", "Maximum schedules to show", "50")
+    .option("--limit <n>", "Maximum schedules to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of schedules to skip", "0")
-    .action((opts: { status?: string; limit?: string; offset?: string }) => {
+    .option("--verbose", "Show expanded list hints")
+    .action((opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
-        const schedules = listWarmingSchedules(opts.status, undefined, parseCliPage(opts));
+        const page = parseCliListPage(opts);
+        const schedules = listWarmingSchedules(opts.status, undefined, page);
         if (schedules.length === 0) {
           output([], chalk.dim("No warming schedules found."));
           return;
@@ -824,6 +861,14 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           ));
         }
         lines.push("");
+        lines.push(formatListHint({
+          shown: schedules.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "warming schedule",
+          detailCommand: "use mailery domain warm-status <domain> for details",
+          verbose: opts.verbose || isCliVerboseOutput(),
+        }));
         output(schedules, lines.join("\n"));
       } catch (e) {
         handleError(e);

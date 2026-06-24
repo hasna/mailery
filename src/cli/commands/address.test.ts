@@ -52,7 +52,11 @@ describe("address ownership commands", () => {
     const agent = createOwner({ type: "agent", name: "support-agent" });
     getDatabase().run("UPDATE addresses SET owner_id = ?, administrator_id = ? WHERE id = ?", [human.id, agent.id, address.id]);
 
-    const list = await runAddressCommand(["address", "list"]);
+    const compactList = await runAddressCommand(["address", "list"]);
+    expect(compactList.out).toContain("human-user");
+    expect(compactList.out).toContain("use --verbose");
+
+    const list = await runAddressCommand(["address", "list", "--verbose"]);
     expect(list.out).toContain("owner human-user (human)");
     expect(list.out).toContain("admin support-agent");
     expect(list.data).toMatchObject([{ email: "human@example.com", owner: { name: "human-user" }, administrator: { name: "support-agent" } }]);
@@ -100,6 +104,23 @@ describe("address ownership commands", () => {
 });
 
 describe("address list command", () => {
+  it("uses a compact implicit default and honors explicit limits", async () => {
+    const provider = createProvider({ name: "sandbox", type: "sandbox" });
+    const db = getDatabase();
+    for (let i = 1; i <= 25; i++) {
+      const address = createAddress({ provider_id: provider.id, email: `bulk-${String(i).padStart(2, "0")}@example.com` });
+      db.run("UPDATE addresses SET created_at = ? WHERE id = ?", [`2026-01-${String(i).padStart(2, "0")} 00:00:00`, address.id]);
+    }
+
+    const compact = await runAddressCommand(["address", "list", "--provider", provider.id]);
+    expect(compact.data).toHaveLength(20);
+    expect(compact.out).toContain("use --verbose");
+    expect(compact.out).toContain("--offset 20");
+
+    const explicit = await runAddressCommand(["address", "list", "--provider", provider.id, "--limit", "25"]);
+    expect(explicit.data).toHaveLength(25);
+  });
+
   it("paginates enriched address output", async () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox" });
     const db = getDatabase();
@@ -151,7 +172,7 @@ describe("address list command", () => {
     }) as typeof db.query;
 
     try {
-      const result = await runAddressCommand(["address", "list", "--provider", provider.id, "--limit", "10"]);
+      const result = await runAddressCommand(["address", "list", "--provider", provider.id, "--limit", "10", "--verbose"]);
 
       expect(result.out).toContain("quota 1/5/day");
       expect(result.out).toContain("quota 2/5/day");

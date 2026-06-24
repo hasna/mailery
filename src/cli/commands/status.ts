@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { handleError, parseCliNonNegativeIntOption, parseCliPositiveIntOption } from "../utils.js";
+import { handleError, isCliVerboseOutput, parseCliNonNegativeIntOption, parseCliPositiveIntOption } from "../utils.js";
 
 interface AgentPromptOptions {
   provider?: "cerebras" | "groq";
@@ -59,11 +59,14 @@ export function registerStatusCommands(program: Command, output: (data: unknown,
   agent
     .command("context")
     .description("Print a redacted system snapshot and recommended workflows for coding agents")
-    .action(async () => {
+    .option("--verbose", "Print the full redacted context snapshot")
+    .option("--full", "Alias for --verbose")
+    .action(async (opts: { verbose?: boolean; full?: boolean }) => {
       try {
-        const { getAgentContext } = await import("../../lib/agent-context.js");
+        const { formatAgentContextSummary, getAgentContext } = await import("../../lib/agent-context.js");
         const context = getAgentContext();
-        output(context, JSON.stringify(context, null, 2));
+        const full = opts.verbose || opts.full || isCliVerboseOutput();
+        output(context, full ? JSON.stringify(context, null, 2) : formatAgentContextSummary(context));
       } catch (e) {
         handleError(e);
       }

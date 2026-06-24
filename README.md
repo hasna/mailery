@@ -106,6 +106,37 @@ mailery serve             # HTTP server + dashboard + authenticated /api/v1
 mailery mcp               # install MCP server
 ```
 
+### Compact Output and Gradual Disclosure
+
+Mailery CLI commands are compact by default so agent terminals do not fill with
+large records. List and status commands show essential fields, bounded row
+counts, and hints for the next detail command. Use these flags when you need
+more:
+
+```bash
+mailery address list              # compact table
+mailery address list --verbose    # expanded owner/admin/quota rows
+mailery domain status --verbose   # includes per-domain issue and fix lines
+mailery provider list --limit 50  # explicit larger page
+mailery contact list --suppressed # compact filtered contact list
+mailery template show <name>      # detail path for template bodies
+mailery sequence show <name>      # detail path for steps/enrollments
+mailery forwarding list --source ops@example.com
+mailery agent context             # compact agent context summary
+mailery agent context --verbose   # full redacted context snapshot
+mailery agent context --json      # full machine-readable context
+mailery config list --verbose     # full redacted config values
+mailery config keys --verbose     # include examples for every key
+mailery email show <id>           # detail path for one sent email
+mailery inbox show <id>           # detail path for one inbound email
+```
+
+`--json` remains the machine-readable path. Broad MCP list tools default to
+their existing bounded summary page size for compatibility; use each tool's
+`limit`/`offset` inputs or the matching detail tool/resource for larger or full
+records. `emails://agent/context` is sampled for orientation; use
+`emails://agent/context/full` for the full redacted MCP resource.
+
 ## Tenancy, aliases & scoped send keys
 
 Every address can have an **owner** that is a human or an agent. A human-owned

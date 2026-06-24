@@ -4,7 +4,7 @@ import { createAddress } from "../db/addresses.js";
 import { createDomain, updateDnsStatus } from "../db/domains.js";
 import { createProvider } from "../db/providers.js";
 import { setAddressProvisioning, setDomainProvisioning } from "../db/provisioning.js";
-import { addressesResourcePayload, domainsResourcePayload, recentErrorsResourcePayload } from "./resources.js";
+import { addressesResourcePayload, agentContextResourcePayload, domainsResourcePayload, recentErrorsResourcePayload } from "./resources.js";
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
@@ -76,6 +76,33 @@ describe("MCP resource payloads", () => {
     expect(addressPayload.total).toBe(105);
     expect(addressPayload.limit).toBe(100);
     expect(addressPayload.truncated).toBe(true);
+  });
+
+  it("keeps the agent context resource compact with samples and full-context command", async () => {
+    const provider = createProvider({ name: "sandbox", type: "sandbox" });
+    for (let i = 0; i < 8; i++) {
+      const domain = createDomain(provider.id, `ready-${i}.example.com`);
+      updateDnsStatus(domain.id, "verified", "verified", "verified");
+      setDomainProvisioning(domain.id, { provisioning_status: "ready" });
+      const address = createAddress({ provider_id: provider.id, email: `ready-${i}@example.com` });
+      getDatabase().run("UPDATE addresses SET verified = 1 WHERE id = ?", [address.id]);
+      setAddressProvisioning(address.id, { domain_id: domain.id, provisioning_status: "ready" });
+    }
+
+    const payload = await agentContextResourcePayload(getDatabase()) as {
+      status: { domains: { usable: unknown[] }; addresses: { usable_from: unknown[] } };
+      limits: { samples: number };
+      truncated: { domains: boolean; addresses: boolean };
+      full_context_resource: string;
+      full_context_cli: string;
+    };
+
+    expect(payload.limits.samples).toBe(5);
+    expect(payload.status.domains.usable).toHaveLength(5);
+    expect(payload.status.addresses.usable_from).toHaveLength(5);
+    expect(payload.truncated).toEqual({ domains: true, addresses: true });
+    expect(payload.full_context_resource).toBe("emails://agent/context/full");
+    expect(payload.full_context_cli).toBe("mailery agent context --json");
   });
 
   it("returns only failed provisioning rows for recent errors", () => {

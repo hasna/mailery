@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { createOwner, getOwner, getOwnerByName, listOwners, listAddressesByOwner } from "../../db/owners.js";
 import { enrichAddresses } from "../../lib/address-ownership.js";
-import { handleError, parseCliPage } from "../utils.js";
+import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage } from "../utils.js";
 
 export function registerOwnerCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const cmd = program.command("owner").description("Manage address owners (human or agent)");
@@ -24,12 +24,25 @@ export function registerOwnerCommands(program: Command, output: (data: unknown, 
     .command("list")
     .description("List owners")
     .option("--type <type>", "Filter: human | agent")
-    .option("--limit <n>", "Maximum owners to show", "50")
+    .option("--limit <n>", "Maximum owners to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of owners to skip", "0")
-    .action((opts: { type?: string; limit?: string; offset?: string }) => {
-      const owners = listOwners(opts.type as "human" | "agent" | undefined, undefined, parseCliPage(opts));
+    .option("--verbose", "Show expanded list hints")
+    .action((opts: { type?: string; limit?: string; offset?: string; verbose?: boolean }) => {
+      const page = parseCliListPage(opts);
+      const owners = listOwners(opts.type as "human" | "agent" | undefined, undefined, page);
       const text = owners.length
-        ? owners.map((o) => `  ${o.id.slice(0, 8)}  ${chalk.cyan(o.type)}  ${o.name}${o.contact_email ? ` <${o.contact_email}>` : ""}`).join("\n")
+        ? [
+          ...owners.map((o) => `  ${o.id.slice(0, 8)}  ${chalk.cyan(o.type)}  ${o.name}${o.contact_email ? ` <${o.contact_email}>` : ""}`),
+          "",
+          formatListHint({
+            shown: owners.length,
+            limit: page.limit,
+            offset: page.offset,
+            noun: "owner",
+            detailCommand: "use mailery owner addresses <owner> for assigned addresses",
+            verbose: opts.verbose || isCliVerboseOutput(),
+          }),
+        ].join("\n")
         : "No owners registered.";
       output(owners, text);
     });
@@ -38,19 +51,32 @@ export function registerOwnerCommands(program: Command, output: (data: unknown, 
     .command("addresses <owner>")
     .description("List addresses owned (or administered) by an owner")
     .option("--administered", "Show addresses this owner administers instead of owns")
-    .option("--limit <n>", "Maximum addresses to show", "50")
+    .option("--limit <n>", "Maximum addresses to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of addresses to skip", "0")
-    .action((owner: string, opts: { administered?: boolean; limit?: string; offset?: string }) => {
+    .option("--verbose", "Show expanded list hints")
+    .action((owner: string, opts: { administered?: boolean; limit?: string; offset?: string; verbose?: boolean }) => {
       const o = getOwnerByName(owner) ?? getOwner(owner);
       if (!o) return handleError(new Error(`Owner not found: ${owner}`));
       const role = opts.administered ? "administrator" : "owner";
-      const addrs = enrichAddresses(listAddressesByOwner(o.id, role, undefined, parseCliPage(opts)));
+      const page = parseCliListPage(opts);
+      const addrs = enrichAddresses(listAddressesByOwner(o.id, role, undefined, page));
       const text = addrs.length
-        ? addrs.map((a) => {
+        ? [
+          ...addrs.map((a) => {
           const ownerText = a.owner ? `owner=${a.owner.name}(${a.owner.type})` : "owner=none";
           const adminText = a.administrator ? `admin=${a.administrator.name}` : "admin=none";
           return `  ${a.email}  ${chalk.dim(a.provider_name ?? a.provider_id.slice(0, 8))}  ${chalk.dim(a.status)}  ${chalk.dim(ownerText)}  ${chalk.dim(adminText)}`;
-        }).join("\n")
+        }),
+          "",
+          formatListHint({
+            shown: addrs.length,
+            limit: page.limit,
+            offset: page.offset,
+            noun: "address",
+            detailCommand: "use mailery address owner <email-or-id> for one address",
+            verbose: opts.verbose || isCliVerboseOutput(),
+          }),
+        ].join("\n")
         : "(none)";
       output(addrs, `${o.name} ${role === "administrator" ? "administers" : "owns"}:\n${text}`);
     });

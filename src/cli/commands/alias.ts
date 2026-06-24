@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { createAlias, createCatchAll, setGlobalCatchAll, getGlobalCatchAll, ensureDefaultCatchAll, removeAlias, getAlias, listAliases, resolveAlias, CATCH_ALL, ALL_DOMAINS } from "../../db/aliases.js";
-import { handleError, parseCliPage } from "../utils.js";
+import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage } from "../utils.js";
 
 function display(a: { local_part: string; domain: string }): string {
   if (a.domain === ALL_DOMAINS) return "*@* (all domains)";
@@ -45,12 +45,15 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
     .command("list")
     .description("List aliases (optionally for one domain), incl. the protected global catch-all")
     .option("--domain <domain>", "Filter by domain")
-    .option("--limit <n>", "Maximum aliases to show", "50")
+    .option("--limit <n>", "Maximum aliases to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of aliases to skip", "0")
-    .action((opts: { domain?: string; limit?: string; offset?: string }) => {
+    .option("--verbose", "Show explanatory alias notes")
+    .action((opts: { domain?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       if (!opts.domain) ensureDefaultCatchAll(); // make sure the protected default exists
-      const aliases = listAliases(opts.domain, undefined, parseCliPage(opts));
+      const page = parseCliListPage(opts);
+      const aliases = listAliases(opts.domain, undefined, page);
       if (aliases.length === 0) { output([], chalk.dim("No aliases configured.")); return; }
+      const verbose = opts.verbose || isCliVerboseOutput();
       const lines = [chalk.bold("\nAliases:")];
       for (const a of aliases) {
         const kind = a.protected ? chalk.green("[protected]") : a.local_part === CATCH_ALL ? chalk.magenta("[catch-all]") : "           ";
@@ -58,7 +61,16 @@ export function registerAliasCommands(program: Command, output: (data: unknown, 
         lines.push(`  ${chalk.cyan(a.id.slice(0, 8))} ${kind} ${display(a).padEnd(34)} → ${target}`);
       }
       const g = getGlobalCatchAll();
-      if (g) lines.push(chalk.dim("\n  The global catch-all is protected — it catches mail for every domain and can't be deleted."));
+      lines.push("");
+      lines.push(formatListHint({
+        shown: aliases.length,
+        limit: page.limit,
+        offset: page.offset,
+        noun: "alias",
+        detailCommand: "use mailery alias resolve <recipient> to test routing",
+        verbose,
+      }));
+      if (verbose && g) lines.push(chalk.dim("\n  The global catch-all is protected — it catches mail for every domain and can't be deleted."));
       output(aliases, lines.join("\n"));
     });
 

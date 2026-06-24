@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { CANONICAL_OPEN_EMAILS_S3_BUCKET, CANONICAL_OPEN_EMAILS_S3_REGION, loadConfig, saveConfig, getConfigValue, setConfigValue } from "../../lib/config.js";
 import { redactSecrets } from "../../lib/redaction.js";
-import { handleError } from "../utils.js";
+import { formatListHint, handleError, isCliVerboseOutput, parseCliPage, summarizeCliValue } from "../utils.js";
 
 const KNOWN_KEYS: { key: string; description: string; example: string }[] = [
   { key: "default_provider", description: "Default provider ID used when --provider is not specified", example: "abc12345" },
@@ -86,30 +86,60 @@ export function registerConfigCommands(program: Command, output: (data: unknown,
   configCmd
     .command("list")
     .description("List all config values")
-    .action(() => {
+    .option("--limit <n>", "Maximum config values to show in compact output", "20")
+    .option("--offset <n>", "Number of config values to skip in compact output", "0")
+    .option("--verbose", "Show full redacted values instead of compact summaries")
+    .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const config = loadConfig();
-        const keys = Object.keys(config);
+        const keys = Object.keys(config).sort();
         if (keys.length === 0) { output({}, chalk.dim("No config values set. Run 'mailery config keys' to see available keys.")); return; }
         const redacted = redactSecrets(config);
-        console.log(chalk.bold("\nConfig:"));
-        for (const key of keys) { console.log(`  ${chalk.cyan(key.padEnd(32))} ${JSON.stringify(redacted[key])}`); }
-        console.log();
-        output(redacted, "");
+        const verbose = opts.verbose || isCliVerboseOutput();
+        const page = parseCliPage(opts, 20);
+        const visibleKeys = verbose ? keys : keys.slice(page.offset, page.offset + page.limit);
+        const lines = [chalk.bold("\nConfig:")];
+        for (const key of visibleKeys) {
+          const value = verbose ? JSON.stringify(redacted[key]) : summarizeCliValue(redacted[key], 90);
+          lines.push(`  ${chalk.cyan(key.padEnd(32))} ${value}`);
+        }
+        lines.push("");
+        if (!verbose) {
+          lines.push(formatListHint({
+            shown: visibleKeys.length,
+            limit: page.limit,
+            offset: page.offset,
+            noun: "config value",
+            detailCommand: "use mailery config get <key> for one value",
+            verbose,
+          }));
+          if (visibleKeys.length < keys.length) {
+            lines.push(chalk.dim(`Total config values: ${keys.length}.`));
+          }
+        }
+        output(redacted, lines.join("\n"));
       } catch (e) { handleError(e); }
     });
 
   configCmd
     .command("keys")
     .description("Show all known config keys with descriptions")
-    .action(() => {
-      console.log(chalk.bold("\nKnown config keys:\n"));
+    .option("--verbose", "Include examples for every key")
+    .action((opts: { verbose?: boolean }) => {
+      const verbose = opts.verbose || isCliVerboseOutput();
+      const lines = [chalk.bold("\nKnown config keys:"), ""];
       for (const k of KNOWN_KEYS) {
-        console.log(`  ${chalk.cyan(k.key)}`);
-        console.log(`    ${chalk.dim(k.description)}`);
-        console.log(`    ${chalk.dim("e.g.")} ${k.example}\n`);
+        if (verbose) {
+          lines.push(`  ${chalk.cyan(k.key)}`);
+          lines.push(`    ${chalk.dim(k.description)}`);
+          lines.push(`    ${chalk.dim("e.g.")} ${k.example}`);
+          lines.push("");
+        } else {
+          lines.push(`  ${chalk.cyan(k.key.padEnd(30))} ${chalk.dim(k.description)}`);
+        }
       }
-      console.log(chalk.dim("Set with: mailery config set <key> <value>"));
-      console.log();
+      lines.push("");
+      lines.push(chalk.dim("Set with: mailery config set <key> <value>. Use --verbose for examples."));
+      output(KNOWN_KEYS, lines.join("\n"));
     });
 }

@@ -6,7 +6,7 @@ import { createProvider, listProviders, listProviderSummaries, deleteProvider, g
 import { createAddress } from "../../db/addresses.js";
 import { getAdapter } from "../../providers/index.js";
 import { log } from "../../lib/logger.js";
-import { confirmDestructiveAction, handleError, parseCliPage, resolveId } from "../utils.js";
+import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
 
 export function registerProviderCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const providerCmd = program.command("provider").description("Manage email providers");
@@ -106,11 +106,13 @@ export function registerProviderCommands(program: Command, output: (data: unknow
   providerCmd
     .command("list")
     .description("List configured providers")
-    .option("--limit <n>", "Maximum providers to show", "50")
+    .option("--limit <n>", "Maximum providers to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of providers to skip", "0")
-    .action((opts: { limit?: string; offset?: string }) => {
+    .option("--verbose", "Show expanded list hints")
+    .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
-        const providers = listProviderSummaries(undefined, parseCliPage(opts));
+        const page = parseCliListPage(opts);
+        const providers = listProviderSummaries(undefined, page);
         if (providers.length === 0) {
           output([], chalk.dim("No providers configured. Use 'mailery provider add' to add one."));
           return;
@@ -121,6 +123,14 @@ export function registerProviderCommands(program: Command, output: (data: unknow
           lines.push(`  ${chalk.cyan(p.id.slice(0, 8))}  ${p.name}  [${p.type}]  ${status}`);
         }
         lines.push("");
+        lines.push(formatListHint({
+          shown: providers.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "provider",
+          detailCommand: "use mailery provider update <id> --help for editable fields",
+          verbose: opts.verbose || isCliVerboseOutput(),
+        }));
         output(providers, lines.join("\n"));
       } catch (e) {
         handleError(e);

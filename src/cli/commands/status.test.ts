@@ -62,6 +62,18 @@ function seedInbound() {
 }
 
 describe("managed agent CLI commands", () => {
+  it("prints a compact agent context by default and full JSON in verbose mode", async () => {
+    const compact = await runStatusCommand(["agent", "context"]);
+    expect(compact.formatted).toContain("Agent context summary");
+    expect(compact.formatted).toContain("Details: use mailery agent context --verbose");
+    expect(compact.formatted.trim().startsWith("{")).toBe(false);
+    expect(compact.data).toMatchObject({ workflows: expect.any(Object) });
+
+    const verbose = await runStatusCommand(["agent", "context", "--verbose"]);
+    expect(verbose.formatted.trim().startsWith("{")).toBe(true);
+    expect(verbose.formatted).toContain('"workflows"');
+  });
+
   it("lists and enables managed agents", async () => {
     const list = await runStatusCommand(["agent", "list"]);
     expect(list.formatted).toContain("Managed email agent defaults");

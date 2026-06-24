@@ -10,10 +10,11 @@ import { createEmail } from "../../db/emails.js";
 import { getTemplate, renderTemplate } from "../../db/templates.js";
 import { getAdapter } from "../../providers/index.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
+import { truncate } from "../../lib/format.js";
 import {
   getDueEnrollments, advanceEnrollment, getStepAtIndex,
 } from "../../db/sequences.js";
-import { handleError, resolveId, parseDuration, parseCliPage } from "../utils.js";
+import { formatListHint, handleError, isCliVerboseOutput, resolveId, parseDuration, parseCliListPage } from "../utils.js";
 
 const SCHEDULED_EMAIL_BATCH_SIZE = 100;
 const SEQUENCE_SCHEDULER_BATCH_SIZE = 100;
@@ -217,28 +218,39 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .command("list")
     .description("List scheduled emails")
     .option("--status <status>", "Filter by status: pending|sent|cancelled|failed")
-    .option("--limit <n>", "Maximum scheduled emails to show", "50")
+    .option("--limit <n>", "Maximum scheduled emails to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of scheduled emails to skip", "0")
-    .action((opts: { status?: string; limit?: string; offset?: string }) => {
+    .option("--verbose", "Show expanded list hints")
+    .action((opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const status = opts.status as "pending" | "sent" | "cancelled" | "failed" | undefined;
+        const page = parseCliListPage(opts);
         const emails = listScheduledEmailSummaries({
           ...(status ? { status } : {}),
-          ...parseCliPage(opts),
+          ...page,
         });
         if (emails.length === 0) {
-          console.log(chalk.dim("No scheduled emails."));
+          output([], chalk.dim("No scheduled emails."));
           return;
         }
-        console.log(chalk.bold("\nScheduled Emails:"));
+        const lines = [chalk.bold("\nScheduled Emails:")];
         for (const e of emails) {
           const statusColor = e.status === "pending" ? chalk.blue(e.status) :
             e.status === "sent" ? chalk.green(e.status) :
             e.status === "cancelled" ? chalk.yellow(e.status) :
             chalk.red(e.status);
-          console.log(`  ${chalk.cyan(e.id.slice(0, 8))}  ${e.subject}  -> ${e.to_addresses.join(", ")}  [${statusColor}]  at ${e.scheduled_at}`);
+          lines.push(`  ${chalk.cyan(e.id.slice(0, 8))}  ${truncate(e.subject, 40)}  -> ${truncate(e.to_addresses.join(", "), 42)}  [${statusColor}]  at ${e.scheduled_at}`);
         }
-        console.log();
+        lines.push("");
+        lines.push(formatListHint({
+          shown: emails.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "scheduled email",
+          detailCommand: "filter with --status or adjust --limit/--offset",
+          verbose: opts.verbose || isCliVerboseOutput(),
+        }));
+        output(emails, lines.join("\n"));
       } catch (e) {
         handleError(e);
       }
@@ -265,22 +277,33 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .command("list")
     .description("List scheduled emails")
     .option("--status <status>", "Filter: pending|sent|cancelled|failed")
-    .option("--limit <n>", "Maximum scheduled emails to show", "50")
+    .option("--limit <n>", "Maximum scheduled emails to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of scheduled emails to skip", "0")
-    .action((opts: { status?: string; limit?: string; offset?: string }) => {
+    .option("--verbose", "Show expanded list hints")
+    .action((opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const status = opts.status as "pending" | "sent" | "cancelled" | "failed" | undefined;
+        const page = parseCliListPage(opts);
         const emails = listScheduledEmailSummaries({
           ...(status ? { status } : {}),
-          ...parseCliPage(opts),
+          ...page,
         });
-        if (emails.length === 0) { console.log(chalk.dim("No scheduled emails.")); return; }
-        console.log(chalk.bold("\nScheduled:"));
+        if (emails.length === 0) { output([], chalk.dim("No scheduled emails.")); return; }
+        const lines = [chalk.bold("\nScheduled:")];
         for (const e of emails) {
           const sc = e.status === "pending" ? chalk.blue(e.status) : e.status === "sent" ? chalk.green(e.status) : e.status === "cancelled" ? chalk.yellow(e.status) : chalk.red(e.status);
-          console.log(`  ${chalk.cyan(e.id.slice(0,8))}  ${e.scheduled_at}  [${sc}]  ${e.subject}  → ${e.to_addresses.join(", ")}`);
+          lines.push(`  ${chalk.cyan(e.id.slice(0,8))}  ${e.scheduled_at}  [${sc}]  ${truncate(e.subject, 40)}  -> ${truncate(e.to_addresses.join(", "), 42)}`);
         }
-        console.log();
+        lines.push("");
+        lines.push(formatListHint({
+          shown: emails.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "scheduled email",
+          detailCommand: "filter with --status or adjust --limit/--offset",
+          verbose: opts.verbose || isCliVerboseOutput(),
+        }));
+        output(emails, lines.join("\n"));
       } catch (e) { handleError(e); }
     });
 

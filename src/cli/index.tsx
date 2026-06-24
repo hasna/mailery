@@ -93,7 +93,7 @@ async function main(): Promise<void> {
     .option("-v, --verbose", "Show debug info")
     .hook("preAction", () => {
       const opts = program.opts();
-      configureCliRuntime({ json: !!opts.json });
+      configureCliRuntime({ json: !!opts.json, verbose: !!opts.verbose });
       setLogLevel(!!opts.quiet, !!opts.verbose);
     });
 

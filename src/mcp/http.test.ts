@@ -86,7 +86,7 @@ describe("emails-mcp HTTP transport", () => {
       }
 
       const resources = await client.listResources(undefined, { timeout: 10_000 });
-      for (const uri of ["emails://agent/context", "emails://status", "emails://domains", "emails://addresses", "emails://recent-errors"]) {
+      for (const uri of ["emails://agent/context", "emails://agent/context/full", "emails://status", "emails://domains", "emails://addresses", "emails://recent-errors"]) {
         expect(resources.resources.some((resource) => resource.uri === uri)).toBe(true);
       }
       const status = await client.readResource({ uri: "emails://status" }, { timeout: 10_000 });

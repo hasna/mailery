@@ -7,7 +7,7 @@ import {
   removeForwardingRule,
   setForwardingRuleEnabled,
 } from "../../db/forwarding.js";
-import { handleError, parseCliPage, resolveId } from "../utils.js";
+import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
 
 function formatRule(rule: ReturnType<typeof createForwardingRule>): string {
   const state = rule.enabled ? chalk.green("enabled") : chalk.dim("disabled");
@@ -51,18 +51,31 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
     .option("--source <email>", "Filter by source address")
     .option("--enabled", "Only enabled rules")
     .option("--disabled", "Only disabled rules")
-    .option("--limit <n>", "Maximum rules to show", "50")
+    .option("--limit <n>", "Maximum rules to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of rules to skip", "0")
-    .action((opts: { source?: string; enabled?: boolean; disabled?: boolean; limit?: string; offset?: string }) => {
+    .option("--verbose", "Show expanded list hints")
+    .action((opts: { source?: string; enabled?: boolean; disabled?: boolean; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
-        const page = parseCliPage(opts);
+        const page = parseCliListPage(opts);
         const enabled = opts.enabled ? true : opts.disabled ? false : undefined;
         const rules = listForwardingRules({ source_address: opts.source, enabled, ...page });
         if (rules.length === 0) {
           output([], chalk.dim("No forwarding rules configured."));
           return;
         }
-        output(rules, [chalk.bold("\nForwarding rules:"), ...rules.map(formatRule)].join("\n"));
+        output(rules, [
+          chalk.bold("\nForwarding rules:"),
+          ...rules.map(formatRule),
+          "",
+          formatListHint({
+            shown: rules.length,
+            limit: page.limit,
+            offset: page.offset,
+            noun: "rule",
+            detailCommand: "filter with --source, --enabled, or --disabled",
+            verbose: opts.verbose || isCliVerboseOutput(),
+          }),
+        ].join("\n"));
       } catch (e) {
         handleError(e);
       }

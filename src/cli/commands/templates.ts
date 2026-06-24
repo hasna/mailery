@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join as pathJoin } from "node:path";
 import { createTemplate, listTemplateSummaries, getTemplate, deleteTemplate, renderTemplate } from "../../db/templates.js";
 import { truncate } from "../../lib/format.js";
-import { handleError, parseCliPage } from "../utils.js";
+import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage } from "../utils.js";
 import { openLocalTarget } from "../../lib/local-actions.js";
 
 export function registerTemplateCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
@@ -46,11 +46,13 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
   templateCmd
     .command("list")
     .description("List all templates")
-    .option("--limit <n>", "Maximum templates to show", "50")
+    .option("--limit <n>", "Maximum templates to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of templates to skip", "0")
-    .action((opts: { limit?: string; offset?: string }) => {
+    .option("--verbose", "Show expanded list hints")
+    .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
-        const templates = listTemplateSummaries(undefined, parseCliPage(opts));
+        const page = parseCliListPage(opts);
+        const templates = listTemplateSummaries(undefined, page);
         if (templates.length === 0) {
           output([], chalk.dim("No templates configured. Use 'mailery template add' to create one."));
           return;
@@ -62,6 +64,14 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
           tplLines.push(`  ${chalk.cyan(t.id.slice(0, 8))}  ${t.name}  subject="${truncate(t.subject_template, 30)}"  [${hasHtml}] [${hasText}]`);
         }
         tplLines.push("");
+        tplLines.push(formatListHint({
+          shown: templates.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "template",
+          detailCommand: "use mailery template show <name> for body details",
+          verbose: opts.verbose || isCliVerboseOutput(),
+        }));
         output(templates, tplLines.join("\n"));
       } catch (e) {
         handleError(e);

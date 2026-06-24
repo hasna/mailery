@@ -1,7 +1,8 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { listContacts, suppressContact, unsuppressContact } from "../../db/contacts.js";
-import { handleError, parseCliPage } from "../utils.js";
+import { tableRow, truncate } from "../../lib/format.js";
+import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage } from "../utils.js";
 
 export function registerContactCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   // `contact` is the canonical command; `contacts` kept as alias for backwards compat
@@ -12,11 +13,12 @@ export function registerContactCommands(program: Command, output: (data: unknown
       .command("list")
       .description("List contacts")
       .option("--suppressed", "Show only suppressed contacts")
-      .option("--limit <n>", "Maximum contacts to show", "50")
+      .option("--limit <n>", "Maximum contacts to show (default 20 compact, 50 verbose/json)")
       .option("--offset <n>", "Number of contacts to skip", "0")
-      .action((opts: { suppressed?: boolean; limit?: string; offset?: string }) => {
+      .option("--verbose", "Show expanded contact rows")
+      .action((opts: { suppressed?: boolean; limit?: string; offset?: string; verbose?: boolean }) => {
         try {
-          const page = parseCliPage(opts);
+          const page = parseCliListPage(opts);
           const contacts = listContacts({
             ...(opts.suppressed !== undefined ? { suppressed: opts.suppressed } : {}),
             ...page,
@@ -25,13 +27,41 @@ export function registerContactCommands(program: Command, output: (data: unknown
             output([], chalk.dim("No contacts tracked yet."));
             return;
           }
+          const verbose = opts.verbose || isCliVerboseOutput();
           const lines: string[] = [chalk.bold("\nContacts:")];
-          for (const c of contacts) {
-            const status = c.suppressed ? chalk.red("suppressed") : chalk.green("active");
-            const name = c.name ? ` (${c.name})` : "";
-            lines.push(`  ${c.email}${name}  sent:${c.send_count} bounce:${c.bounce_count} complaint:${c.complaint_count}  [${status}]`);
+          if (verbose) {
+            for (const c of contacts) {
+              const status = c.suppressed ? chalk.red("suppressed") : chalk.green("active");
+              const name = c.name ? ` (${c.name})` : "";
+              lines.push(`  ${c.email}${name}  sent:${c.send_count} bounce:${c.bounce_count} complaint:${c.complaint_count}  [${status}]`);
+            }
+          } else {
+            lines.push(tableRow(
+              [chalk.bold("Email"), 36],
+              [chalk.bold("Sent"), 6],
+              [chalk.bold("Bounce"), 7],
+              [chalk.bold("Compl"), 6],
+              [chalk.bold("State"), 10],
+            ));
+            for (const c of contacts) {
+              lines.push(tableRow(
+                [truncate(c.email, 36), 36],
+                [String(c.send_count), 6],
+                [String(c.bounce_count), 7],
+                [String(c.complaint_count), 6],
+                [c.suppressed ? chalk.red("suppressed") : chalk.green("active"), 10],
+              ));
+            }
           }
           lines.push("");
+          lines.push(formatListHint({
+            shown: contacts.length,
+            limit: page.limit,
+            offset: page.offset,
+            noun: "contact",
+            detailCommand: "filter with --suppressed or adjust --limit/--offset",
+            verbose,
+          }));
           output(contacts, lines.join("\n"));
         } catch (e) { handleError(e); }
       });

@@ -2,7 +2,9 @@ import { beforeEach, afterEach, describe, expect, it, mock } from "bun:test";
 import { closeDatabase, resetDatabase } from "../db/database.js";
 import { createProvider } from "../db/providers.js";
 import {
+  configureCliRuntime,
   MAX_CLI_PAGE_LIMIT,
+  parseCliListPage,
   parseCliNonNegativeIntOption,
   parseCliPage,
   parseCliPositiveIntOption,
@@ -49,6 +51,27 @@ describe("cli/utils", () => {
     expect(parseCliPage({ limit: "-1", offset: "-2" })).toEqual({ limit: 50, offset: 0 });
     expect(parseCliPage({ limit: "100000", offset: "3" })).toEqual({ limit: MAX_CLI_PAGE_LIMIT, offset: 3 });
     expect(parseCliPage({}, 20, 30)).toEqual({ limit: 20, offset: 0 });
+  });
+
+  it("uses compact list pagination only when the user did not request a limit or verbose output", () => {
+    const originalArgv = process.argv;
+    try {
+      configureCliRuntime({ json: false, verbose: false });
+      process.argv = ["bun", "mailery", "address", "list"];
+      expect(parseCliListPage({})).toEqual({ limit: 20, offset: 0, compact: true });
+      expect(parseCliListPage({ limit: "50" })).toEqual({ limit: 20, offset: 0, compact: true });
+
+      process.argv = ["bun", "mailery", "address", "list", "--limit", "50"];
+      expect(parseCliListPage({ limit: "50" })).toEqual({ limit: 50, offset: 0, compact: false });
+
+      process.argv = ["bun", "mailery", "address", "list"];
+      expect(parseCliListPage({ verbose: true })).toEqual({ limit: 50, offset: 0, compact: false });
+      configureCliRuntime({ json: false, verbose: true });
+      expect(parseCliListPage({})).toEqual({ limit: 50, offset: 0, compact: false });
+    } finally {
+      configureCliRuntime({ json: false, verbose: false });
+      process.argv = originalArgv;
+    }
   });
 
   it("resolveId prints table-aware guidance when lookup fails", () => {

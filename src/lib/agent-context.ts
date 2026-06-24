@@ -435,6 +435,41 @@ export function formatEmailSystemStatus(status: EmailSystemStatus): string {
   return lines.join("\n");
 }
 
+export function formatAgentContextSummary(context: Record<string, unknown>): string {
+  const status = context["status"] as EmailSystemStatus | undefined;
+  if (!status) return JSON.stringify(context, null, 2);
+
+  const workflows = context["workflows"] as Record<string, unknown> | undefined;
+  const workflowNames = workflows ? Object.keys(workflows) : [];
+  const lines: string[] = [formatEmailSystemStatus(status)];
+  lines.push("");
+  lines.push("Agent context summary");
+  lines.push(`  Workflows: ${workflowNames.length ? workflowNames.join(", ") : "none"}`);
+  lines.push(`  Readiness: ${status.domains.send_ready}/${status.domains.total} send-ready domains, ${status.addresses.ready_to_receive}/${status.addresses.total} receive-ready addresses`);
+  if (status.domains.usable.length > 0) {
+    lines.push("  Usable domains:");
+    for (const domain of status.domains.usable.slice(0, 5)) {
+      lines.push(`    ${domain.domain} ${domain.state} send=${domain.send_ready ? "yes" : "no"} receive=${domain.receive_ready ? "yes" : "no"}`);
+    }
+    if (status.domains.usable.length > 5 || status.domains.usable_truncated) {
+      lines.push(`    ... use mailery domain status --limit ${status.domains.usable_limit} for the full readiness table`);
+    }
+  }
+  if (status.addresses.usable_from.length > 0) {
+    lines.push("  Usable from-addresses:");
+    for (const address of status.addresses.usable_from.slice(0, 5)) {
+      const owner = address.owner ? ` owner=${address.owner.name}` : "";
+      lines.push(`    ${address.email}${owner}`);
+    }
+    if (status.addresses.usable_from.length > 5 || status.addresses.usable_from_truncated) {
+      lines.push(`    ... use mailery address list --limit ${status.addresses.usable_from_limit} for more addresses`);
+    }
+  }
+  lines.push("");
+  lines.push("Details: use mailery agent context --verbose or mailery agent context --json for the full redacted snapshot.");
+  return lines.join("\n");
+}
+
 export function getAgentContext(db: Database = getDatabase()): Record<string, unknown> {
   const status = getEmailSystemStatus(db);
   return {

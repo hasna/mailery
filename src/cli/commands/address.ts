@@ -6,8 +6,8 @@ import { suspendAddress, activateAddress, setAddressQuota, countSendsTodayByAddr
 import { getProvider } from "../../db/providers.js";
 import { getDatabase } from "../../db/database.js";
 import { getAdapter } from "../../providers/index.js";
-import { colorDnsStatus } from "../../lib/format.js";
-import { confirmDestructiveAction, handleError, parseCliPage, resolveId } from "../utils.js";
+import { colorDnsStatus, tableRow, truncate } from "../../lib/format.js";
+import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
 import { getAddressProvisioning, setAddressProvisioning } from "../../db/provisioning.js";
 import {
   getAddressOwnershipDetail,
@@ -24,34 +24,65 @@ type ReceiveStrategy = "ses-s3" | "cf-routing" | "resend-webhook";
 export function registerAddressCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const addressCmd = program.command("address").description("Manage sender email addresses");
 
-  const listAddressesAction = (opts: { provider?: string; limit?: string; offset?: string }) => {
+  const listAddressesAction = (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
     try {
       const db = getDatabase();
       const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-      const addresses = listEnrichedAddresses(providerId, db, parseCliPage(opts));
+      const page = parseCliListPage(opts);
+      const addresses = listEnrichedAddresses(providerId, db, page);
       if (addresses.length === 0) {
         output([], chalk.dim("No addresses configured."));
         return;
       }
-      const quotaCounts = countSendsTodayByAddress(
-        addresses.filter((address) => address.daily_quota !== null).map((address) => address.email),
-        db,
-      );
+      const verbose = opts.verbose || isCliVerboseOutput();
       const lines: string[] = [chalk.bold("\nAddresses:")];
-      for (const a of addresses) {
-        const verified = a.verified ? colorDnsStatus("verified") : colorDnsStatus("pending");
-        const name = a.display_name ? ` (${a.display_name})` : "";
-        const status = a.status === "suspended" ? chalk.red("suspended") : chalk.green("active");
-        const quota = a.daily_quota !== null ? chalk.dim(`  quota ${quotaCounts.get(a.email.trim().toLowerCase()) ?? 0}/${a.daily_quota}/day`) : "";
-        const owner = a.owner
-          ? chalk.dim(`  owner ${a.owner.name} (${a.owner.type})`)
-          : chalk.dim("  owner none");
-        const administrator = a.administrator && (!a.owner || a.administrator.id !== a.owner.id)
-          ? chalk.dim(`  admin ${a.administrator.name}`)
-          : "";
-        lines.push(`  ${chalk.cyan(a.id.slice(0, 8))}  ${a.email}${name}  [${verified}] [${status}]${quota}${owner}${administrator}`);
+      if (verbose) {
+        const quotaCounts = countSendsTodayByAddress(
+          addresses.filter((address) => address.daily_quota !== null).map((address) => address.email),
+          db,
+        );
+        for (const a of addresses) {
+          const verified = a.verified ? colorDnsStatus("verified") : colorDnsStatus("pending");
+          const name = a.display_name ? ` (${a.display_name})` : "";
+          const status = a.status === "suspended" ? chalk.red("suspended") : chalk.green("active");
+          const quota = a.daily_quota !== null ? chalk.dim(`  quota ${quotaCounts.get(a.email.trim().toLowerCase()) ?? 0}/${a.daily_quota}/day`) : "";
+          const owner = a.owner
+            ? chalk.dim(`  owner ${a.owner.name} (${a.owner.type})`)
+            : chalk.dim("  owner none");
+          const administrator = a.administrator && (!a.owner || a.administrator.id !== a.owner.id)
+            ? chalk.dim(`  admin ${a.administrator.name}`)
+            : "";
+          lines.push(`  ${chalk.cyan(a.id.slice(0, 8))}  ${a.email}${name}  [${verified}] [${status}]${quota}${owner}${administrator}`);
+        }
+      } else {
+        lines.push(tableRow(
+          [chalk.bold("ID"), 8],
+          [chalk.bold("Email"), 36],
+          [chalk.bold("Provider"), 16],
+          [chalk.bold("State"), 10],
+          [chalk.bold("Owner"), 18],
+        ));
+        for (const a of addresses) {
+          const state = `${a.verified ? "verified" : "pending"}/${a.status}`;
+          const owner = a.owner ? `${a.owner.name}${a.administrator && a.administrator.id !== a.owner.id ? `:${a.administrator.name}` : ""}` : "-";
+          lines.push(tableRow(
+            [chalk.cyan(a.id.slice(0, 8)), 8],
+            [truncate(a.email, 36), 36],
+            [truncate(a.provider_name ?? a.provider_id.slice(0, 8), 16), 16],
+            [state, 10],
+            [truncate(owner, 18), 18],
+          ));
+        }
       }
       lines.push("");
+      lines.push(formatListHint({
+        shown: addresses.length,
+        limit: page.limit,
+        offset: page.offset,
+        noun: "address",
+        detailCommand: "use mailery address owner <email-or-id> for ownership details",
+        verbose,
+      }));
       output(addresses, lines.join("\n"));
     } catch (e) {
       handleError(e);
@@ -62,8 +93,9 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .command("addresses")
     .description("List sender email addresses (alias: mailery address list)")
     .option("--provider <id>", "Filter by provider ID")
-    .option("--limit <n>", "Maximum addresses to show", "50")
+    .option("--limit <n>", "Maximum addresses to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of addresses to skip", "0")
+    .option("--verbose", "Show expanded owner/admin/quota fields")
     .action(listAddressesAction);
 
   addressCmd
@@ -97,8 +129,9 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .command("list")
     .description("List sender addresses")
     .option("--provider <id>", "Filter by provider ID")
-    .option("--limit <n>", "Maximum addresses to show", "50")
+    .option("--limit <n>", "Maximum addresses to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of addresses to skip", "0")
+    .option("--verbose", "Show expanded owner/admin/quota fields")
     .action(listAddressesAction);
 
   addressCmd

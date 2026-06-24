@@ -6,7 +6,8 @@ import {
   enroll, unenroll, listEnrollments, countEnrollmentsByStatus,
   type EnrollmentStatus,
 } from "../../db/sequences.js";
-import { handleError, parseCliPage } from "../utils.js";
+import { truncate } from "../../lib/format.js";
+import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage } from "../utils.js";
 
 function parseEnrollmentStatus(value?: string): EnrollmentStatus | undefined {
   if (!value) return undefined;
@@ -34,23 +35,33 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
   sequenceCmd
     .command("list")
     .description("List all sequences")
-    .option("--limit <n>", "Maximum sequences to show", "50")
+    .option("--limit <n>", "Maximum sequences to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of sequences to skip", "0")
-    .action((opts: { limit?: string; offset?: string }) => {
+    .option("--verbose", "Show sequence descriptions inline")
+    .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
-        const page = parseCliPage(opts);
+        const page = parseCliListPage(opts);
         const seqs = listSequences(undefined, page);
         if (seqs.length === 0) {
           output([], chalk.dim("No sequences. Use 'mailery sequence create' to add one."));
           return;
         }
         const lines: string[] = [chalk.bold("\nSequences:")];
+        const verbose = opts.verbose || isCliVerboseOutput();
         for (const s of seqs) {
           const statusColor = s.status === "active" ? chalk.green(s.status) : chalk.yellow(s.status);
-          const desc = s.description ? chalk.dim(` — ${s.description}`) : "";
+          const desc = verbose && s.description ? chalk.dim(` — ${truncate(s.description, 80)}`) : "";
           lines.push(`  ${chalk.cyan(s.id.slice(0, 8))}  ${s.name}  [${statusColor}]${desc}`);
         }
         lines.push("");
+        lines.push(formatListHint({
+          shown: seqs.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "sequence",
+          detailCommand: "use mailery sequence show <name> for steps and enrollment counts",
+          verbose,
+        }));
         output(seqs, lines.join("\n"));
       } catch (e) {
         handleError(e);
@@ -183,13 +194,14 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .command("enrollments [name]")
     .description("List enrollments, optionally filtered by sequence")
     .option("--status <status>", "Filter by status: active|completed|cancelled")
-    .option("--limit <n>", "Maximum enrollments to show", "50")
+    .option("--limit <n>", "Maximum enrollments to show (default 20 compact, 50 verbose/json)")
     .option("--offset <n>", "Number of enrollments to skip", "0")
-    .action((name: string | undefined, opts: { status?: string; limit?: string; offset?: string }) => {
+    .option("--verbose", "Show expanded list hints")
+    .action((name: string | undefined, opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
         const seq = name ? getSequence(name) : null;
         if (name && !seq) handleError(new Error(`Sequence not found: ${name}`));
-        const page = parseCliPage(opts);
+        const page = parseCliListPage(opts);
         const status = parseEnrollmentStatus(opts.status);
         const enrollments = listEnrollments({
           ...(seq ? { sequence_id: seq.id } : {}),
@@ -209,6 +221,14 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
           lines.push(`  ${chalk.cyan(e.id.slice(0, 8))}  ${e.contact_email}${sequence}  [${statusColor}]  step ${e.current_step}${next}`);
         }
         lines.push("");
+        lines.push(formatListHint({
+          shown: enrollments.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "enrollment",
+          detailCommand: "filter with --status or pass a sequence name",
+          verbose: opts.verbose || isCliVerboseOutput(),
+        }));
         output(enrollments, lines.join("\n"));
       } catch (e) {
         handleError(e);

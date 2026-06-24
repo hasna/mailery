@@ -5,6 +5,7 @@ import { redactSecrets } from "../lib/redaction.js";
 
 const ID_ERROR_SUGGESTION_LIMIT = 5;
 let jsonOutput = false;
+let verboseOutput = false;
 let jsonConsolePatched = false;
 let structuredJsonEmitted = false;
 const jsonStdoutLines: string[] = [];
@@ -14,9 +15,11 @@ const originalConsoleError = console.error.bind(console);
 
 export const DEFAULT_CLI_PAGE_LIMIT = 50;
 export const MAX_CLI_PAGE_LIMIT = 1000;
+export const DEFAULT_COMPACT_CLI_PAGE_LIMIT = 20;
 
-export function configureCliRuntime(opts: { json?: boolean }): void {
+export function configureCliRuntime(opts: { json?: boolean; verbose?: boolean }): void {
   jsonOutput = !!opts.json;
+  verboseOutput = !!opts.verbose;
   if (jsonOutput) process.env["EMAILS_JSON_OUTPUT"] = "1";
   if (jsonOutput && !jsonConsolePatched) {
     jsonConsolePatched = true;
@@ -47,6 +50,19 @@ export function configureCliRuntime(opts: { json?: boolean }): void {
       originalConsoleLog(JSON.stringify(redactSecrets(payload), null, 2));
     });
   }
+}
+
+export function isCliJsonOutput(): boolean {
+  return jsonOutput;
+}
+
+export function isCliVerboseOutput(): boolean {
+  return verboseOutput;
+}
+
+export function hasCliOption(name: string): boolean {
+  const flag = `--${name}`;
+  return process.argv.some((arg) => arg === flag || arg.startsWith(`${flag}=`));
 }
 
 function formatJsonConsoleArg(arg: unknown): string {
@@ -193,6 +209,66 @@ export function parseCliPage(
     limit: parseCliPositiveIntOption(opts.limit, fallbackLimit, maxLimit),
     offset: parseCliNonNegativeIntOption(opts.offset, 0),
   };
+}
+
+export function parseCliListPage(
+  opts: { limit?: number | string; offset?: number | string; verbose?: boolean },
+  fallbackLimit = DEFAULT_CLI_PAGE_LIMIT,
+  maxLimit = MAX_CLI_PAGE_LIMIT,
+  compactLimit = DEFAULT_COMPACT_CLI_PAGE_LIMIT,
+): { limit: number; offset: number; compact: boolean } {
+  const rawLimit = opts.limit === undefined ? undefined : String(opts.limit);
+  const looksLikeDefaultLimit = rawLimit === undefined || rawLimit === String(fallbackLimit);
+  const compact = !jsonOutput && !verboseOutput && !opts.verbose && !hasCliOption("limit") && looksLikeDefaultLimit;
+  const page = parseCliPage(
+    compact ? { ...opts, limit: String(Math.min(compactLimit, fallbackLimit)) } : opts,
+    fallbackLimit,
+    maxLimit,
+  );
+  return { ...page, compact };
+}
+
+export function stripAnsi(value: string): string {
+  return value.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+export function truncateCliText(value: unknown, max = 96): string {
+  const raw = String(value ?? "");
+  const singleLine = raw.replace(/\s+/g, " ").trim();
+  if (singleLine.length <= max) return singleLine;
+  return `${singleLine.slice(0, Math.max(0, max - 3))}...`;
+}
+
+export function summarizeCliValue(value: unknown, max = 96): string {
+  if (value === null) return "null";
+  if (value === undefined) return "unset";
+  if (typeof value === "string") return JSON.stringify(truncateCliText(value, max - 2));
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return `[${value.length} item${value.length === 1 ? "" : "s"}]`;
+  if (typeof value === "object") return `{${Object.keys(value as Record<string, unknown>).length} key${Object.keys(value as Record<string, unknown>).length === 1 ? "" : "s"}}`;
+  return truncateCliText(value, max);
+}
+
+export function formatListHint(opts: {
+  shown: number;
+  limit: number;
+  offset?: number;
+  noun: string;
+  pluralNoun?: string;
+  detailCommand?: string;
+  verbose?: boolean;
+}): string {
+  const offset = opts.offset ?? 0;
+  const pluralNoun = opts.pluralNoun
+    ?? (opts.noun === "address" ? "addresses" : opts.noun === "alias" ? "aliases" : `${opts.noun}s`);
+  const noun = opts.shown === 1 ? opts.noun : pluralNoun;
+  const parts: string[] = [`Showing ${opts.shown} ${noun}${offset > 0 ? ` from offset ${offset}` : ""}.`];
+  const hints: string[] = [];
+  if (!opts.verbose) hints.push("use --verbose for expanded rows");
+  if (opts.detailCommand) hints.push(opts.detailCommand);
+  if (opts.shown >= opts.limit) hints.push(`page with --offset ${offset + opts.shown} or set --limit`);
+  if (hints.length > 0) parts.push(hints.join("; "));
+  return chalk.dim(parts.join(" "));
 }
 
 export function padRight(str: string, len: number): string {

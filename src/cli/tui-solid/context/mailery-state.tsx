@@ -152,17 +152,18 @@ function loadAddresses(search?: string): InboxAddressChoice[] {
 
 function createMaileryStore(initialMailbox?: Mailbox) {
   const settings = getSettings();
-  const initialAddresses = loadAddresses();
-  const defaultAddress = settings.defaultAddress
-    ? initialAddresses.find((item) => item.address?.toLowerCase() === settings.defaultAddress?.toLowerCase())
-    : null;
+  // Resolve only the persisted default address at startup (one indexed lookup) instead of
+  // scanning the whole observed-address list (which can take >200ms on a large mailbox) —
+  // the full list loads in the post-mount reload, so first paint isn't blocked on it.
+  const defaultChoice = settings.defaultAddress ? addressChoiceByAddress(settings.defaultAddress) : ALL_ADDRESSES;
+  const initialAddresses = defaultChoice.id === ALL_ADDRESSES.id ? [ALL_ADDRESSES] : [ALL_ADDRESSES, defaultChoice];
   const [state, setState] = createStore<MaileryState>({
     mailbox: clampMailbox(initialMailbox ?? settings.defaultMailbox),
     route: "mailbox",
     messages: [],
     counts: emptyCounts(),
     addresses: initialAddresses,
-    selectedAddressId: defaultAddress?.id ?? ALL_ADDRESSES.id,
+    selectedAddressId: defaultChoice.id,
     selectedMessageId: null,
     page: 0,
     hasMore: false,
@@ -228,22 +229,49 @@ function createMaileryStore(initialMailbox?: Mailbox) {
     }
   };
 
+  // Per-address folder counts and label summaries are the expensive part of a reload on a
+  // large mailbox (e.g. mailboxCounts() over an address with 80k+ messages can take ~200ms),
+  // but they are only secondary sidebar metadata. Compute them OFF the critical path so the
+  // message list paints immediately; only the latest scheduled compute wins.
+  let sidebarMetaTimer: ReturnType<typeof setTimeout> | undefined;
+  let addressSearchTimer: ReturnType<typeof setTimeout> | undefined;
+  let labelSearchTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleSidebarMeta = (source: ReturnType<typeof sourceForAddress>, addressSearch?: string) => {
+    if (sidebarMetaTimer) clearTimeout(sidebarMetaTimer);
+    sidebarMetaTimer = setTimeout(() => {
+      sidebarMetaTimer = undefined;
+      try {
+        // Load the full address list here (off the critical path): the observed-address scan
+        // is the cold-start cost (~200ms on a large mailbox), and the message list doesn't
+        // need it — only the picker + counts do.
+        const loaded = loadAddresses(addressSearch);
+        const selected = resolveAddressChoice(state.selectedAddressId, [...loaded, ...state.addresses]);
+        // Keep the selected inbox in the rendered picker list even when it sits beyond the
+        // list cap, so it shows its marker and the inbox stays filtered to it.
+        const addresses = selected.id === ALL_ADDRESSES.id || loaded.some((item) => item.id === selected.id)
+          ? loaded
+          : loaded[0]?.id === ALL_ADDRESSES.id
+            ? [loaded[0], selected, ...loaded.slice(1)]
+            : [selected, ...loaded];
+        setState({
+          addresses,
+          counts: mailboxCounts({ source }),
+          labels: listLabelSummaries({ limit: 80, search: state.labelSearch || undefined }),
+        });
+      } catch (error) {
+        setState("lastError", error instanceof Error ? error.message : String(error));
+      }
+    }, 0);
+  };
+
   const reload = (options?: { preserveSelection?: boolean; addressSearch?: string }) => {
     const preserveSelection = options?.preserveSelection ?? true;
     setState("loading", true);
     try {
-      const loaded = loadAddresses(options?.addressSearch);
-      // Resolve against the freshly-loaded list AND the current in-memory list (which still
-      // holds the just-clicked address right after setAddress), then the DB — never fall
-      // back to "All inboxes" for a real selection.
-      const selected = resolveAddressChoice(state.selectedAddressId, [...loaded, ...state.addresses]);
-      // Keep the selected inbox in the rendered picker list even when it sits beyond the
-      // list cap, so it shows its marker and the inbox stays filtered to it.
-      const addresses = selected.id === ALL_ADDRESSES.id || loaded.some((item) => item.id === selected.id)
-        ? loaded
-        : loaded[0]?.id === ALL_ADDRESSES.id
-          ? [loaded[0], selected, ...loaded.slice(1)]
-          : [selected, ...loaded];
+      // Resolve the selected inbox cheaply (current in-memory list → DB) WITHOUT scanning the
+      // full address list, so the message list — what the user is waiting for — paints first.
+      // The full address list, counts, and labels load off the critical path below.
+      const selected = resolveAddressChoice(state.selectedAddressId, state.addresses);
       const source = sourceForAddress(selected);
       const messages = listMailbox(state.mailbox, {
         limit: PAGE_SIZE + 1,
@@ -258,15 +286,13 @@ function createMaileryStore(initialMailbox?: Mailbox) {
         ? state.selectedMessageId
         : visible[0]?.id ?? null;
       setState({
-        addresses,
         selectedAddressId: selected.id,
-        counts: mailboxCounts({ source }),
         messages: visible,
         hasMore: messages.length > PAGE_SIZE,
         selectedMessageId: selectedId,
-        labels: listLabelSummaries({ limit: 80, search: state.labelSearch || undefined }),
         lastError: null,
       });
+      scheduleSidebarMeta(source, options?.addressSearch);
     } catch (error) {
       setState("lastError", error instanceof Error ? error.message : String(error));
     } finally {
@@ -468,11 +494,22 @@ function createMaileryStore(initialMailbox?: Mailbox) {
     },
     setAddressSearch(value: string) {
       setState("addressSearch", value);
-      setState("addresses", loadAddresses(value));
+      // Keep typing responsive: the dialog filters the already-loaded list client-side
+      // instantly; debounce the DB re-query (a recipient scan that can take >300ms on a
+      // large mailbox) so it runs once after the user pauses.
+      if (addressSearchTimer) clearTimeout(addressSearchTimer);
+      addressSearchTimer = setTimeout(() => {
+        addressSearchTimer = undefined;
+        setState("addresses", loadAddresses(value));
+      }, 160);
     },
     setLabelSearch(value: string) {
       setState("labelSearch", value);
-      setState("labels", listLabelSummaries({ limit: 80, search: value || undefined }));
+      if (labelSearchTimer) clearTimeout(labelSearchTimer);
+      labelSearchTimer = setTimeout(() => {
+        labelSearchTimer = undefined;
+        setState("labels", listLabelSummaries({ limit: 80, search: value || undefined }));
+      }, 160);
     },
     setLinkIndex(index: number) {
       setState("linkIndex", Math.max(0, Math.min(currentLinks().length - 1, index)));
@@ -550,6 +587,9 @@ function createMaileryStore(initialMailbox?: Mailbox) {
       clearInterval(clock);
       clearInterval(refresh);
       clearInterval(pull);
+      if (sidebarMetaTimer) clearTimeout(sidebarMetaTimer);
+      if (addressSearchTimer) clearTimeout(addressSearchTimer);
+      if (labelSearchTimer) clearTimeout(labelSearchTimer);
     });
   });
 

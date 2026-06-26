@@ -32,6 +32,7 @@ export const allCommandModules = [
   "status",
   "daemon",
   "cloud",
+  "browserplan",
 ] as const;
 
 export type CommandModule = typeof allCommandModules[number];
@@ -95,6 +96,7 @@ export const knownCommandNames = new Set([
   "daemon",
   "logs",
   "cloud",
+  "browserplan",
 ]);
 
 export function routeRootPromptArgs(args: string[]): string[] {
@@ -192,6 +194,7 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "daemon":
     case "logs": return ["daemon"];
     case "cloud": return ["cloud"];
+    case "browserplan": return ["browserplan"];
     default: return allCommandModules;
   }
 }

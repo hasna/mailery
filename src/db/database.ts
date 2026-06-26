@@ -752,6 +752,8 @@ const MIGRATIONS = [
   );
   CREATE INDEX IF NOT EXISTS idx_owners_type ON owners(type);
   CREATE INDEX IF NOT EXISTS idx_owners_name ON owners(name);
+  CREATE INDEX IF NOT EXISTS idx_owners_external_id ON owners(external_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_external_id_unique ON owners(external_id) WHERE external_id IS NOT NULL;
   ALTER TABLE addresses ADD COLUMN owner_id TEXT REFERENCES owners(id) ON DELETE SET NULL;
   ALTER TABLE addresses ADD COLUMN administrator_id TEXT REFERENCES owners(id) ON DELETE SET NULL;
   CREATE INDEX IF NOT EXISTS idx_addresses_owner ON addresses(owner_id);
@@ -1143,6 +1145,8 @@ function ensureSchema(db: Database): void {
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_owners_type ON owners(type)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_owners_external_id ON owners(external_id)");
+  ensureProvTable("CREATE UNIQUE INDEX IF NOT EXISTS idx_owners_external_id_unique ON owners(external_id) WHERE external_id IS NOT NULL");
   ensureColumn("ALTER TABLE addresses ADD COLUMN owner_id TEXT REFERENCES owners(id) ON DELETE SET NULL");
   ensureColumn("ALTER TABLE addresses ADD COLUMN administrator_id TEXT REFERENCES owners(id) ON DELETE SET NULL");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_addresses_owner ON addresses(owner_id)");

@@ -103,6 +103,7 @@ export type { GroupMember, GroupMemberSummary } from "./db/groups.js";
 
 export {
   createOwner, getOwner, getOwnerByName, listOwners,
+  getOwnerByExternalId, getOwnerByContactEmail,
   assignAddressOwner, transferAddressOwner, unassignAddressOwner,
   getAddressOwnership, listAddressOwnershipEvents, getAddressOwnershipEvent,
   listAddressesByOwner,
@@ -186,6 +187,35 @@ export type {
   GenerateEmailDigestOptions,
   LoadEmailDigestOptions,
 } from "./lib/email-digest.js";
+export {
+  assertBrowserPlanAddressCapacity,
+  defaultBrowserPlanIdentityStorePath,
+  deriveBrowserPlanIdentityFromEmail,
+  detectedBrowserPlanMachineId,
+  listBrowserPlanAddresses,
+  loadBrowserPlanIdentityIndex,
+  reserveBrowserPlanAddress,
+  resolveBrowserPlanMachineId,
+  validateBrowserPlanAddress,
+  BrowserPlanCapacityError,
+  BrowserPlanConflictError,
+  BrowserPlanInputError,
+  BrowserPlanMachineMismatchError,
+  BrowserPlanNotFoundError,
+} from "./lib/browserplan.js";
+export type {
+  BrowserPlanAddressListResult,
+  BrowserPlanAddressProfile,
+  BrowserPlanIdentityRecord,
+  BrowserPlanIdentityStore,
+  BrowserPlanIdentitySummary,
+  BrowserPlanListOptions,
+  BrowserPlanReservationResult,
+  BrowserPlanReserveIdentityInput,
+  BrowserPlanReserveOptions,
+  BrowserPlanValidationResult,
+  BrowserPlanValidateOptions,
+} from "./lib/browserplan.js";
 export {
   EMAIL_AGENT_DEFINITIONS,
   ensureEmailAgentSettings,

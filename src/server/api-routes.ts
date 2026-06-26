@@ -48,6 +48,7 @@ export function routeModulesFor(path: string): readonly RouteKey[] {
       "/api/events",
       "/api/stats",
       "/api/sandbox",
+      "/api/browserplan",
     ])
   ) {
     return ["core"];

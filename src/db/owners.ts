@@ -54,12 +54,16 @@ export function createOwner(input: CreateOwnerInput, db?: Database): Owner {
     throw new Error(`Invalid owner type '${input.type}' (must be 'human' or 'agent')`);
   }
   const d = db || getDatabase();
+  const externalId = input.external_id?.trim();
+  if (externalId && getOwnerByExternalId(externalId, d)) {
+    throw new Error(`Owner external_id already exists: ${externalId}`);
+  }
   const id = uuid();
   const ts = now();
   d.run(
     `INSERT INTO owners (id, type, name, contact_email, external_id, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [id, input.type, input.name, input.contact_email ?? null, input.external_id ?? null, ts, ts],
+    [id, input.type, input.name, input.contact_email ?? null, externalId ?? null, ts, ts],
   );
   return getOwner(id, d)!;
 }
@@ -72,6 +76,22 @@ export function getOwner(id: string, db?: Database): Owner | null {
 export function getOwnerByName(name: string, db?: Database): Owner | null {
   const d = db || getDatabase();
   return (d.query("SELECT * FROM owners WHERE name = ? ORDER BY created_at ASC").get(name) as Owner | null) ?? null;
+}
+
+export function getOwnerByExternalId(externalId: string, db?: Database): Owner | null {
+  const normalized = externalId.trim();
+  if (!normalized) return null;
+  const d = db || getDatabase();
+  return (d.query("SELECT * FROM owners WHERE external_id = ? ORDER BY created_at ASC").get(normalized) as Owner | null) ?? null;
+}
+
+export function getOwnerByContactEmail(email: string, db?: Database): Owner | null {
+  const normalized = email.trim().toLowerCase();
+  if (!normalized) return null;
+  const d = db || getDatabase();
+  return (d
+    .query("SELECT * FROM owners WHERE LOWER(contact_email) = ? ORDER BY created_at ASC")
+    .get(normalized) as Owner | null) ?? null;
 }
 
 export function listOwners(type?: OwnerType, db?: Database, opts?: ListOwnerOptions): Owner[] {

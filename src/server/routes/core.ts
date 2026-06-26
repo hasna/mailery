@@ -9,9 +9,88 @@ import { getEvent, listEventSummaries } from '../../db/events.js';
 import { getAdapter } from '../../providers/index.js';
 import { getLocalStats } from '../../lib/stats.js';
 import { listEnrichedAddresses } from '../../lib/address-ownership.js';
+import {
+  BrowserPlanCapacityError,
+  BrowserPlanConflictError,
+  BrowserPlanInputError,
+  BrowserPlanMachineMismatchError,
+  BrowserPlanNotFoundError,
+  listBrowserPlanAddresses,
+  reserveBrowserPlanAddress,
+  validateBrowserPlanAddress,
+} from '../../lib/browserplan.js';
 import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, sanitizeProvider, checkRateLimit, tooManyRequests, queryInteger, optionalQueryInteger, queryPage } from './helpers.js';
 
 export async function handle(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
+function queryBoolean(key: string): boolean {
+  const value = url.searchParams.get(key);
+  if (value === null) return false;
+  return ["", "1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+function browserPlanError(e: unknown): Response {
+  if (e instanceof BrowserPlanInputError) return json({ error: e.message }, 400);
+  if (e instanceof BrowserPlanNotFoundError) return json({ error: e.message }, 404);
+  if (e instanceof BrowserPlanCapacityError) return json({ error: e.message }, 422);
+  if (e instanceof BrowserPlanConflictError || e instanceof BrowserPlanMachineMismatchError) return json({ error: e.message }, 409);
+  return internalError(e);
+}
+
+// GET /api/browserplan/addresses
+if ((path === "/api/browserplan/addresses" || path === "/api/browserplan/coverage") && method === "GET") {
+  try {
+    return json(listBrowserPlanAddresses({
+      machineId: url.searchParams.get("machine_id") ?? url.searchParams.get("machine") ?? undefined,
+      allowRequestedMachineId: false,
+      target: queryInteger(url, "target", 8, { min: 1, max: 1000 }),
+      limit: queryInteger(url, "limit", 100, { min: 1, max: 1000 }),
+      offset: queryInteger(url, "offset", 0, { min: 0 }),
+      includeUnready: queryBoolean("include_unready"),
+    }));
+  } catch (e) { return browserPlanError(e); }
+}
+
+// GET /api/browserplan/validate?email=...
+if (path === "/api/browserplan/validate" && method === "GET") {
+  try {
+    const email = url.searchParams.get("email")?.trim();
+    if (!email) return badRequest("email is required");
+    return json(validateBrowserPlanAddress({
+      machineId: url.searchParams.get("machine_id") ?? url.searchParams.get("machine") ?? undefined,
+      allowRequestedMachineId: false,
+      email,
+    }));
+  } catch (e) { return browserPlanError(e); }
+}
+
+// POST /api/browserplan/reservations
+if ((path === "/api/browserplan/reservations" || path === "/api/browserplan/reserve") && method === "POST") {
+  try {
+    const body = await parseBody(req) as Record<string, unknown>;
+    const identity = body.identity as Record<string, unknown> | undefined;
+    if (!identity) return badRequest("identity is required");
+    const identityId = typeof identity.id === "string" ? identity.id : undefined;
+    const identifier = typeof identity.identifier === "string" ? identity.identifier : undefined;
+    if (!identityId && !identifier) return badRequest("identity.id or identity.identifier is required");
+    return json(reserveBrowserPlanAddress({
+      machineId: typeof body.machine_id === "string" ? body.machine_id : typeof body.machine === "string" ? body.machine : undefined,
+      allowRequestedMachineId: false,
+      addressId: typeof body.address_id === "string" ? body.address_id : undefined,
+      email: typeof body.email === "string" ? body.email : undefined,
+      identity: {
+        id: identityId,
+        identifier,
+        name: typeof identity.name === "string" ? identity.name : undefined,
+        displayName: typeof identity.displayName === "string" ? identity.displayName : typeof identity.display_name === "string" ? identity.display_name : undefined,
+        email: typeof identity.email === "string" ? identity.email : undefined,
+        kind: typeof identity.kind === "string" ? identity.kind : undefined,
+      },
+      administratorOwnerRef: typeof body.administrator_owner_ref === "string" ? body.administrator_owner_ref : undefined,
+      dryRun: body.dry_run === true,
+    }), body.dry_run === true ? 200 : 201);
+  } catch (e) { return browserPlanError(e); }
+}
+
 // GET /api/providers
 if (path === "/api/providers" && method === "GET") {
   try {

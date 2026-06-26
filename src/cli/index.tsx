@@ -48,6 +48,7 @@ async function loadCommandModule(module: CommandModule): Promise<RegisterFn> {
     case "status": return (await import("./commands/status.js")).registerStatusCommands;
     case "daemon": return (await import("./commands/daemon.js")).registerDaemonCommands;
     case "cloud": return (await import("./commands/cloud.js")).registerCloudCommands;
+    case "browserplan": return (await import("./commands/browserplan.js")).registerBrowserPlanCommands;
   }
 }
 

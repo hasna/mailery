@@ -604,10 +604,11 @@ function RawMessageDialog(props: { close: () => void }) {
 }
 
 function inboxDetail(address: { provider?: string; receiveStatus?: string; configured: boolean; observed: boolean }): string {
+  // Keep the picker detail SHORT so it never steals row width from the email address
+  // itself (long addresses were getting clipped/garbled by a long provider string).
+  // The provider lives in the Domains view; here only the readiness status matters.
   if (!address.configured) return address.observed ? "observed" : "";
-  const parts = [address.provider, formatReceiveStatus(address.receiveStatus)];
-  if (address.observed) parts.push("observed");
-  return parts.filter((part): part is string => !!part).join(" · ");
+  return formatReceiveStatus(address.receiveStatus) ?? "configured";
 }
 
 function formatReceiveStatus(value: string | undefined): string | undefined {

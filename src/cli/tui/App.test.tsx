@@ -321,7 +321,9 @@ describe("Mailery Solid TUI", () => {
     await clickText("All inboxes");
     expect(frame()).toContain("Inboxes");
     expect(frame()).toContain("ops@example.com");
-    expect(frame()).toContain("sandbox");
+    // The picker detail is a short status token (the long provider string was clipping
+    // the email address); the provider now lives in the Domains view.
+    expect(frame()).toContain("configured");
     expect(frame()).not.toContain("Profiles");
     await key("escape");
 

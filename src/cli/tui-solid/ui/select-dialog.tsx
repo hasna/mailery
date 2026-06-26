@@ -90,7 +90,10 @@ export function SelectDialog(props: {
                   <text fg={isActive() ? selectedForeground(theme, theme.primary) : item.markerColor ?? theme.textMuted}>
                     {item.marker ?? " "}
                   </text>
-                  <box flexGrow={1}>
+                  {/* Title takes priority and yields (flexShrink) so it clips cleanly;
+                      the detail keeps its natural width (flexShrink={0}) and can never
+                      overlap or clip the title text. */}
+                  <box flexGrow={1} flexShrink={1}>
                     <text
                       fg={isActive() ? selectedForeground(theme, theme.primary) : item.disabled ? theme.textFaint : theme.text}
                       attributes={isActive() ? TextAttributes.BOLD : 0}
@@ -99,7 +102,9 @@ export function SelectDialog(props: {
                     </text>
                   </box>
                   {item.detail ? (
-                    <text fg={isActive() ? selectedForeground(theme, theme.primary) : theme.textMuted}>{item.detail}</text>
+                    <box flexShrink={0}>
+                      <text fg={isActive() ? selectedForeground(theme, theme.primary) : theme.textMuted}>{item.detail}</text>
+                    </box>
                   ) : null}
                 </box>
               </Row>

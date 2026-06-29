@@ -279,14 +279,34 @@ Alternatively, point an SNS HTTP subscription at `POST /webhook/ses-inbound` on
 
 ## Storage Sync (PostgreSQL)
 
-Canonical production storage is the `emails` database on
-`hasna-xyz-infra-apps-prod-postgres`. The runtime secret lives at
+Mailery is local-first. The public OSS default is local SQLite and files under
+`~/.hasna/emails/`, with no remote dependency. Remote storage is opt-in, and
+uses the `emails` slug: use `HASNA_EMAILS_*` env vars, not `HASNA_MAILERY_*`.
+
+Canonical Hasna production storage is the `emails` database on
+`hasna-xyz-infra-apps-prod-postgres`. The runtime secret path is
 `hasna/xyz/opensource/emails/prod/rds`; load it into the canonical env var
-without printing or committing the connection string.
+without printing or committing the connection string. Self-hosted installs can
+use the fallback `EMAILS_DATABASE_URL`.
+
+Storage modes:
+
+- `local` - all reads/writes stay in local SQLite/files.
+- `hybrid` - local remains the fast/offline store, while explicit
+  `mailery storage push`, `mailery storage pull`, or `mailery storage sync --force`
+  mirrors state to remote PostgreSQL.
+- `remote` - reserved for remote source-of-truth operation. Today the CLI
+  allows `storage` commands in this mode, but rejects normal runtime commands
+  until a real remote adapter exists.
 
 ```bash
 # Configure RDS/PostgreSQL
 export HASNA_EMAILS_DATABASE_URL="postgres://..."
+# Optional self-hosted fallback:
+# export EMAILS_DATABASE_URL="postgres://..."
+
+# Optional explicit mode; default is local without a DB URL, hybrid with one.
+export HASNA_EMAILS_STORAGE_MODE=hybrid
 
 # Check config and sync history
 mailery storage status

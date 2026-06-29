@@ -8,6 +8,7 @@ const PRIVATE_CLOUD_PATTERNS = [
   /@hasna\/wallets\b/,
   new RegExp(`\\b${["open", "cloud"].join("-")}\\b`),
   new RegExp(`\\b${["cloud", "mcp"].join("-")}\\b`),
+  new RegExp(`\\b${["cloud", "tool"].join("-")}\\b`),
   new RegExp(`\\b${["register", "Cloud", "Commands"].join("")}\\b`),
   new RegExp(`${["HASNA", "CLOUD", ""].join("_")}`),
   new RegExp(`${["HASNA", "RDS"].join("_")}`),

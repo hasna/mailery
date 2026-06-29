@@ -10,6 +10,8 @@ export const STORAGE_TABLES = [
   "addresses",
   "emails",
   "inbound_emails",
+  "inbound_recipients",
+  "inbound_labels",
   "events",
   "templates",
   "contacts",
@@ -30,6 +32,9 @@ export const STORAGE_TABLES = [
   "address_ownership_events",
   "provisioning_events",
   "email_triage",
+  "email_agent_settings",
+  "email_agent_runs",
+  "email_digests",
   "feedback",
 ] as const;
 export const EMAILS_STORAGE_TABLES = STORAGE_TABLES;
@@ -45,6 +50,8 @@ const PRIMARY_KEYS: Record<StorageTable, string[]> = {
   addresses: ["id"],
   emails: ["id"],
   inbound_emails: ["id"],
+  inbound_recipients: ["inbound_email_id", "address"],
+  inbound_labels: ["inbound_email_id", "label"],
   events: ["id"],
   templates: ["id"],
   contacts: ["id"],
@@ -65,6 +72,9 @@ const PRIMARY_KEYS: Record<StorageTable, string[]> = {
   address_ownership_events: ["id"],
   provisioning_events: ["id"],
   email_triage: ["id"],
+  email_agent_settings: ["agent_key"],
+  email_agent_runs: ["id"],
+  email_digests: ["id"],
   feedback: ["id"],
 };
 
@@ -84,6 +94,12 @@ export interface SyncMeta {
 export interface StorageSyncOptions {
   tables?: string[];
   batchSize?: number;
+  force?: boolean;
+}
+
+export interface StorageSyncHooks {
+  pull?: (options?: StorageSyncOptions) => Promise<SyncResult[]>;
+  push?: (options?: StorageSyncOptions) => Promise<SyncResult[]>;
 }
 
 export type StorageMode = "local" | "hybrid" | "remote";
@@ -208,18 +224,65 @@ export async function storagePull(options?: StorageSyncOptions): Promise<SyncRes
   const db = getDatabase();
   try {
     await runStorageMigrations(remote);
-    const results: SyncResult[] = [];
-    for (const table of parseStorageTables(options?.tables)) results.push(await pullTable(remote, db, table, { batchSize: options?.batchSize }));
-    recordSyncMeta(db, "pull", results);
-    return results;
+    return await pullTablesFromRemote(remote, db, options);
   } finally {
     await remote.close();
   }
 }
 
-export async function storageSync(options?: StorageSyncOptions): Promise<{ pull: SyncResult[]; push: SyncResult[] }> {
-  const pull = await storagePull(options);
-  const push = await storagePush(options);
+let localStorageTransactionCounter = 0;
+
+function beginLocalStorageTransaction(db: Database): string {
+  const savepoint = `emails_storage_sync_${++localStorageTransactionCounter}`;
+  db.exec(`SAVEPOINT ${quoteIdent(savepoint)}`);
+  return savepoint;
+}
+
+function releaseLocalStorageTransaction(db: Database, savepoint: string): void {
+  db.exec(`RELEASE ${quoteIdent(savepoint)}`);
+}
+
+function rollbackLocalStorageTransaction(db: Database, savepoint: string): void {
+  try {
+    db.exec(`ROLLBACK TO ${quoteIdent(savepoint)}`);
+  } finally {
+    db.exec(`RELEASE ${quoteIdent(savepoint)}`);
+  }
+}
+
+export async function pullTablesFromRemote(remote: PgAdapterAsync, db: Database, options?: StorageSyncOptions): Promise<SyncResult[]> {
+  const savepoint = beginLocalStorageTransaction(db);
+  let finished = false;
+  try {
+    const results: SyncResult[] = [];
+    for (const table of parseStorageTables(options?.tables)) {
+      results.push(await pullTable(remote, db, table, { batchSize: options?.batchSize }));
+    }
+    const failures = results.filter((result) => result.errors.length > 0);
+    if (failures.length > 0) {
+      rollbackLocalStorageTransaction(db, savepoint);
+      finished = true;
+      return results;
+    }
+    recordSyncMeta(db, "pull", results);
+    releaseLocalStorageTransaction(db, savepoint);
+    finished = true;
+    return results;
+  } finally {
+    if (!finished) rollbackLocalStorageTransaction(db, savepoint);
+  }
+}
+
+export async function storageSync(options?: StorageSyncOptions, hooks: StorageSyncHooks = {}): Promise<{ pull: SyncResult[]; push: SyncResult[] }> {
+  if (!options?.force) {
+    throw new Error("storage sync runs pull then push and can overwrite local rows with remote values. Re-run with --force after reviewing conflicts, or run storage pull/storage push explicitly.");
+  }
+  const pull = await (hooks.pull ?? storagePull)(options);
+  const failures = pull.filter((result) => result.errors.length > 0);
+  if (failures.length > 0) {
+    throw new Error(`Storage sync stopped after pull errors; push was not run. ${failures.map((result) => `${result.table}: ${result.errors.join("; ")}`).join(" | ")}`);
+  }
+  const push = await (hooks.push ?? storagePush)(options);
   return { pull, push };
 }
 

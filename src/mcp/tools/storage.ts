@@ -5,20 +5,24 @@ function json(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
 }
 
-function errorResult(error: unknown) {
-  return {
-    content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }],
-    isError: true as const,
-  };
+type SyncResult = { table: string; errors?: string[] };
+
+function assertNoSyncErrors(results: SyncResult[]): void {
+  const failures = results.filter((result) => (result.errors?.length ?? 0) > 0);
+  if (failures.length === 0) return;
+  throw new Error(`Storage sync failed for ${failures.map((result) => `${result.table}: ${(result.errors ?? []).join("; ")}`).join(" | ")}`);
+}
+
+function assertNoBidirectionalSyncErrors(result: { pull: SyncResult[]; push: SyncResult[] }): void {
+  assertNoSyncErrors(result.pull);
+  assertNoSyncErrors(result.push);
 }
 
 export function registerEmailStorageTools(server: McpServer): void {
-  server.registerTool(
+  server.tool(
     "storage_status",
+    "Show Mailery remote storage sync configuration and local sync history.",
     {
-      title: "Storage Status",
-      description: "Show Mailery remote storage sync configuration and local sync history.",
-      inputSchema: {},
     },
     async () => {
       const { getStorageStatus } = await import("../../db/storage-sync.js");
@@ -26,63 +30,49 @@ export function registerEmailStorageTools(server: McpServer): void {
     }
   );
 
-  server.registerTool(
+  server.tool(
     "storage_push",
+    "Push local Mailery data to remote PostgreSQL storage.",
     {
-      title: "Storage Push",
-      description: "Push local Mailery data to remote PostgreSQL storage.",
-      inputSchema: {
-        tables: z.array(z.string()).optional(),
-        batch_size: z.number().int().positive().max(5000).optional().describe("Rows to read per table batch"),
-      },
+      tables: z.array(z.string()).optional(),
+      batch_size: z.number().int().positive().max(5000).optional().describe("Rows to read per table batch"),
     },
     async (args) => {
-      try {
-        const { storagePush } = await import("../../db/storage-sync.js");
-        return json(await storagePush({ tables: args.tables, batchSize: args.batch_size }));
-      } catch (error) {
-        return errorResult(error);
-      }
+      const { storagePush } = await import("../../db/storage-sync.js");
+      const results = await storagePush({ tables: args.tables, batchSize: args.batch_size });
+      assertNoSyncErrors(results);
+      return json(results);
     }
   );
 
-  server.registerTool(
+  server.tool(
     "storage_pull",
+    "Pull Mailery data from remote PostgreSQL storage to local SQLite.",
     {
-      title: "Storage Pull",
-      description: "Pull Mailery data from remote PostgreSQL storage to local SQLite.",
-      inputSchema: {
-        tables: z.array(z.string()).optional(),
-        batch_size: z.number().int().positive().max(5000).optional().describe("Rows to read per table batch"),
-      },
+      tables: z.array(z.string()).optional(),
+      batch_size: z.number().int().positive().max(5000).optional().describe("Rows to read per table batch"),
     },
     async (args) => {
-      try {
-        const { storagePull } = await import("../../db/storage-sync.js");
-        return json(await storagePull({ tables: args.tables, batchSize: args.batch_size }));
-      } catch (error) {
-        return errorResult(error);
-      }
+      const { storagePull } = await import("../../db/storage-sync.js");
+      const results = await storagePull({ tables: args.tables, batchSize: args.batch_size });
+      assertNoSyncErrors(results);
+      return json(results);
     }
   );
 
-  server.registerTool(
+  server.tool(
     "storage_sync",
+    "Force bidirectional Mailery storage sync: pull then push.",
     {
-      title: "Storage Sync",
-      description: "Bidirectional Mailery storage sync: pull then push.",
-      inputSchema: {
-        tables: z.array(z.string()).optional(),
-        batch_size: z.number().int().positive().max(5000).optional().describe("Rows to read per table batch"),
-      },
+      tables: z.array(z.string()).optional(),
+      batch_size: z.number().int().positive().max(5000).optional().describe("Rows to read per table batch"),
+      force: z.boolean().describe("Must be true because sync pulls before pushing and can overwrite local rows"),
     },
     async (args) => {
-      try {
-        const { storageSync } = await import("../../db/storage-sync.js");
-        return json(await storageSync({ tables: args.tables, batchSize: args.batch_size }));
-      } catch (error) {
-        return errorResult(error);
-      }
+      const { storageSync } = await import("../../db/storage-sync.js");
+      const result = await storageSync({ tables: args.tables, batchSize: args.batch_size, force: args.force });
+      assertNoBidirectionalSyncErrors(result);
+      return json(result);
     }
   );
 }

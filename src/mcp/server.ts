@@ -34,8 +34,8 @@ export function buildServer(): McpServer {
   });
 
   registerEmailResources(server);
-  registerEmailStorageTools(server);
   installMcpToolContracts(server);
+  registerEmailStorageTools(server);
   registerAgentTools(server);
   registerProviderTools(server);
   registerDomainTools(server);

@@ -1,6 +1,6 @@
 {
   "name": "@hasna/mailery",
-  "version": "0.6.61",
+  "version": "0.6.62",
   "description": "Mailery email management CLI + MCP server + dashboard for Resend, AWS SES, and Gmail",
   "type": "module",
   "repository": {

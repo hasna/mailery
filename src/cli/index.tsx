@@ -3,7 +3,7 @@ import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { commandModulesFor, routeRootPromptArgs, shouldPrintVersionEarly, type CommandModule } from "./router.js";
+import { commandModulesFor, remoteStorageRuntimeError, routeRootPromptArgs, shouldPrintVersionEarly, type CommandModule } from "./router.js";
 
 function getPackageVersion(): string {
   try {
@@ -88,7 +88,7 @@ async function main(): Promise<void> {
   const cliArgs = routeRootPromptArgs(rawArgs);
 
   const program = new Command();
-  const [{ setLogLevel }, { configureCliRuntime, emitJson }] = await Promise.all([
+  const [{ setLogLevel }, { configureCliRuntime, emitJson, handleError }] = await Promise.all([
     import("../lib/logger.js"),
     import("./utils.js"),
   ]);
@@ -113,6 +113,13 @@ async function main(): Promise<void> {
     } else {
       console.log(formatted);
     }
+  }
+
+  const remoteRuntimeError = remoteStorageRuntimeError(cliArgs);
+  if (remoteRuntimeError) {
+    configureCliRuntime({ json: cliArgs.includes("--json"), verbose: cliArgs.includes("--verbose") || cliArgs.includes("-v") });
+    setLogLevel(cliArgs.includes("--quiet") || cliArgs.includes("-q"), cliArgs.includes("--verbose") || cliArgs.includes("-v"));
+    handleError(new Error(remoteRuntimeError));
   }
 
   await registerCommandsForArgs(program, output, cliArgs);

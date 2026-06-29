@@ -135,6 +135,8 @@ describe("MCP CLI equivalents", () => {
       .toBe("mailery storage status --json");
     expect(cliEquivalentForTool("storage_push", { tables: "providers,domains", batch_size: 250 }))
       .toBe('mailery storage push --tables "providers,domains" --batch-size 250 --json');
+    expect(cliEquivalentForTool("storage_sync", { tables: "providers,domains", batch_size: 250, force: true }))
+      .toBe('mailery storage sync --tables "providers,domains" --batch-size 250 --force --json');
   });
 
   it("includes export filters and pagination flags", () => {

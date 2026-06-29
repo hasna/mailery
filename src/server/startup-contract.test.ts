@@ -32,6 +32,42 @@ function routeFiles(): string[] {
 }
 
 describe("server startup contract", () => {
+  it("rejects remote storage mode before starting the HTTP runtime", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "src/server/index.ts"],
+      cwd: join(import.meta.dir, "..", ".."),
+      env: {
+        ...process.env,
+        HASNA_EMAILS_STORAGE_MODE: "remote",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stderr = new TextDecoder().decode(result.stderr);
+    expect(result.exitCode).toBe(1);
+    expect(stderr).toContain("remote source-of-truth runtime");
+  });
+
+  it("keeps direct help and version available in remote storage mode", () => {
+    for (const args of [["--help"], ["--version"]]) {
+      const result = Bun.spawnSync({
+        cmd: ["bun", "src/server/index.ts", ...args],
+        cwd: join(import.meta.dir, "..", ".."),
+        env: {
+          ...process.env,
+          HASNA_EMAILS_STORAGE_MODE: "remote",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const stdout = new TextDecoder().decode(result.stdout);
+      const stderr = new TextDecoder().decode(result.stderr);
+      expect(result.exitCode).toBe(0);
+      expect(stderr).toBe("");
+      expect(stdout).not.toContain("remote source-of-truth runtime");
+    }
+  });
+
   it("keeps route modules lazy behind the API dispatcher", () => {
     const source = readFileSync(apiRoutesFile, "utf8");
     const staticRouteImports = [...source.matchAll(staticImport)]

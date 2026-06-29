@@ -28,11 +28,27 @@ function wantsJson(opts: { json?: boolean }): boolean {
 
 function printResults(results: SyncResult[], label: string): void {
   const total = results.reduce((sum, result) => sum + result.rowsWritten, 0);
+  const hasErrors = results.some((result) => result.errors.length > 0);
   for (const result of results) {
     const errors = result.errors.length > 0 ? ` (${result.errors.join("; ")})` : "";
     console.log(`  ${result.table}: ${result.rowsWritten}/${result.rowsRead} rows ${label}${errors}`);
   }
-  console.log(chalk.green(`Done. ${total} rows ${label}.`));
+  if (hasErrors) {
+    console.log(chalk.red(`Failed. ${total} rows ${label} before errors.`));
+  } else {
+    console.log(chalk.green(`Done. ${total} rows ${label}.`));
+  }
+}
+
+function assertNoSyncErrors(results: SyncResult[]): void {
+  const failures = results.filter((result) => result.errors.length > 0);
+  if (failures.length === 0) return;
+  throw new Error(`Storage sync failed for ${failures.map((result) => `${result.table}: ${result.errors.join("; ")}`).join(" | ")}`);
+}
+
+function assertNoBidirectionalSyncErrors(result: { pull: SyncResult[]; push: SyncResult[] }): void {
+  assertNoSyncErrors(result.pull);
+  assertNoSyncErrors(result.push);
 }
 
 function installStorageSubcommands(storageCmd: Command, output: (data: unknown, formatted: string) => void): void {
@@ -71,6 +87,7 @@ function installStorageSubcommands(storageCmd: Command, output: (data: unknown, 
       try {
         const { storagePush } = await import("../../db/storage-sync.js");
         const results = await storagePush({ tables: parseTables(opts.tables), batchSize: parseBatchSize(opts.batchSize) });
+        assertNoSyncErrors(results);
         if (wantsJson(opts)) {
           printJson(results);
           return;
@@ -90,6 +107,7 @@ function installStorageSubcommands(storageCmd: Command, output: (data: unknown, 
       try {
         const { storagePull } = await import("../../db/storage-sync.js");
         const results = await storagePull({ tables: parseTables(opts.tables), batchSize: parseBatchSize(opts.batchSize) });
+        assertNoSyncErrors(results);
         if (wantsJson(opts)) {
           printJson(results);
           return;
@@ -101,14 +119,16 @@ function installStorageSubcommands(storageCmd: Command, output: (data: unknown, 
 
   storageCmd
     .command("sync")
-    .description("Bidirectional sync: pull then push")
+    .description("Force bidirectional sync: pull then push")
     .option("--tables <tables>", "Comma-separated table names")
     .option("--batch-size <n>", "Rows to read per table batch")
+    .option("--force", "Confirm pull-then-push overwrite risk")
     .option("--json", "Output as JSON")
-    .action(async (opts: { tables?: string; batchSize?: string; json?: boolean }) => {
+    .action(async (opts: { tables?: string; batchSize?: string; force?: boolean; json?: boolean }) => {
       try {
         const { storageSync } = await import("../../db/storage-sync.js");
-        const result = await storageSync({ tables: parseTables(opts.tables), batchSize: parseBatchSize(opts.batchSize) });
+        const result = await storageSync({ tables: parseTables(opts.tables), batchSize: parseBatchSize(opts.batchSize), force: opts.force });
+        assertNoBidirectionalSyncErrors(result);
         if (wantsJson(opts)) {
           printJson(result);
           return;

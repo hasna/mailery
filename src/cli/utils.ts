@@ -80,6 +80,7 @@ export function emitJson(data: unknown): void {
 }
 
 function errorCode(message: string): string {
+  if (/remote source-of-truth runtime|HASNA_EMAILS_STORAGE_MODE=remote/i.test(message)) return "remote_storage_runtime_unsupported";
   if (/could not resolve id|not found/i.test(message)) return "not_found";
   if (/requires|missing|required/i.test(message)) return "missing_required_input";
   if (/invalid|must be/i.test(message)) return "invalid_input";
@@ -90,6 +91,14 @@ function errorCode(message: string): string {
 
 function fixCommands(message: string): string[] {
   const lower = message.toLowerCase();
+  if (lower.includes("remote source-of-truth runtime") || lower.includes("hasna_emails_storage_mode=remote")) {
+    return [
+      "HASNA_EMAILS_STORAGE_MODE=hybrid mailery status --json",
+      "mailery storage status --json",
+      "mailery storage pull --help",
+    ];
+  }
+  if (lower.includes("storage sync") || lower.includes("--force")) return ["mailery storage sync --force --json", "mailery storage pull --json", "mailery storage push --json"];
   if (lower.includes("provider")) return ["mailery provider list --json", "mailery provider add --help"];
   if (lower.includes("domain")) return ["mailery domain list --json", "mailery domain add --help"];
   if (lower.includes("address")) return ["mailery address list --json", "mailery address provision --help"];

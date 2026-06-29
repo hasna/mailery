@@ -71,7 +71,7 @@ received (SES→S3→SQLite). See `docs/PLAN-PROVISIONING.md` for the architectu
 | **DNS** | Cloudflare (account `4f59afea…`) | Always Cloudflare — DKIM/SPF/DMARC/MAIL-FROM/inbound-MX + Email Routing. |
 | **Send (secondary)** | Resend | Provider integrated; sends proven. Free plan caps Resend-verified domains at 1. |
 
-`emails config set inbound_s3_bucket <bucket>` makes `emails inbox sync-s3` default to that inbound bucket (no `--bucket` needed). Durable Gmail archive uploads default to `s3://hasna-xyz-opensource-emails-prod/gmail/`, with overrides through `gmail_archive_s3_bucket`, `gmail_archive_s3_region`, and `gmail_archive_s3_prefix`. `emails doctor` reports SES sandbox/production + provisioning creds.
+`emails config set inbound_s3_bucket <bucket>` makes `emails inbox sync-s3` default to that inbound bucket (no `--bucket` needed). Inbound buckets must block public access and use server-side encryption; keep the versioning policy explicit because raw MIME objects are the mailbox for the `ses-s3` strategy. Durable Gmail archive uploads default to `s3://hasna-xyz-opensource-emails-prod/gmail/`, with overrides through `gmail_archive_s3_bucket`, `gmail_archive_s3_region`, and `gmail_archive_s3_prefix`. `emails doctor` reports SES sandbox/production + provisioning creds.
 
 ### Integration status (priority: SES, Resend, Cloudflare — not Gmail)
 - **SES (alumia)**: ✅ all 3 domains verified + send/receive tested (6/6 round-trip).

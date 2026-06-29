@@ -151,7 +151,7 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
     storage_status: () => "mailery storage status --json",
     storage_push: () => `mailery storage push${flag(input, "tables")}${flag(input, "batch_size", "batch-size")} --json`,
     storage_pull: () => `mailery storage pull${flag(input, "tables")}${flag(input, "batch_size", "batch-size")} --json`,
-    storage_sync: () => `mailery storage sync${flag(input, "tables")}${flag(input, "batch_size", "batch-size")} --json`,
+    storage_sync: () => `mailery storage sync${flag(input, "tables")}${flag(input, "batch_size", "batch-size")}${enabled(input, "force")} --json`,
     export_emails: () => `mailery export emails${provider ? ` --provider ${provider}` : ""}${flag(input, "from_address", "from")}${flag(input, "since")}${flag(input, "until")}${flag(input, "limit")}${flag(input, "offset")} --format ${format ?? "json"}`,
     export_events: () => `mailery export events${provider ? ` --provider ${provider}` : ""}${flag(input, "since")}${flag(input, "until")}${flag(input, "limit")}${flag(input, "offset")} --format ${format ?? "json"}`,
     verify_email_address: () => `mailery verify-email ${email ?? "<email>"} --json`,
@@ -172,6 +172,7 @@ function errorCode(message: string): string {
 
 function fixCommands(message: string, cliEquivalent: string): string[] {
   const lower = message.toLowerCase();
+  if (lower.includes("storage sync") || lower.includes("force") || lower.includes("pull then push")) return ["mailery storage sync --force --json", "mailery storage pull --json", "mailery storage push --json", cliEquivalent];
   if (lower.includes("provider")) return ["mailery provider list --json", "mailery provider add --help", cliEquivalent];
   if (lower.includes("domain")) return ["mailery domain list --json", "mailery domain add --help", cliEquivalent];
   if (lower.includes("address")) return ["mailery address list --json", "mailery address provision --help", cliEquivalent];

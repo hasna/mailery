@@ -1376,4 +1376,24 @@ describe("emails-mcp buildServer", () => {
     const tools = Object.keys((server as unknown as { _registeredTools?: Record<string, unknown> })._registeredTools ?? {});
     expect(tools).toContain("extract_inbound_email_links");
   });
+
+  it("normalizes storage tool errors through the MCP contract wrapper", async () => {
+    const server = buildServer() as unknown as {
+      _registeredTools?: Record<string, { handler?: unknown }>;
+    };
+    const tool = server._registeredTools?.["storage_sync"];
+    const handler = tool?.handler as { run?: (args: unknown) => Promise<unknown> } | ((args: unknown) => Promise<unknown>) | undefined;
+    const run = typeof handler === "function" ? handler : handler?.run;
+    expect(run).toBeTypeOf("function");
+
+    const result = await run?.({});
+    const payload = JSON.parse(
+      ((result as { content?: Array<{ text?: string }> }).content?.[0]?.text ?? "{}"),
+    ) as { error?: { message?: string; fix_commands?: string[] }; cli_equivalent?: string };
+
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(payload.error?.message).toContain("storage sync");
+    expect(payload.error?.fix_commands).toContain("mailery storage sync --force --json");
+    expect(payload.cli_equivalent).toBe("mailery storage sync --json");
+  });
 });

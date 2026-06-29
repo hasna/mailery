@@ -9,6 +9,7 @@ const forbiddenMarkers = [
   ["@hasna", "wallets"].join("/"),
   ["open", "cloud"].join("-"),
   ["cloud", "mcp"].join("-"),
+  ["cloud", "tool"].join("-"),
   ["register", "Cloud", "Commands"].join(""),
   [".hasna", "cloud"].join("/"),
   ["HASNA", "CLOUD", ""].join("_"),

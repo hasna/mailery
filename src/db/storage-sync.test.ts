@@ -12,9 +12,11 @@ import {
   getStorageMode,
   getStorageStatus,
   parseStorageTables,
+  pullTablesFromRemote,
   pullTable,
   pushTable,
   runStorageMigrations,
+  storageSync,
 } from "./storage-sync.js";
 
 type Row = Record<string, unknown>;
@@ -49,6 +51,23 @@ class FakeRemote {
   }
 
   async close(): Promise<void> {}
+}
+
+class ThrowingRemote extends FakeRemote {
+  async run(sql: string, ...params: unknown[]): Promise<{ changes: number }> {
+    this.runCalls.push({ sql, params });
+    throw new Error("remote write failed");
+  }
+}
+
+class FailingReadRemote extends FakeRemote {
+  async all(sql: string, ...params: unknown[]): Promise<unknown[]> {
+    if (sql.includes('FROM "owners"')) {
+      this.allCalls.push({ sql, params });
+      throw new Error("remote read failed");
+    }
+    return super.all(sql, ...params);
+  }
 }
 
 function providerRow(id: string, name: string): Row {
@@ -129,7 +148,51 @@ describe("emails storage sync configuration", () => {
 
   it("parses and validates storage table filters", () => {
     expect(parseStorageTables(["providers", "domains"])).toEqual(["providers", "domains"]);
+    expect(parseStorageTables(["inbound_recipients", "inbound_labels", "email_agent_settings", "email_agent_runs", "email_digests"])).toEqual([
+      "inbound_recipients",
+      "inbound_labels",
+      "email_agent_settings",
+      "email_agent_runs",
+      "email_digests",
+    ]);
     expect(() => parseStorageTables(["providers", "missing"])).toThrow("Unknown emails sync table(s): missing");
+  });
+
+  it("requires explicit force for pull-then-push sync", async () => {
+    await expect(storageSync()).rejects.toThrow("can overwrite local rows");
+  });
+
+  it("does not push after pull errors during forced sync", async () => {
+    let pushed = false;
+
+    await expect(storageSync(
+      { force: true },
+      {
+        pull: async () => [{ table: "providers", rowsRead: 0, rowsWritten: 0, errors: ["pull failed"] }],
+        push: async () => {
+          pushed = true;
+          return [];
+        },
+      },
+    )).rejects.toThrow("push was not run");
+
+    expect(pushed).toBe(false);
+  });
+
+  it("rolls back local pull writes when a later table fails", async () => {
+    const remote = new FailingReadRemote({
+      providers: [providerRow("1", "Remote 1")],
+    });
+
+    const results = await pullTablesFromRemote(
+      remote as unknown as PgAdapterAsync,
+      getDatabase(),
+      { tables: ["providers", "owners"], batchSize: 2 },
+    );
+
+    expect(results[0]).toMatchObject({ table: "providers", rowsWritten: 1, errors: [] });
+    expect(results[1]).toMatchObject({ table: "owners", errors: ["remote read failed"] });
+    expect(listProviders()).toEqual([]);
   });
 });
 
@@ -166,6 +229,21 @@ describe("storage table sync batching", () => {
     expect(dataReads.map((call) => call.args)).toEqual([[2, 0], [2, 2], [2, 4]]);
     expect(dataReads.every((call) => call.sql.includes("LIMIT ? OFFSET ?"))).toBe(true);
     expect(remote.runCalls).toHaveLength(5);
+  });
+
+  it("returns per-table push errors for CLI aggregation", async () => {
+    const db = {
+      query: (sql: string) => ({
+        get: () => sql.includes("sqlite_master") ? { name: "providers" } : null,
+        all: () => [providerRow("1", "Provider 1")],
+      }),
+    } as unknown as Database;
+    const remote = new ThrowingRemote();
+
+    const result = await pushTable(db, remote as unknown as PgAdapterAsync, "providers", { batchSize: 2 });
+
+    expect(result.table).toBe("providers");
+    expect(result.errors).toEqual(["remote write failed"]);
   });
 
   it("pulls remote rows in bounded batches and preserves SQLite upsert behavior", async () => {

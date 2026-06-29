@@ -36,6 +36,23 @@ Production remote storage uses the `emails` database on the
 `HASNA_EMAILS_DATABASE_URL` for runtime or smoke commands and do not print the
 connection string.
 
+Mailery's storage slug is `emails`, so the canonical env contract is:
+
+```text
+HASNA_EMAILS_DATABASE_URL      # Hasna runtime database URL
+EMAILS_DATABASE_URL            # self-hosted fallback
+HASNA_EMAILS_STORAGE_MODE      # local | hybrid | remote
+EMAILS_STORAGE_MODE            # self-hosted fallback
+HASNA_EMAILS_DB_PATH           # local SQLite override
+EMAILS_DB_PATH                 # test/back-compat local SQLite override
+```
+
+Mode behavior is local-first: `local` uses SQLite/files only, `hybrid` uses
+explicit `emails storage push`, `emails storage pull`, or
+`emails storage sync --force` against remote PostgreSQL, and `remote` allows
+storage commands but rejects normal runtime commands until the runtime has a
+remote source-of-truth adapter. Do not infer `HASNA_MAILERY_*` variables.
+
 Source-of-record evidence from the 2026-06-08 RDS inventory selected
 `prod-microservice/emails` as the dump source, with `hasnaxyz-prod-opensource/emails`
 as a count-identical parity source. Both sources had 22 public tables and 262
@@ -57,7 +74,48 @@ Before cutover, freeze legacy writes or keep a bounded rollback window. Roll bac
 by restoring the previous app secret/env and reading from the legacy source while
 preserving the canonical database for diffing.
 
+### SSM Tunnel Smoke Tests
+
+For workstation smoke tests, open a local port forward through the approved
+internal host. This keeps RDS private:
+
+```bash
+aws --profile hasna-xyz-infra --region us-east-1 ssm start-session \
+  --target <approved-ssm-bastion-instance-id> \
+  --document-name AWS-StartPortForwardingSessionToRemoteHost \
+  --parameters '{"host":["<private-rds-endpoint>"],"portNumber":["5432"],"localPortNumber":["15432"]}'
+```
+
+In another shell, load `hasna/xyz/opensource/emails/prod/rds` into
+`HASNA_EMAILS_DATABASE_URL` without printing it, rewrite only the local tunnel
+host/port, and set `sslmode=no-verify` for the tunnel. Do not use this rewritten
+URL for production runtimes; production runtimes should connect to the real RDS
+hostname with the normal secret value.
+
+```bash
+emails storage status --json
+emails storage migrate
+emails storage pull --tables providers,addresses,inbound_emails --json
+```
+
+If a peer machine such as `spark01` lacks `session-manager-plugin`, keep the SSM
+tunnel on a machine that has the plugin and use an SSH reverse forward for the
+smoke session:
+
+```bash
+ssh -R 15432:127.0.0.1:15432 spark01
+```
+
+Then run the same `emails storage ...` smoke commands on the peer with the
+rewritten tunnel URL. Never run `storage push` during connectivity validation.
+
 ## Archive Layout
+
+Gmail archive objects live in the `hasna-xyz-infra` account bucket
+`s3://hasna-xyz-opensource-emails-prod`. SES inbound raw MIME delivery is
+separate: production SES receipt rules live in the `hasna-studio-alumia` account
+and can write to operator-configured inbound buckets such as
+`hasna-emails-prod-inbound-638389534677`.
 
 For each Gmail profile and message ID:
 

@@ -1,3 +1,5 @@
+import { REMOTE_STORAGE_RUNTIME_ERROR, readStorageMode } from "../lib/remote-runtime-guard.js";
+
 export function shouldPrintVersionEarly(args: string[]): boolean {
   return args.length === 1 && (args[0] === "--version" || args[0] === "-V");
 }
@@ -129,6 +131,37 @@ export function requestedCommand(args: string[]): string | null {
     if (arg === "--") return null;
     if (arg === "--help" || arg === "-h") return null;
     if (arg === "--json" || arg === "-q" || arg === "--quiet" || arg === "-v" || arg === "--verbose") continue;
+    if (arg.startsWith("-")) continue;
+    return arg;
+  }
+  return null;
+}
+
+const REMOTE_RUNTIME_ALLOWED_STORAGE_COMMANDS = new Set(["status", "setup", "push", "pull", "sync", "migrate"]);
+
+export function remoteStorageRuntimeError(args: string[]): string | null {
+  if (readStorageMode() !== "remote") return null;
+  if (args.includes("--help") || args.includes("-h")) return null;
+  const command = requestedCommand(args);
+  if (!command) return null;
+  if (command === "storage") {
+    const subcommand = requestedStorageSubcommand(args);
+    if (!subcommand || REMOTE_RUNTIME_ALLOWED_STORAGE_COMMANDS.has(subcommand)) return null;
+  }
+  if (command === "mcp" && isMcpConfigOnlyCommand(args)) return null;
+  return REMOTE_STORAGE_RUNTIME_ERROR;
+}
+
+function isMcpConfigOnlyCommand(args: string[]): boolean {
+  if (args.includes("--claude") || args.includes("--uninstall")) return args.includes("--dry-run");
+  return args.includes("--codex") || args.includes("--gemini");
+}
+
+function requestedStorageSubcommand(args: string[]): string | null {
+  const storageIndex = args.findIndex((arg) => arg === "storage");
+  if (storageIndex < 0) return null;
+  for (const arg of args.slice(storageIndex + 1)) {
+    if (arg === "--") return null;
     if (arg.startsWith("-")) continue;
     return arg;
   }

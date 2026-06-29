@@ -211,6 +211,50 @@ describe("CLI JSON contracts", () => {
     expect(stdout).not.toContain("postgres://");
   });
 
+  it("rejects remote storage mode for runtime commands until a remote adapter exists", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = {
+      ...isolatedEnv(join(dir, "emails.db"), join(dir, "home")),
+      HASNA_EMAILS_STORAGE_MODE: "remote",
+    };
+
+    const result = runCli(["--json", "inbox", "list"], env);
+    const stdout = new TextDecoder().decode(result.stdout);
+    const stderr = new TextDecoder().decode(result.stderr);
+    expect(result.exitCode).toBe(1);
+    expect(stdout).toBe("");
+    const parsed = JSON.parse(stderr) as { error: { message: string; code: string; fix_commands: string[] } };
+    expect(parsed.error.code).toBe("remote_storage_runtime_unsupported");
+    expect(parsed.error.message).toContain("remote source-of-truth runtime");
+    expect(parsed.error.fix_commands).toContain("mailery storage status --json");
+
+    const storage = runCli(["--json", "storage", "status"], env);
+    expect(storage.exitCode).toBe(0);
+
+    const feedback = runCli(["--json", "storage", "feedback", "hello"], env);
+    expect(feedback.exitCode).toBe(1);
+    expect(stdoutText(feedback)).toBe("");
+    const feedbackParsed = JSON.parse(stderrText(feedback)) as { error: { code: string } };
+    expect(feedbackParsed.error.code).toBe("remote_storage_runtime_unsupported");
+
+    const mcpDryRun = runCli(["--json", "mcp", "--claude", "--dry-run"], env);
+    expect(mcpDryRun.exitCode).toBe(0);
+    expect(JSON.parse(stdoutText(mcpDryRun))).toMatchObject({ target: "claude", action: "install" });
+  });
+
+  it("requires --force for pull-then-push storage sync", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+
+    const result = runCli(["--json", "storage", "sync"], env);
+    expect(result.exitCode).toBe(1);
+    expect(stdoutText(result)).toBe("");
+    const parsed = JSON.parse(stderrText(result)) as { error: { message: string } };
+    expect(parsed.error.message).toContain("can overwrite local rows");
+  });
+
   it("documents storage command without legacy cloud wording", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
     tempDirs.push(dir);

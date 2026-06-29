@@ -49,6 +49,22 @@ function hasDynamicImport(source: string, specifier: string): boolean {
 }
 
 describe("MCP startup contract", () => {
+  it("rejects remote storage mode before starting the MCP runtime", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "src/mcp/index.ts"],
+      cwd: join(import.meta.dir, "..", ".."),
+      env: {
+        ...process.env,
+        HASNA_EMAILS_STORAGE_MODE: "remote",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stderr = new TextDecoder().decode(result.stderr);
+    expect(result.exitCode).toBe(1);
+    expect(stderr).toContain("remote source-of-truth runtime");
+  });
+
   it("keeps heavy provider and sync dependencies behind tool-local dynamic imports", () => {
     const offenders: string[] = [];
 

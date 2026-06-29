@@ -797,10 +797,10 @@ const MAIL_ARCHITECTURE_STATE_RECONCILE_SQL = `
          folder_id = COALESCE((
            SELECT 'folder:' || mailbox_message_state.mailbox_id || ':' ||
                   CASE
+                    WHEN COALESCE(inbound_state.is_sent, 0) = 1 THEN 'sent'
                     WHEN COALESCE(inbound_state.is_trash, 0) = 1 THEN 'trash'
                     WHEN COALESCE(inbound_state.is_spam, 0) = 1 THEN 'spam'
                     WHEN COALESCE(inbound_state.is_archived, 0) = 1 THEN 'archive'
-                    WHEN COALESCE(inbound_state.is_sent, 0) = 1 THEN 'sent'
                     ELSE 'inbox'
                   END
              FROM temp_mailery_inbound_state_reconcile inbound_state
@@ -1684,6 +1684,13 @@ const MIGRATIONS = [
   `
   ${MAIL_ARCHITECTURE_STATE_RECONCILE_SQL}
   INSERT OR IGNORE INTO _migrations (id) VALUES (41);
+  `,
+
+  // Migration 42: Re-run state reconciliation after reserved label mutations
+  // learned to update canonical spam/trash flags and folder placement.
+  `
+  ${MAIL_ARCHITECTURE_STATE_RECONCILE_SQL}
+  INSERT OR IGNORE INTO _migrations (id) VALUES (42);
   `,
 ];
 

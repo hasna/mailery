@@ -214,6 +214,65 @@ describe("inbound labels", () => {
     expect(listInboundEmails({ label: "work" }, db)).toHaveLength(0);
   });
 
+  it("keeps canonical spam/trash flags and folders in sync with reserved labels", () => {
+    const e = seed("reserved-labels");
+    const inboundFlags = () => db
+      .query("SELECT is_spam, is_trash, is_archived FROM inbound_emails WHERE id = ?")
+      .get(e.id) as { is_spam: number; is_trash: number; is_archived: number };
+    setInboundArchived(e.id, true);
+
+    addInboundLabel(e.id, "Spam");
+    let state = db
+      .query("SELECT labels_json, is_spam, is_trash, is_archived, folder_id FROM mailbox_message_state WHERE mail_message_id = ?")
+      .get(`msg:inbound:${e.id}`) as { labels_json: string; is_spam: number; is_trash: number; is_archived: number; folder_id: string };
+    expect(inboundFlags()).toEqual({ is_spam: 1, is_trash: 0, is_archived: 1 });
+    expect(JSON.parse(state.labels_json)).toEqual(["Spam"]);
+    expect(state).toMatchObject({
+      is_spam: 1,
+      is_trash: 0,
+      is_archived: 1,
+      folder_id: "folder:mbx:me@x.com:spam",
+    });
+
+    addInboundLabel(e.id, "Trash");
+    state = db
+      .query("SELECT labels_json, is_spam, is_trash, is_archived, folder_id FROM mailbox_message_state WHERE mail_message_id = ?")
+      .get(`msg:inbound:${e.id}`) as { labels_json: string; is_spam: number; is_trash: number; is_archived: number; folder_id: string };
+    expect(inboundFlags()).toEqual({ is_spam: 1, is_trash: 1, is_archived: 1 });
+    expect(JSON.parse(state.labels_json)).toEqual(["Spam", "Trash"]);
+    expect(state).toMatchObject({
+      is_spam: 1,
+      is_trash: 1,
+      is_archived: 1,
+      folder_id: "folder:mbx:me@x.com:trash",
+    });
+
+    removeInboundLabel(e.id, "trash");
+    state = db
+      .query("SELECT is_spam, is_trash, is_archived, folder_id FROM mailbox_message_state WHERE mail_message_id = ?")
+      .get(`msg:inbound:${e.id}`) as { is_spam: number; is_trash: number; is_archived: number; folder_id: string };
+    expect(inboundFlags()).toEqual({ is_spam: 1, is_trash: 0, is_archived: 1 });
+    expect(state).toMatchObject({
+      is_spam: 1,
+      is_trash: 0,
+      is_archived: 1,
+      folder_id: "folder:mbx:me@x.com:spam",
+    });
+
+    removeInboundLabel(e.id, "spam");
+    state = db
+      .query("SELECT labels_json, is_spam, is_trash, is_archived, folder_id FROM mailbox_message_state WHERE mail_message_id = ?")
+      .get(`msg:inbound:${e.id}`) as { labels_json: string; is_spam: number; is_trash: number; is_archived: number; folder_id: string };
+    expect(inboundFlags()).toEqual({ is_spam: 0, is_trash: 0, is_archived: 1 });
+    expect(JSON.parse(state.labels_json)).toEqual([]);
+    expect(state).toMatchObject({
+      is_spam: 0,
+      is_trash: 0,
+      is_archived: 1,
+      folder_id: "folder:mbx:me@x.com:archive",
+    });
+  });
+
   it("mutates labels with a narrow label projection before hydrating", () => {
     const e = seed("labels");
     const queries: string[] = [];

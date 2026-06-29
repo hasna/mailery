@@ -534,12 +534,13 @@ describe("mail architecture data model", () => {
 
     expect(sqliteIndex?.name).toBe("idx_mailbox_state_source_dedupe");
     expect(sqliteTrigger?.name).toBe("trg_providers_preserve_mail_history");
-    expect(latestMigration.max_id).toBeGreaterThanOrEqual(41);
+    expect(latestMigration.max_id).toBeGreaterThanOrEqual(42);
     expect(pgSql).toContain("idx_mailbox_state_source_dedupe");
     expect(pgSql).toContain("mailery_after_inbound_insert_architecture");
     expect(pgSql).toContain("DROP TRIGGER IF EXISTS trg_mail_architecture_inbound_insert ON inbound_emails");
     expect(pgSql).toContain("mailery_prevent_provider_delete_with_history");
     expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (40)");
     expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (41)");
+    expect(pgSql).toContain("INSERT INTO _migrations (id) VALUES (42)");
   });
 });

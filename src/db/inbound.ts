@@ -763,10 +763,10 @@ function syncMailboxArchivedState(id: string, archived: boolean, d: Database): v
     `UPDATE mailbox_message_state
         SET is_archived = ?,
             folder_id = CASE
-              WHEN is_trash = 1 THEN folder_id
-              WHEN is_spam = 1 THEN folder_id
-              WHEN ? = 1 THEN 'folder:' || mailbox_id || ':archive'
               WHEN direction IN ('sent', 'outbound') THEN 'folder:' || mailbox_id || ':sent'
+              WHEN is_trash = 1 THEN 'folder:' || mailbox_id || ':trash'
+              WHEN is_spam = 1 THEN 'folder:' || mailbox_id || ':spam'
+              WHEN ? = 1 THEN 'folder:' || mailbox_id || ':archive'
               ELSE 'folder:' || mailbox_id || ':inbox'
             END,
             updated_at = ?
@@ -786,12 +786,23 @@ function syncMailboxStarredState(id: string, starred: boolean, d: Database): voi
 }
 
 function syncMailboxLabelState(id: string, labels: string[], d: Database): void {
+  const isSpam = labels.some((label) => normalizeInboundLabel(label) === "spam");
+  const isTrash = labels.some((label) => normalizeInboundLabel(label) === "trash");
   d.run(
     `UPDATE mailbox_message_state
         SET labels_json = ?,
+            is_spam = ?,
+            is_trash = ?,
+            folder_id = CASE
+              WHEN direction IN ('sent', 'outbound') THEN 'folder:' || mailbox_id || ':sent'
+              WHEN ? = 1 THEN 'folder:' || mailbox_id || ':trash'
+              WHEN ? = 1 THEN 'folder:' || mailbox_id || ':spam'
+              WHEN is_archived = 1 THEN 'folder:' || mailbox_id || ':archive'
+              ELSE 'folder:' || mailbox_id || ':inbox'
+            END,
             updated_at = ?
       WHERE ${inboundStateMessagePredicate()}`,
-    [JSON.stringify(labels), now(), id, id],
+    [JSON.stringify(labels), isSpam ? 1 : 0, isTrash ? 1 : 0, isTrash ? 1 : 0, isSpam ? 1 : 0, now(), id, id],
   );
 }
 

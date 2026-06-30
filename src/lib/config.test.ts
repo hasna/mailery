@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, rmSync, existsSync, writeFileSync } from "fs";
+import { chmodSync, mkdirSync, rmSync, existsSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
   loadConfig, saveConfig, getConfigValue, setConfigValue,
@@ -38,6 +38,27 @@ describe("config", () => {
   it("saveConfig creates the file and directory", () => {
     saveConfig({ "my-key": "my-value" });
     expect(existsSync(join(TMP_HOME, ".hasna", "emails", "config.json"))).toBe(true);
+  });
+
+  it("stores config in a private directory and file", () => {
+    saveConfig({ cloud_session_token: "secret-session", cloud_api_key: "secret-key" });
+    const dirMode = statSync(join(TMP_HOME, ".hasna", "emails")).mode & 0o777;
+    const fileMode = statSync(join(TMP_HOME, ".hasna", "emails", "config.json")).mode & 0o777;
+    expect(dirMode).toBe(0o700);
+    expect(fileMode).toBe(0o600);
+  });
+
+  it("repairs loose permissions when loading an existing config", () => {
+    const dir = join(TMP_HOME, ".hasna", "emails");
+    const configPath = join(dir, "config.json");
+    mkdirSync(dir, { recursive: true, mode: 0o755 });
+    writeFileSync(configPath, JSON.stringify({ cloud_api_key: "secret-key" }), { mode: 0o644 });
+    chmodSync(dir, 0o755);
+    chmodSync(configPath, 0o644);
+
+    expect(loadConfig()["cloud_api_key"]).toBe("secret-key");
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    expect(statSync(configPath).mode & 0o777).toBe(0o600);
   });
 
   it("loadConfig reads back saved config", () => {

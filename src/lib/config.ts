@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from "fs";
 import { join } from "path";
 import { getDataDir } from "../db/database.js";
 import { resolveCloudflareAuth, type CloudflareAuth } from "./cloudflare-auth.js";
@@ -6,6 +6,8 @@ import { resolveCloudflareAuth, type CloudflareAuth } from "./cloudflare-auth.js
 // Lazy getters so tests can override HOME via process.env before calling
 function getConfigDir(): string { return getDataDir(); }
 function getConfigPath(): string { return join(getConfigDir(), "config.json"); }
+const CONFIG_DIR_MODE = 0o700;
+const CONFIG_FILE_MODE = 0o600;
 
 export interface EmailsConfig {
   default_provider?: string;
@@ -60,12 +62,34 @@ function cloneConfig(config: EmailsConfig): EmailsConfig {
   }
 }
 
+function chmodBestEffort(path: string, mode: number): void {
+  try {
+    chmodSync(path, mode);
+  } catch {
+    // Best effort only: config read/write should still work on filesystems that
+    // do not support POSIX modes, but normal local installs get hardened.
+  }
+}
+
+function ensureConfigDir(): string {
+  const dir = getConfigDir();
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: CONFIG_DIR_MODE });
+  chmodBestEffort(dir, CONFIG_DIR_MODE);
+  return dir;
+}
+
+function ensureConfigFileMode(path = getConfigPath()): void {
+  if (existsSync(path)) chmodBestEffort(path, CONFIG_FILE_MODE);
+}
+
 export function loadConfig(): EmailsConfig {
+  ensureConfigDir();
   const path = getConfigPath();
   if (!existsSync(path)) {
     if (configCache?.path === path) configCache = null;
     return {};
   }
+  ensureConfigFileMode(path);
   let stats: ReturnType<typeof statSync>;
   try {
     stats = statSync(path);
@@ -88,10 +112,10 @@ export function loadConfig(): EmailsConfig {
 }
 
 export function saveConfig(config: EmailsConfig): void {
-  const dir = getConfigDir();
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  ensureConfigDir();
   const path = getConfigPath();
-  writeFileSync(path, JSON.stringify(config, null, 2));
+  writeFileSync(path, JSON.stringify(config, null, 2), { mode: CONFIG_FILE_MODE });
+  ensureConfigFileMode(path);
   const stats = statSync(path);
   configCache = { path, mtimeMs: stats.mtimeMs, size: stats.size, config: cloneConfig(config) };
 }

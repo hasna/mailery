@@ -57,6 +57,9 @@ type MaileryCloudClientLike = Pick<
   | "parseMessage"
   | "listDigests"
   | "generateDigest"
+  | "listApiKeys"
+  | "createApiKey"
+  | "revokeApiKey"
   | "checkDomainAvailability"
   | "setupDomain"
 >;
@@ -151,6 +154,7 @@ function formatBilling(overview: MaileryCloudBillingOverview): string {
 
 function maybeOpenUrl(url: string, open: boolean | undefined, deps: CloudCommandDeps): LocalOpenResult | undefined {
   if (open === false) return undefined;
+  if (!process.stdout.isTTY) return undefined;
   return (deps.openUrl ?? openLocalTarget)(url);
 }
 
@@ -163,6 +167,36 @@ function checkoutText(kind: string, url: string, opened?: LocalOpenResult): stri
     `  ${url}`,
     chalk.dim(`  ${openedText}`),
   ].join("\n");
+}
+
+function formatSetupResult(result: {
+  apiUrl: string;
+  email: string;
+  mode: "signup" | "login";
+  me: MaileryCloudMeResponse | null;
+  apiKey?: Awaited<ReturnType<MaileryCloudClient["createApiKey"]>>;
+  billing?: { url: string; opened?: LocalOpenResult };
+}): string {
+  const lines = [
+    chalk.green("Mailery Cloud setup complete."),
+    `  API:     ${result.apiUrl}`,
+    `  Account: ${result.me?.user?.email ?? result.email}`,
+    `  Mode:    ${result.mode}`,
+  ];
+  if (result.apiKey) {
+    lines.push(
+      `  API key: ${result.apiKey.api_key.name} (${result.apiKey.api_key.prefix})`,
+      `  Secret:  ${result.apiKey.key}`,
+      chalk.dim("  This secret is shown once. Store it in MAILERY_API_KEY for agents."),
+    );
+  }
+  if (result.billing) {
+    lines.push(
+      `  Billing: ${result.billing.url}`,
+      chalk.dim(`  ${result.billing.opened ? result.billing.opened.ok ? `Opened with ${result.billing.opened.method}` : `Open failed: ${result.billing.opened.error}` : "Browser open disabled"}`),
+    );
+  }
+  return lines.join("\n");
 }
 
 function formatMailboxes(rows: Array<{ id: string; email: string; provider: string; status: string }>): string {
@@ -406,6 +440,67 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
       }
     });
 
+  cloud
+    .command("setup")
+    .description("Bootstrap Mailery Cloud auth, optional agent API key, and optional billing link")
+    .requiredOption("--email <email>", "Account email")
+    .requiredOption("--password <password>", "Account password")
+    .option("--name <name>", "Display name used for signup")
+    .option("--login", "Log in to an existing account instead of creating one")
+    .option("--api-key-name <name>", "Create an agent API key and print it once")
+    .option("--scope <scope...>", "API key scopes: full, mail_read, mail_write, billing_read, admin")
+    .option("--billing", "Create a Stripe subscription checkout link")
+    .option("--plan <plan>", "Subscription plan key", "starter")
+    .option("--no-open", "Do not open the Stripe checkout URL")
+    .action(async (opts: {
+      email: string;
+      password: string;
+      name?: string;
+      login?: boolean;
+      apiKeyName?: string;
+      scope?: string[];
+      billing?: boolean;
+      plan?: string;
+      open?: boolean;
+    }, cmd: Command) => {
+      try {
+        const apiUrl = getApiUrl(globals(cmd));
+        const client = makeClient(cmd, deps, undefined);
+        const mode = opts.login ? "login" : "signup";
+        const auth = opts.login
+          ? await client.login({ email: opts.email, password: opts.password })
+          : await client.signup({ email: opts.email, password: opts.password, name: opts.name });
+        saveCloudToken(apiUrl, CLOUD_SESSION_TOKEN_KEY, auth.token);
+        const authedClient = makeClient(cmd, deps, auth.token);
+        const me = await authedClient.me().catch(() => null);
+        const apiKey = opts.apiKeyName
+          ? await authedClient.createApiKey({
+              name: opts.apiKeyName,
+              scopes: opts.scope?.length ? opts.scope : undefined,
+            })
+          : undefined;
+        const billing = opts.billing
+          ? await authedClient.createCheckout({ kind: "subscription", plan: opts.plan ?? "starter" }).then((checkout) => ({
+              ...checkout,
+              opened: maybeOpenUrl(checkout.url, opts.open, deps),
+            }))
+          : undefined;
+        output({
+          api_url: apiUrl,
+          authenticated: true,
+          token_saved: true,
+          mode,
+          user: me?.user ?? auth.user ?? { email: opts.email },
+          tenant: me?.tenant ?? auth.tenant ?? null,
+          auth: me?.auth ?? null,
+          api_key: apiKey,
+          billing,
+        }, formatSetupResult({ apiUrl, email: opts.email, mode, me, apiKey, billing }));
+      } catch (e) {
+        handleError(new Error(cloudErrorText(e)));
+      }
+    });
+
   const billing = cloud.command("billing").description("Manage Stripe billing for Mailery Cloud");
 
   billing
@@ -416,6 +511,62 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
       try {
         const overview = await makeClient(cmd, deps).billingOverview({ limit: parseCliPositiveIntOption(opts.limit, 20, 100) });
         output(overview, formatBilling(overview));
+      } catch (e) {
+        handleError(new Error(cloudErrorText(e)));
+      }
+    });
+
+  const apiKeys = cloud.command("api-keys").alias("api-key").description("Manage one-time Mailery Cloud API keys");
+
+  apiKeys
+    .command("list")
+    .description("List cloud API keys without secret material")
+    .action(async (_opts: unknown, cmd: Command) => {
+      try {
+        const rows = await makeClient(cmd, deps).listApiKeys();
+        const lines = rows.length
+          ? [
+              chalk.bold("Mailery Cloud API keys"),
+              ...rows.map((row) => `  ${row.id.slice(0, 8)}  ${row.name.padEnd(18)} ${row.prefix} ${row.scopes.join(",")}${row.revokedAt ? " revoked" : ""}`),
+            ]
+          : [chalk.dim("No cloud API keys.")];
+        output({ data: rows }, lines.join("\n"));
+      } catch (e) {
+        handleError(new Error(cloudErrorText(e)));
+      }
+    });
+
+  apiKeys
+    .command("create")
+    .description("Create a cloud API key and print the secret once")
+    .option("--name <name>", "API key name", "CLI")
+    .option("--scope <scope...>", "Scopes: full, mail_read, mail_write, billing_read, admin")
+    .action(async (opts: { name?: string; scope?: string[] }, cmd: Command) => {
+      try {
+        const result = await makeClient(cmd, deps).createApiKey({
+          name: opts.name ?? "CLI",
+          scopes: opts.scope?.length ? opts.scope : undefined,
+        });
+        output(
+          result,
+          [
+            chalk.green(`Created API key ${result.api_key.name} (${result.api_key.prefix}).`),
+            `  ${result.key}`,
+            chalk.dim("  This secret is shown once. Store it in MAILERY_API_KEY or run mailery cloud login --api-key <key>."),
+          ].join("\n"),
+        );
+      } catch (e) {
+        handleError(new Error(cloudErrorText(e)));
+      }
+    });
+
+  apiKeys
+    .command("revoke <id>")
+    .description("Revoke a cloud API key")
+    .action(async (id: string, _opts: unknown, cmd: Command) => {
+      try {
+        const result = await makeClient(cmd, deps).revokeApiKey(id);
+        output(result, chalk.green(`Revoked API key ${id}.`));
       } catch (e) {
         handleError(new Error(cloudErrorText(e)));
       }

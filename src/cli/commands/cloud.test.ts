@@ -88,6 +88,9 @@ describe("cloud command", () => {
         parseMessage: async () => ({}),
         listDigests: async () => [],
         generateDigest: async () => { throw new Error("unused"); },
+        listApiKeys: async () => [],
+        createApiKey: async () => { throw new Error("unused"); },
+        revokeApiKey: async () => ({ ok: true }),
         checkDomainAvailability: async () => { throw new Error("unused"); },
         setupDomain: async () => { throw new Error("unused"); },
         getApiUrl: () => opts.apiUrl ?? "",
@@ -119,6 +122,70 @@ describe("cloud command", () => {
     expect(getConfigValue("cloud_session_token")).toBe("session_secret_value");
   });
 
+  it("bootstraps agent setup with signup, API key creation, and billing link", async () => {
+    const calls: unknown[] = [];
+    const result = await runCloudCommand([
+      "cloud",
+      "setup",
+      "--email",
+      "agent@example.com",
+      "--password",
+      "pw",
+      "--name",
+      "Agent",
+      "--api-key-name",
+      "Agent CLI",
+      "--scope",
+      "mail_read",
+      "mail_write",
+      "--billing",
+      "--no-open",
+    ], {
+      createClient: () => ({
+        signup: async (input) => {
+          calls.push({ signup: input });
+          return { token: "session_secret_value" };
+        },
+        me: async () => ({
+          user: { id: "usr_1", email: "agent@example.com", name: "Agent", tenantId: "ten_1", role: "owner", isPlatformAdmin: false },
+          tenant: { id: "ten_1", name: "Agent Tenant", slug: "agent", plan: "starter", stripeCustomerId: null, createdAt: "", updatedAt: "" },
+          auth: { via: "session", scopes: ["full"] },
+        }),
+        createApiKey: async (input) => {
+          calls.push({ createApiKey: input });
+          return {
+            key: "mly_secret_once",
+            api_key: {
+              id: "key_1",
+              name: "Agent CLI",
+              prefix: "mly_live_abcd",
+              scopes: ["mail_read", "mail_write"],
+              lastUsedAt: null,
+              revokedAt: null,
+              createdAt: "2026-06-30T10:00:00.000Z",
+            },
+          };
+        },
+        createCheckout: async (input) => {
+          calls.push({ createCheckout: input });
+          return { url: "https://checkout.stripe.test/session" };
+        },
+      } as never),
+    });
+
+    expect(calls).toEqual([
+      { signup: { email: "agent@example.com", password: "pw", name: "Agent" } },
+      { createApiKey: { name: "Agent CLI", scopes: ["mail_read", "mail_write"] } },
+      { createCheckout: { kind: "subscription", plan: "starter" } },
+    ]);
+    expect(result.out).toContain("Mailery Cloud setup complete");
+    expect(result.out).toContain("mly_secret_once");
+    expect(result.out).toContain("https://checkout.stripe.test/session");
+    expect(result.out).not.toContain("session_secret_value");
+    expect(JSON.stringify(result.data)).not.toContain("session_secret_value");
+    expect(getConfigValue("cloud_session_token")).toBe("session_secret_value");
+  });
+
   it("uses configured cloud_api_url when --api-url is omitted", async () => {
     await runCloudCommand(["cloud", "use", "https://staging.mailery.test"], {});
     let seenApiUrl = "";
@@ -147,6 +214,67 @@ describe("cloud command", () => {
 
     expect(result.out).toContain("https://checkout.stripe.test/session");
     expect(result.out).toContain("Browser open disabled");
+  });
+
+  it("lists API keys without printing secret material", async () => {
+    const result = await runCloudCommand(["cloud", "api-keys", "list"], {
+      createClient: () => ({
+        listApiKeys: async () => [{
+          id: "key_123456789",
+          name: "Agent CLI",
+          prefix: "mly_live_abcd",
+          scopes: ["mail_read", "mail_write"],
+          lastUsedAt: null,
+          revokedAt: null,
+          createdAt: "2026-06-30T10:00:00.000Z",
+        }],
+      } as never),
+    });
+
+    expect(result.out).toContain("Agent CLI");
+    expect(result.out).toContain("mly_live_abcd");
+    expect(result.out).not.toContain("secret");
+  });
+
+  it("creates an API key and prints the generated secret once", async () => {
+    const result = await runCloudCommand(["cloud", "api-keys", "create", "--name", "Agent CLI", "--scope", "mail_read", "mail_write"], {
+      createClient: () => ({
+        createApiKey: async (input) => {
+          expect(input).toEqual({ name: "Agent CLI", scopes: ["mail_read", "mail_write"] });
+          return {
+            key: "mly_secret_once",
+            api_key: {
+              id: "key_1",
+              name: "Agent CLI",
+              prefix: "mly_live_abcd",
+              scopes: ["mail_read", "mail_write"],
+              lastUsedAt: null,
+              revokedAt: null,
+              createdAt: "2026-06-30T10:00:00.000Z",
+            },
+          };
+        },
+      } as never),
+    });
+
+    expect(result.out).toContain("mly_secret_once");
+    expect(result.out.match(/mly_secret_once/g)?.length).toBe(1);
+    expect(result.out).toContain("This secret is shown once");
+  });
+
+  it("revokes a cloud API key", async () => {
+    let revokedId = "";
+    const result = await runCloudCommand(["cloud", "api-keys", "revoke", "key_1"], {
+      createClient: () => ({
+        revokeApiKey: async (id) => {
+          revokedId = id;
+          return { ok: true };
+        },
+      } as never),
+    });
+
+    expect(revokedId).toBe("key_1");
+    expect(result.out).toContain("Revoked API key key_1");
   });
 
   it("uploads local inbox messages to a cloud mailbox", async () => {

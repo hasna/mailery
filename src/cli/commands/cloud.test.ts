@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { closeDatabase, getDatabase } from "../../db/database.js";
 import { storeInboundEmail } from "../../db/inbound.js";
 import { getConfigValue } from "../../lib/config.js";
+import { redactSecrets } from "../../lib/redaction.js";
 import { registerCloudCommands } from "./cloud.js";
 
 let originalHome: string | undefined;
@@ -175,14 +176,17 @@ describe("cloud command", () => {
 
     expect(calls).toEqual([
       { signup: { email: "agent@example.com", password: "pw", name: "Agent" } },
-      { createApiKey: { name: "Agent CLI", scopes: ["mail_read", "mail_write"] } },
       { createCheckout: { kind: "subscription", plan: "starter" } },
+      { createApiKey: { name: "Agent CLI", scopes: ["mail_read", "mail_write"] } },
     ]);
+    const redacted = redactSecrets(result.data);
     expect(result.out).toContain("Mailery Cloud setup complete");
     expect(result.out).toContain("mly_secret_once");
     expect(result.out).toContain("https://checkout.stripe.test/session");
     expect(result.out).not.toContain("session_secret_value");
     expect(JSON.stringify(result.data)).not.toContain("session_secret_value");
+    expect(JSON.stringify(redacted)).toContain("mly_secret_once");
+    expect((result.data as { agent_auth?: { key?: string } }).agent_auth?.key).toBe("mly_secret_once");
     expect(getConfigValue("cloud_session_token")).toBe("session_secret_value");
   });
 
@@ -227,13 +231,31 @@ describe("cloud command", () => {
           lastUsedAt: null,
           revokedAt: null,
           createdAt: "2026-06-30T10:00:00.000Z",
-        }],
+          key: "mly_secret_list_leak",
+        } as never],
       } as never),
     });
 
     expect(result.out).toContain("Agent CLI");
     expect(result.out).toContain("mly_live_abcd");
     expect(result.out).not.toContain("secret");
+    expect(JSON.stringify(result.data)).not.toContain("mly_secret_list_leak");
+  });
+
+  it("does not open billing links by default in non-TTY command runs", async () => {
+    let opened = 0;
+    const result = await runCloudCommand(["cloud", "billing", "subscribe"], {
+      createClient: () => ({
+        createCheckout: async () => ({ url: "https://checkout.stripe.test/session" }),
+      } as never),
+      openUrl: () => {
+        opened += 1;
+        return { ok: true, method: "test" };
+      },
+    });
+
+    expect(opened).toBe(0);
+    expect(result.out).toContain("Browser open disabled");
   });
 
   it("creates an API key and prints the generated secret once", async () => {

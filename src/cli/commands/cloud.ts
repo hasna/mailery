@@ -473,17 +473,17 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
         saveCloudToken(apiUrl, CLOUD_SESSION_TOKEN_KEY, auth.token);
         const authedClient = makeClient(cmd, deps, auth.token);
         const me = await authedClient.me().catch(() => null);
-        const apiKey = opts.apiKeyName
-          ? await authedClient.createApiKey({
-              name: opts.apiKeyName,
-              scopes: opts.scope?.length ? opts.scope : undefined,
-            })
-          : undefined;
         const billing = opts.billing
           ? await authedClient.createCheckout({ kind: "subscription", plan: opts.plan ?? "starter" }).then((checkout) => ({
               ...checkout,
               opened: maybeOpenUrl(checkout.url, opts.open, deps),
             }))
+          : undefined;
+        const apiKey = opts.apiKeyName
+          ? await authedClient.createApiKey({
+              name: opts.apiKeyName,
+              scopes: opts.scope?.length ? opts.scope : undefined,
+            })
           : undefined;
         output({
           api_url: apiUrl,
@@ -493,7 +493,17 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
           user: me?.user ?? auth.user ?? { email: opts.email },
           tenant: me?.tenant ?? auth.tenant ?? null,
           auth: me?.auth ?? null,
-          api_key: apiKey,
+          agent_auth: apiKey
+            ? {
+                type: "api_key",
+                key: apiKey.key,
+                id: apiKey.api_key.id,
+                name: apiKey.api_key.name,
+                prefix: apiKey.api_key.prefix,
+                scopes: apiKey.api_key.scopes,
+                shown_once: true,
+              }
+            : null,
           billing,
         }, formatSetupResult({ apiUrl, email: opts.email, mode, me, apiKey, billing }));
       } catch (e) {
@@ -523,7 +533,15 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
     .description("List cloud API keys without secret material")
     .action(async (_opts: unknown, cmd: Command) => {
       try {
-        const rows = await makeClient(cmd, deps).listApiKeys();
+        const rows = (await makeClient(cmd, deps).listApiKeys()).map((row) => ({
+          id: row.id,
+          name: row.name,
+          prefix: row.prefix,
+          scopes: row.scopes,
+          lastUsedAt: row.lastUsedAt,
+          revokedAt: row.revokedAt,
+          createdAt: row.createdAt,
+        }));
         const lines = rows.length
           ? [
               chalk.bold("Mailery Cloud API keys"),

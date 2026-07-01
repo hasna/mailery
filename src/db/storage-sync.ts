@@ -127,6 +127,13 @@ export interface StorageSyncOptions {
   rowFilters?: Partial<Record<StorageTable, StorageTableFilter>>;
 }
 
+export interface LocalMigrationDedupePlan {
+  rowFilters: Partial<Record<StorageTable, StorageTableFilter>>;
+  skippedInboundEmails: number;
+  skippedMailMessages: number;
+  skippedMailboxMessageStates: number;
+}
+
 export interface StorageSyncHooks {
   pull?: (options?: StorageSyncOptions) => Promise<SyncResult[]>;
   push?: (options?: StorageSyncOptions) => Promise<SyncResult[]>;
@@ -273,6 +280,108 @@ export async function storagePush(options?: StorageSyncOptions): Promise<SyncRes
   } finally {
     await remote.close();
   }
+}
+
+export async function prepareLocalMigrationDedupePlan(
+  remote: PgAdapterAsync,
+  db: Database = getDatabase(),
+): Promise<LocalMigrationDedupePlan> {
+  createMigrationDedupeTempTables(db);
+
+  const inboundCandidates = sqliteTableExists(db, "inbound_emails")
+    ? db.query<Row, []>(`
+        SELECT id,
+               provider_id,
+               message_id,
+               COALESCE(NULLIF(mail_message_id, ''), 'msg:inbound:' || id) AS mail_message_id
+          FROM inbound_emails
+         WHERE provider_id IS NOT NULL
+           AND provider_id != ''
+           AND message_id IS NOT NULL
+           AND message_id != ''
+      `).all()
+    : [];
+
+  const remoteInboundByNaturalKey = new Map<string, Row>();
+  for (const batch of chunks(inboundCandidates, 250)) {
+    const placeholders = batch.map(() => "(?, ?)").join(", ");
+    const params = batch.flatMap((row) => [row.provider_id, row.message_id]);
+    const rows = await remote.all(
+      `SELECT id,
+              provider_id,
+              message_id,
+              COALESCE(NULLIF(mail_message_id, ''), 'msg:inbound:' || id) AS mail_message_id
+         FROM inbound_emails
+        WHERE (provider_id, message_id) IN (${placeholders})`,
+      ...params,
+    ) as Row[];
+    for (const row of rows) {
+      remoteInboundByNaturalKey.set(naturalKey(row.provider_id, row.message_id), row);
+    }
+  }
+
+  const skipInbound = db.prepare(`
+    INSERT OR IGNORE INTO ${quoteIdent(MIGRATION_SKIP_INBOUND_TABLE)} (id, mail_message_id, remote_id, remote_mail_message_id)
+    VALUES (?, ?, ?, ?)
+  `);
+  for (const row of inboundCandidates) {
+    const remoteRow = remoteInboundByNaturalKey.get(naturalKey(row.provider_id, row.message_id));
+    if (!remoteRow) continue;
+    const localId = String(row.id ?? "");
+    const remoteId = String(remoteRow.id ?? "");
+    if (!localId || !remoteId || localId === remoteId) continue;
+    skipInbound.run(localId, stringOrNull(row.mail_message_id), remoteId, stringOrNull(remoteRow.mail_message_id));
+  }
+
+  const stateCandidates = sqliteTableExists(db, "mailbox_message_state")
+    ? db.query<Row, []>(`
+        SELECT id, source_id, source_dedupe_key
+          FROM mailbox_message_state
+         WHERE source_id IS NOT NULL
+           AND source_id != ''
+           AND source_dedupe_key IS NOT NULL
+           AND source_dedupe_key != ''
+      `).all()
+    : [];
+
+  const remoteStateByNaturalKey = new Map<string, Row>();
+  for (const batch of chunks(stateCandidates, 250)) {
+    const placeholders = batch.map(() => "(?, ?)").join(", ");
+    const params = batch.flatMap((row) => [row.source_id, row.source_dedupe_key]);
+    const rows = await remote.all(
+      `SELECT id, source_id, source_dedupe_key
+         FROM mailbox_message_state
+        WHERE (source_id, source_dedupe_key) IN (${placeholders})`,
+      ...params,
+    ) as Row[];
+    for (const row of rows) {
+      remoteStateByNaturalKey.set(naturalKey(row.source_id, row.source_dedupe_key), row);
+    }
+  }
+
+  const skipState = db.prepare(`
+    INSERT OR IGNORE INTO ${quoteIdent(MIGRATION_SKIP_MAILBOX_STATE_TABLE)} (id, remote_id)
+    VALUES (?, ?)
+  `);
+  for (const row of stateCandidates) {
+    const remoteRow = remoteStateByNaturalKey.get(naturalKey(row.source_id, row.source_dedupe_key));
+    if (!remoteRow) continue;
+    const localId = String(row.id ?? "");
+    const remoteId = String(remoteRow.id ?? "");
+    if (!localId || !remoteId || localId === remoteId) continue;
+    skipState.run(localId, remoteId);
+  }
+
+  const skippedInboundEmails = countTempRows(db, MIGRATION_SKIP_INBOUND_TABLE);
+  const skippedMailMessages = countTempRowsWhere(db, MIGRATION_SKIP_INBOUND_TABLE, "mail_message_id IS NOT NULL AND mail_message_id != ''");
+  const skippedMailboxMessageStates = countTempRows(db, MIGRATION_SKIP_MAILBOX_STATE_TABLE);
+
+  return {
+    rowFilters: migrationDedupeRowFilters(),
+    skippedInboundEmails,
+    skippedMailMessages,
+    skippedMailboxMessageStates,
+  };
 }
 
 export async function storagePull(options?: StorageSyncOptions): Promise<SyncResult[]> {
@@ -463,6 +572,78 @@ function normalizeStorageTableFilter(filter: StorageTableFilter | undefined): St
     throw new Error("Storage table filters must be a single parameterized SQL predicate.");
   }
   return { where, params: filter.params ?? [] };
+}
+
+const MIGRATION_SKIP_INBOUND_TABLE = "_mailery_migration_skip_inbound_ids";
+const MIGRATION_SKIP_MAILBOX_STATE_TABLE = "_mailery_migration_skip_mailbox_state_ids";
+
+function createMigrationDedupeTempTables(db: Database): void {
+  db.exec(`
+    CREATE TEMP TABLE IF NOT EXISTS ${quoteIdent(MIGRATION_SKIP_INBOUND_TABLE)} (
+      id TEXT PRIMARY KEY,
+      mail_message_id TEXT,
+      remote_id TEXT,
+      remote_mail_message_id TEXT
+    );
+    DELETE FROM ${quoteIdent(MIGRATION_SKIP_INBOUND_TABLE)};
+
+    CREATE TEMP TABLE IF NOT EXISTS ${quoteIdent(MIGRATION_SKIP_MAILBOX_STATE_TABLE)} (
+      id TEXT PRIMARY KEY,
+      remote_id TEXT
+    );
+    DELETE FROM ${quoteIdent(MIGRATION_SKIP_MAILBOX_STATE_TABLE)};
+  `);
+}
+
+function migrationDedupeRowFilters(): LocalMigrationDedupePlan["rowFilters"] {
+  const skippedInbound = quoteIdent(MIGRATION_SKIP_INBOUND_TABLE);
+  const skippedState = quoteIdent(MIGRATION_SKIP_MAILBOX_STATE_TABLE);
+  return {
+    inbound_emails: {
+      where: `id NOT IN (SELECT id FROM ${skippedInbound})`,
+    },
+    inbound_recipients: {
+      where: `inbound_email_id NOT IN (SELECT id FROM ${skippedInbound})`,
+    },
+    inbound_labels: {
+      where: `inbound_email_id NOT IN (SELECT id FROM ${skippedInbound})`,
+    },
+    mail_messages: {
+      where: `id NOT IN (SELECT mail_message_id FROM ${skippedInbound} WHERE mail_message_id IS NOT NULL AND mail_message_id != '')`,
+    },
+    mailbox_message_state: {
+      where: `mail_message_id NOT IN (SELECT mail_message_id FROM ${skippedInbound} WHERE mail_message_id IS NOT NULL AND mail_message_id != '') AND id NOT IN (SELECT id FROM ${skippedState})`,
+    },
+    email_triage: {
+      where: `inbound_email_id IS NULL OR inbound_email_id NOT IN (SELECT id FROM ${skippedInbound})`,
+    },
+  };
+}
+
+function countTempRows(db: Database, table: string): number {
+  return countTempRowsWhere(db, table, "1 = 1");
+}
+
+function countTempRowsWhere(db: Database, table: string, where: string): number {
+  const row = db.query(`SELECT COUNT(*) AS count FROM ${quoteIdent(table)} WHERE ${where}`).get() as { count?: unknown } | null;
+  const count = Number(row?.count ?? 0);
+  return Number.isFinite(count) ? count : 0;
+}
+
+function chunks<T>(rows: T[], size: number): T[][] {
+  const batches: T[][] = [];
+  for (let offset = 0; offset < rows.length; offset += size) batches.push(rows.slice(offset, offset + size));
+  return batches;
+}
+
+function naturalKey(left: unknown, right: unknown): string {
+  return `${String(left ?? "")}\0${String(right ?? "")}`;
+}
+
+function stringOrNull(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  const text = String(value);
+  return text ? text : null;
 }
 
 export async function pullTable(remote: PgAdapterAsync, db: Database, table: StorageTable, options?: { batchSize?: number }): Promise<SyncResult> {

@@ -9,6 +9,8 @@ import {
   getStorageMode,
   getStoragePg,
   getStorageStatus,
+  prepareLocalMigrationDedupePlan,
+  runStorageMigrations,
   storagePull,
   storagePush,
 } from "../db/storage-sync.js";
@@ -101,6 +103,7 @@ export interface SelfHostedRuntimeResult {
   source: string;
   results: SyncResult[];
   migration?: LocalMailMigrationSummary;
+  dedupe?: LocalMailMigrationDedupeSummary;
 }
 
 export interface SelfHostedRuntimeOptions extends StorageSyncOptions {
@@ -122,6 +125,12 @@ export interface LocalMailMigrationSummary {
   sourceOpen: boolean;
   mailRows: number;
   tables: LocalMailMigrationTableSummary[];
+}
+
+export interface LocalMailMigrationDedupeSummary {
+  skippedInboundEmails: number;
+  skippedMailMessages: number;
+  skippedMailboxMessageStates: number;
 }
 
 export interface SelfHostedRuntimeHooks {
@@ -385,19 +394,41 @@ export async function migrateLocalToSelfHosted(
     throw new Error("Local-to-self-hosted migration found no local mail rows to migrate. Set EMAILS_DB_PATH or HASNA_EMAILS_DB_PATH to an existing local Mailery database, or skip migrate-local for a fresh self-hosted install.");
   }
   const source = options.source ?? "migration";
+  let dedupe: LocalMailMigrationDedupeSummary = {
+    skippedInboundEmails: 0,
+    skippedMailMessages: 0,
+    skippedMailboxMessageStates: 0,
+  };
+  let rowFilters: StorageSyncOptions["rowFilters"] = options.rowFilters;
+  if (!hooks.push) {
+    const remote = await getStoragePg();
+    try {
+      await runStorageMigrations(remote);
+      const plan = await prepareLocalMigrationDedupePlan(remote, getDatabase());
+      dedupe = {
+        skippedInboundEmails: plan.skippedInboundEmails,
+        skippedMailMessages: plan.skippedMailMessages,
+        skippedMailboxMessageStates: plan.skippedMailboxMessageStates,
+      };
+      rowFilters = { ...plan.rowFilters, ...options.rowFilters };
+    } finally {
+      await remote.close();
+    }
+  }
   if (options.dryRun) {
-    return { enabled: true, action: "migrate-local", source, results: [], migration };
+    return { enabled: true, action: "migrate-local", source, results: [], migration, dedupe };
   }
   const results = await (hooks.push ?? storagePush)({
     tables: options.tables,
     batchSize: options.batchSize,
+    rowFilters,
   });
   assertNoSyncErrors("Local-to-self-hosted migration", results);
   setConfigValue("mailery_mode", "self_hosted");
   setConfigValue("storage_mode", "remote");
   setConfigValue("self_hosted_migrated_at", new Date().toISOString());
   setConfigValue("self_hosted_migrated_mail_rows", migration.mailRows);
-  return { enabled: true, action: "migrate-local", source, results, migration };
+  return { enabled: true, action: "migrate-local", source, results, migration, dedupe };
 }
 
 export async function startSelfHostedRuntimeCache(options: SelfHostedRuntimeOptions & { flushIntervalMs?: number } = {}): Promise<SelfHostedRuntimeResult> {

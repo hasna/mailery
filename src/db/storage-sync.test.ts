@@ -13,6 +13,7 @@ import {
   getStorageMode,
   getStorageStatus,
   parseStorageTables,
+  prepareLocalMigrationDedupePlan,
   pullTablesFromRemote,
   pullTable,
   pushTable,
@@ -118,6 +119,32 @@ class StatefulRemote extends FakeRemote {
   setRows(table: string, rows: Row[]): void {
     this.rows.set(table, rows.map((row) => ({ ...row })));
   }
+}
+
+class DedupeRemote extends FakeRemote {
+  constructor(
+    private readonly remoteInboundRows: Row[],
+    private readonly remoteStateRows: Row[],
+  ) {
+    super();
+  }
+
+  async all(sql: string, ...params: unknown[]): Promise<unknown[]> {
+    if (sql.includes("FROM inbound_emails") && sql.includes("(provider_id, message_id)")) {
+      return this.remoteInboundRows.filter((row) => hasTuple(params, row.provider_id, row.message_id));
+    }
+    if (sql.includes("FROM mailbox_message_state") && sql.includes("(source_id, source_dedupe_key)")) {
+      return this.remoteStateRows.filter((row) => hasTuple(params, row.source_id, row.source_dedupe_key));
+    }
+    return super.all(sql, ...params);
+  }
+}
+
+function hasTuple(params: unknown[], left: unknown, right: unknown): boolean {
+  for (let index = 0; index < params.length; index += 2) {
+    if (params[index] === left && params[index + 1] === right) return true;
+  }
+  return false;
 }
 
 function providerRow(id: string, name: string): Row {
@@ -242,6 +269,89 @@ describe("emails storage sync configuration", () => {
     expect(tables.indexOf("mail_messages")).toBeLessThan(tables.indexOf("inbound_emails"));
     expect(tables.indexOf("inbound_emails")).toBeLessThan(tables.indexOf("inbound_recipients"));
     expect(tables.indexOf("inbound_emails")).toBeLessThan(tables.indexOf("inbound_labels"));
+  });
+
+  it("builds migration filters for inbound and mailbox-state rows that already exist remotely", async () => {
+    const db = getDatabase();
+    db.run(
+      `INSERT INTO providers (id, name, type, active, created_at, updated_at)
+       VALUES ('provider-1', 'Local source', 'ses', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+    );
+    const duplicateInbound = storeInboundEmail({
+      provider_id: "provider-1",
+      message_id: "provider-message-duplicate",
+      in_reply_to_email_id: null,
+      raw_s3_url: "s3://fixture-bucket/inbound/provider-message-duplicate",
+      from_address: "sender@example.com",
+      to_addresses: ["agent@example.com"],
+      cc_addresses: [],
+      subject: "Already remote",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 64,
+      received_at: "2026-07-01T12:00:00.000Z",
+    }, db);
+    const stateDuplicate = storeInboundEmail({
+      provider_id: "provider-1",
+      message_id: "provider-message-state-duplicate",
+      in_reply_to_email_id: null,
+      raw_s3_url: "s3://fixture-bucket/inbound/provider-message-state-duplicate",
+      from_address: "sender@example.com",
+      to_addresses: ["agent@example.com"],
+      cc_addresses: [],
+      subject: "State already remote",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 64,
+      received_at: "2026-07-01T12:01:00.000Z",
+    }, db);
+    const stateRow = db
+      .query("SELECT id, source_id, source_dedupe_key FROM mailbox_message_state WHERE mail_message_id = ?")
+      .get(`msg:inbound:${stateDuplicate.id}`) as Row;
+    const remote = new DedupeRemote(
+      [{
+        id: "remote-inbound-1",
+        provider_id: "provider-1",
+        message_id: "provider-message-duplicate",
+        mail_message_id: "msg:inbound:remote-inbound-1",
+      }],
+      [{
+        id: "remote-state-1",
+        source_id: stateRow.source_id,
+        source_dedupe_key: stateRow.source_dedupe_key,
+      }],
+    );
+
+    const plan = await prepareLocalMigrationDedupePlan(remote as unknown as PgAdapterAsync, db);
+
+    expect(plan).toMatchObject({
+      skippedInboundEmails: 1,
+      skippedMailMessages: 1,
+      skippedMailboxMessageStates: 1,
+    });
+    expect(await pushTable(db, remote as unknown as PgAdapterAsync, "inbound_emails", {
+      batchSize: 10,
+      filter: plan.rowFilters.inbound_emails,
+    })).toMatchObject({ table: "inbound_emails", rowsRead: 1, rowsWritten: 1, errors: [] });
+    expect(await pushTable(db, remote as unknown as PgAdapterAsync, "inbound_recipients", {
+      batchSize: 10,
+      filter: plan.rowFilters.inbound_recipients,
+    })).toMatchObject({ table: "inbound_recipients", rowsRead: 1, rowsWritten: 1, errors: [] });
+    expect(await pushTable(db, remote as unknown as PgAdapterAsync, "mail_messages", {
+      batchSize: 10,
+      filter: plan.rowFilters.mail_messages,
+    })).toMatchObject({ table: "mail_messages", rowsRead: 1, rowsWritten: 1, errors: [] });
+    expect(await pushTable(db, remote as unknown as PgAdapterAsync, "mailbox_message_state", {
+      batchSize: 10,
+      filter: plan.rowFilters.mailbox_message_state,
+    })).toMatchObject({ table: "mailbox_message_state", rowsRead: 0, rowsWritten: 0, errors: [] });
+    expect(duplicateInbound.id).not.toBe(stateDuplicate.id);
   });
 
   it("reconciles remote-derived labels and canonical mailbox state after storage sync", () => {

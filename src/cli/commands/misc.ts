@@ -9,7 +9,6 @@ import { getTemplate, renderTemplate } from "../../db/templates.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { truncate } from "../../lib/format.js";
 import { createSentEmailLedger } from "../../lib/sent-ledger.js";
-import { sendWithFailover } from "../../lib/send.js";
 import {
   getDueEnrollments, advanceEnrollment, getStepAtIndex,
 } from "../../db/sequences.js";
@@ -37,6 +36,11 @@ interface SchedulerTickCache {
   templates: Map<string, Template | null>;
   fromAddresses: Map<string, string | null>;
   defaultProvider?: Provider | null;
+}
+
+async function sendWithFailoverLazy(providerId: string, options: SendEmailOptions, db: Database) {
+  const { sendWithFailover } = await import("../../lib/send.js");
+  return sendWithFailover(providerId, options, db);
 }
 
 function schedulerCache(db: Database): SchedulerTickCache {
@@ -108,7 +112,7 @@ async function processDueScheduledEmails(cache: SchedulerTickCache, log: Schedul
         html: scheduled.html || undefined,
         text: scheduled.text_body || undefined,
       };
-      const sent = await sendWithFailover(provider.id, sendOpts, cache.db);
+      const sent = await sendWithFailoverLazy(provider.id, sendOpts, cache.db);
       await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, cache.db, sent.selfHostedSendAttemptId);
       markSent(scheduled.id, cache.db);
       result.sent++;
@@ -173,7 +177,7 @@ async function processDueSequenceEnrollments(cache: SchedulerTickCache, log: Sch
         text: template.text_template ? renderTemplate(template.text_template, vars) : undefined,
       };
 
-      const sent = await sendWithFailover(provider.id, sendOpts, cache.db);
+      const sent = await sendWithFailoverLazy(provider.id, sendOpts, cache.db);
       await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, cache.db, sent.selfHostedSendAttemptId);
       advanceEnrollment(enrollment.id, cache.db);
       result.sent++;

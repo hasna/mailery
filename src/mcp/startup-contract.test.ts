@@ -47,9 +47,13 @@ function hasDynamicImport(source: string, specifier: string): boolean {
 }
 
 describe("MCP startup contract", () => {
-  it("rejects remote storage mode before starting the MCP runtime", () => {
+  it("accepts legacy remote mode as self_hosted before starting the MCP runtime", () => {
     const result = Bun.spawnSync({
-      cmd: ["bun", "src/mcp/index.ts"],
+      cmd: [
+        "bun",
+        "-e",
+        "import { remoteRuntimeErrorForEntrypoint } from './src/lib/remote-runtime-guard.ts'; console.log(remoteRuntimeErrorForEntrypoint('mailery-mcp') ?? 'ok')",
+      ],
       cwd: join(import.meta.dir, "..", ".."),
       env: {
         ...process.env,
@@ -58,9 +62,11 @@ describe("MCP startup contract", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
+    const stdout = new TextDecoder().decode(result.stdout);
     const stderr = new TextDecoder().decode(result.stderr);
-    expect(result.exitCode).toBe(1);
-    expect(stderr).toContain("remote source-of-truth runtime");
+    expect(result.exitCode).toBe(0);
+    expect(stdout.trim()).toBe("ok");
+    expect(stderr).toBe("");
   });
 
   it("keeps heavy provider and sync dependencies behind tool-local dynamic imports", () => {
@@ -270,7 +276,7 @@ describe("MCP startup contract", () => {
     expect(source).toContain('"storage_push"');
     expect(source).toContain('"storage_pull"');
     expect(source).toContain('"storage_sync"');
-    expect(source).toContain("remote PostgreSQL storage");
+    expect(source).toContain("self-hosted PostgreSQL storage");
     expect(serverSource).toContain("registerEmailStorageTools");
   });
 });

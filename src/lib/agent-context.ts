@@ -9,6 +9,7 @@ import type { Domain } from "../types/index.js";
 import { assessDomainReadiness } from "./domain-readiness.js";
 import { getInboundBuckets, loadConfig } from "./config.js";
 import { enrichAddresses, type EnrichedAddress } from "./address-ownership.js";
+import { resolveMaileryMode, type MaileryMode, type MaileryModeLabel, type MaileryModeSource } from "./mode.js";
 import {
   listMailboxSources,
   listMailboxStatus,
@@ -22,12 +23,19 @@ const SOURCE_STATUS_LIMIT = 50;
 
 export interface EmailSystemStatus {
   generated_at: string;
+  mode: {
+    current: MaileryMode;
+    label: MaileryModeLabel;
+    source: MaileryModeSource;
+    warning: string | null;
+  };
   database: {
     data_dir: string;
   };
   providers: {
     total: number;
     active: number;
+    legacy_gmail: number;
     by_type: Record<string, number>;
   };
   domains: {
@@ -297,8 +305,11 @@ function firstDomainFixCommand(
 }
 
 export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemStatus {
-  const providers = listProviderSummaries(db);
-  const providersById = new Map(providers.map((provider) => [provider.id, provider]));
+  const mode = resolveMaileryMode({ migrateConfig: true });
+  const allProviders = listProviderSummaries(db);
+  const providers = allProviders.filter((provider) => provider.type !== "gmail");
+  const legacyGmailProviders = allProviders.filter((provider) => provider.type === "gmail");
+  const providersById = new Map(allProviders.map((provider) => [provider.id, provider]));
   const config = loadConfig();
   const inboundBuckets = getInboundBuckets();
   const inboxCounts = inboxSummary(db);
@@ -330,12 +341,19 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
 
   return {
     generated_at: new Date().toISOString(),
+    mode: {
+      current: mode.mode,
+      label: mode.label,
+      source: mode.source,
+      warning: mode.warning,
+    },
     database: {
       data_dir: getDataDir(),
     },
     providers: {
       total: providers.length,
       active: providers.filter((provider) => provider.active).length,
+      legacy_gmail: legacyGmailProviders.length,
       by_type: countByType(providers),
     },
     domains: {
@@ -393,6 +411,8 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
 export function formatEmailSystemStatus(status: EmailSystemStatus): string {
   const lines: string[] = [];
   lines.push("Email system status");
+  lines.push(`  Mode:       ${status.mode.current} (${status.mode.label})`);
+  if (status.mode.warning) lines.push(`  Mode note:  ${status.mode.warning}`);
   lines.push(`  Capabilities: ${status.providers.active}/${status.providers.total} active provider credential(s)`);
   lines.push(`  Domains:   ${status.domains.send_ready} send-ready, ${status.domains.receive_ready} receive-ready, ${status.domains.total} total`);
   const usableFromLabel = status.addresses.usable_from_truncated
@@ -402,6 +422,7 @@ export function formatEmailSystemStatus(status: EmailSystemStatus): string {
   lines.push(`  Mailboxes: ${status.mailboxes.counts.inbox} inbox, ${status.mailboxes.counts.unread} unread, ${status.mailboxes.counts.sent} sent`);
   lines.push(`  Inbox:     ${status.inbox.total} total, ${status.inbox.unread} unread${status.inbox.latest_received_at ? `, latest ${status.inbox.latest_received_at}` : ""}`);
   lines.push(`  Sources:   ${status.sources.total} ingestion source(s), ${status.sources.legacy} legacy, ${status.sources.orphaned} orphaned, realtime ${status.inbox.realtime.queue_configured ? "configured" : "not configured"}`);
+  if (status.providers.legacy_gmail > 0) lines.push(`  Legacy Gmail: ${status.providers.legacy_gmail} import-only provider(s) skipped`);
   if (status.inbox.realtime.last_error) lines.push(`  Last realtime error: ${status.inbox.realtime.last_error}`);
   if (status.provisioning.domains_failed || status.provisioning.addresses_failed) {
     lines.push(`  Provisioning failures: ${status.provisioning.domains_failed} domain(s), ${status.provisioning.addresses_failed} address(es)`);

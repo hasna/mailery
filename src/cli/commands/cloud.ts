@@ -128,6 +128,7 @@ function formatMe(me: MaileryCloudMeResponse, apiUrl: string): string {
   const tenant = me.tenant ? `${me.tenant.name} ${chalk.dim(me.tenant.id)}` : "unknown tenant";
   return [
     chalk.bold("Mailery Cloud"),
+    "  Mode:   cloud (Mailery Cloud)",
     `  API:    ${apiUrl}`,
     `  User:   ${user}`,
     `  Tenant: ${tenant}`,
@@ -424,9 +425,11 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
         const client = makeClient(cmd, deps);
         const info = await client.health().catch(() => null);
         const token = getToken(globalOpts);
+        const mode = { current: "cloud", label: "Mailery Cloud" } as const;
         if (!token) {
-          output({ api_url: apiUrl, service: info, authenticated: false }, [
+          output({ mode, api_url: apiUrl, service: info, authenticated: false }, [
             chalk.bold("Mailery Cloud"),
+            `  Mode: ${mode.current} (${mode.label})`,
             `  API:  ${apiUrl}`,
             `  Live: ${info ? "yes" : "no"}`,
             chalk.dim("  Not authenticated. Run `mailery cloud login`."),
@@ -434,7 +437,7 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
           return;
         }
         const me = await client.me();
-        output({ api_url: apiUrl, service: info, authenticated: true, me }, formatMe(me, apiUrl));
+        output({ mode, api_url: apiUrl, service: info, authenticated: true, me }, formatMe(me, apiUrl));
       } catch (e) {
         handleError(new Error(cloudErrorText(e)));
       }

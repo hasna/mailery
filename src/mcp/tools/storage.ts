@@ -21,7 +21,7 @@ function assertNoBidirectionalSyncErrors(result: { pull: SyncResult[]; push: Syn
 export function registerEmailStorageTools(server: McpServer): void {
   server.tool(
     "storage_status",
-    "Show Mailery remote storage sync configuration and local sync history.",
+    "Show Mailery self-hosted storage sync configuration and local sync history.",
     {
     },
     async () => {
@@ -32,7 +32,7 @@ export function registerEmailStorageTools(server: McpServer): void {
 
   server.tool(
     "storage_push",
-    "Push local Mailery data to remote PostgreSQL storage.",
+    "Push local Mailery data to self-hosted PostgreSQL storage.",
     {
       tables: z.array(z.string()).optional(),
       batch_size: z.number().int().positive().max(5000).optional().describe("Rows to read per table batch"),
@@ -47,7 +47,7 @@ export function registerEmailStorageTools(server: McpServer): void {
 
   server.tool(
     "storage_pull",
-    "Pull Mailery data from remote PostgreSQL storage to local SQLite.",
+    "Pull Mailery data from self-hosted PostgreSQL storage to local SQLite.",
     {
       tables: z.array(z.string()).optional(),
       batch_size: z.number().int().positive().max(5000).optional().describe("Rows to read per table batch"),

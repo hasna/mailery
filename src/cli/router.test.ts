@@ -64,7 +64,7 @@ describe("CLI router", () => {
     expect(routeRootPromptArgs(["--help"])).toEqual(["--help"]);
   });
 
-  it("blocks runtime commands when remote storage mode is requested", () => {
+  it("allows runtime commands when legacy remote storage mode aliases self_hosted", () => {
     const previous = process.env["HASNA_EMAILS_STORAGE_MODE"];
     process.env["HASNA_EMAILS_STORAGE_MODE"] = "remote";
     try {
@@ -75,11 +75,11 @@ describe("CLI router", () => {
       expect(remoteStorageRuntimeError(["mcp", "--gemini"])).toBeNull();
       expect(remoteStorageRuntimeError(["mcp", "--codex", "--gemini"])).toBeNull();
       expect(remoteStorageRuntimeError(["mcp", "--claude", "--codex", "--dry-run"])).toBeNull();
-      expect(remoteStorageRuntimeError(["mcp", "--claude"])).toContain("remote source-of-truth runtime");
-      expect(remoteStorageRuntimeError(["mcp", "--claude", "--codex"])).toContain("remote source-of-truth runtime");
-      expect(remoteStorageRuntimeError(["mcp", "--uninstall", "--gemini"])).toContain("remote source-of-truth runtime");
+      expect(remoteStorageRuntimeError(["mcp", "--claude"])).toBeNull();
+      expect(remoteStorageRuntimeError(["mcp", "--claude", "--codex"])).toBeNull();
+      expect(remoteStorageRuntimeError(["mcp", "--uninstall", "--gemini"])).toBeNull();
       expect(remoteStorageRuntimeError(["cloud", "status"])).toBeNull();
-      expect(remoteStorageRuntimeError(["inbox", "list"])).toContain("remote source-of-truth runtime");
+      expect(remoteStorageRuntimeError(["inbox", "list"])).toBeNull();
       expect(remoteStorageRuntimeError(["send", "--help"])).toBeNull();
     } finally {
       if (previous === undefined) delete process.env["HASNA_EMAILS_STORAGE_MODE"];

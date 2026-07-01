@@ -19,10 +19,10 @@ npm install -g @hasna/mailery
 Users install the open-source package: `@hasna/mailery`.
 
 Mailery stays local-first by default: local SQLite, local provider credentials,
-local MCP, and optional local remote-storage sync. Cloud is an opt-in hosted
-source of truth at `https://mailery.co`; the same public CLI can sign up, create
-an agent API key, create a billing link, create hosted mailboxes, read hosted
-messages, generate hosted digests, and pull cloud mail into local SQLite.
+local MCP, and optional self-hosted PostgreSQL sync. Mailery Cloud is an opt-in
+hosted source of truth at `https://mailery.co`; the same public CLI can sign up,
+create an agent API key, create a billing link, create hosted mailboxes, read
+hosted messages, generate hosted digests, and pull cloud mail into local SQLite.
 
 The SaaS control plane is private Hasna Tools infrastructure. End users and
 open-source contributors should not install or depend on private Hasna Tools
@@ -66,7 +66,7 @@ mailery inbox list --folder unread --source provider:<id>
 # Check sent email log
 mailery email list
 
-# Sync email data to remote PostgreSQL storage
+# Sync email data to self-hosted PostgreSQL storage
 mailery storage push
 ```
 
@@ -159,7 +159,7 @@ mailery group             # recipient groups
 mailery sequence          # drip sequences
 mailery schedule          # scheduled emails: list, cancel, run
 mailery triage            # AI triage: classify, prioritize, draft replies
-mailery storage           # sync to/from remote PostgreSQL storage: push, pull, migrate
+mailery storage           # sync to/from self-hosted PostgreSQL storage: push, pull, migrate
 mailery cloud             # optional Mailery Cloud signup/login/billing/mailbox/message/digest/domain workflow
 mailery aws               # AWS setup: SES receipt rules, S3 inbound bucket
 mailery config            # configuration (key=value)
@@ -362,22 +362,27 @@ Alternatively, point an SNS HTTP subscription at `POST /webhook/ses-inbound` on
 ## Storage Sync (PostgreSQL)
 
 Mailery is local-first. The public OSS default is local SQLite and files under
-`~/.hasna/emails/`, with no remote dependency. Remote storage is opt-in, and
-uses the `emails` slug: use `HASNA_EMAILS_*` env vars, not `HASNA_MAILERY_*`.
+`~/.hasna/emails/`, with no remote dependency. Self-hosted storage is opt-in,
+and uses the `emails` slug for database URL compatibility: use
+`HASNA_EMAILS_DATABASE_URL`, not `HASNA_MAILERY_DATABASE_URL`.
 
 For managed or self-hosted PostgreSQL, set `HASNA_EMAILS_DATABASE_URL` to the
 database connection string without printing or committing it. Self-hosted
 installs can use the fallback `EMAILS_DATABASE_URL`.
 
-Storage modes:
+Mailery modes:
 
 - `local` - all reads/writes stay in local SQLite/files.
-- `hybrid` - local remains the fast/offline store, while explicit
+- `self_hosted` - user/org-owned infrastructure. Local remains the fast/offline
+  store, while explicit
   `mailery storage push`, `mailery storage pull`, or `mailery storage sync --force`
-  mirrors state to remote PostgreSQL.
-- `remote` - reserved for remote source-of-truth operation. Today the CLI
-  allows `storage` commands in this mode, but rejects normal runtime commands
-  until a real remote adapter exists.
+  mirrors state to self-hosted PostgreSQL. For Hasna, this means AWS RDS plus
+  SES/S3, not Mailery SaaS.
+- `cloud` - Hasna-operated Mailery Cloud SaaS at `https://mailery.co`.
+
+Deprecated `remote` and `hybrid` mode values are accepted as aliases for
+`self_hosted`; `mailery storage status` reports a warning so old installs can
+migrate.
 
 ```bash
 # Configure RDS/PostgreSQL
@@ -385,8 +390,8 @@ export HASNA_EMAILS_DATABASE_URL="postgres://..."
 # Optional self-hosted fallback:
 # export EMAILS_DATABASE_URL="postgres://..."
 
-# Optional explicit mode; default is local without a DB URL, hybrid with one.
-export HASNA_EMAILS_STORAGE_MODE=hybrid
+# Optional explicit mode; default is local without a DB URL, self_hosted with one.
+export MAILERY_MODE=self_hosted
 
 # Check config and sync history
 mailery storage status

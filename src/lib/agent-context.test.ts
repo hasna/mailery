@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
-import { createProvider } from "../db/providers.js";
+import { createProvider, updateProvider } from "../db/providers.js";
 import { createAddress, markVerified } from "../db/addresses.js";
 import { createDomain, updateDnsStatus } from "../db/domains.js";
 import { storeInboundEmail, setInboundArchived, setInboundRead } from "../db/inbound.js";
@@ -60,6 +60,18 @@ describe("agent context", () => {
     expect(providerQueries.length).toBeGreaterThan(0);
     expect(providerQueries.join("\n")).not.toContain("SELECT *");
     expect(providerQueries.join("\n")).not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_secret|oauth_refresh_token|oauth_access_token)\b/);
+  });
+
+  it("reports legacy Gmail providers separately from active local/self_hosted capabilities", () => {
+    const gmail = createProvider({ name: "old-gmail", type: "gmail" });
+    updateProvider(gmail.id, { active: false });
+
+    const status = getEmailSystemStatus();
+
+    expect(status.mode.current).toBe("local");
+    expect(status.providers.total).toBe(0);
+    expect(status.providers.active).toBe(0);
+    expect(status.providers.legacy_gmail).toBe(1);
   });
 
   it("summarizes large address tables without hydrating every address as a usable sender", () => {

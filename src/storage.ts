@@ -1,5 +1,17 @@
 export { PgAdapterAsync } from "./db/remote-storage.js";
 export {
+  HASNA_EMAILS_MODE_ENV,
+  LEGACY_STORAGE_MODE_ENV,
+  LEGACY_STORAGE_MODE_FALLBACK_ENV,
+  MAILERY_MODE_CONFIG_KEY,
+  MAILERY_MODE_ENV,
+  MAILERY_MODE_ENV_KEYS,
+  getMaileryMode,
+  labelForMaileryMode,
+  normalizeMaileryMode,
+  resolveMaileryMode,
+} from "./lib/mode.js";
+export {
   EMAILS_STORAGE_ENV,
   EMAILS_STORAGE_FALLBACK_ENV,
   EMAILS_STORAGE_MODE_ENV,
@@ -23,6 +35,12 @@ export {
   storagePush,
   storageSync,
 } from "./db/storage-sync.js";
+export type {
+  MaileryMode,
+  MaileryModeLabel,
+  MaileryModeResolution,
+  MaileryModeSource,
+} from "./lib/mode.js";
 export type {
   StorageEnv,
   StorageMode,

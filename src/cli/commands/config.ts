@@ -5,6 +5,7 @@ import { redactSecrets } from "../../lib/redaction.js";
 import { formatListHint, handleError, isCliVerboseOutput, parseCliPage, summarizeCliValue } from "../utils.js";
 
 const KNOWN_KEYS: { key: string; description: string; example: string }[] = [
+  { key: "mailery_mode", description: "Mailery mode: local | self_hosted | cloud", example: "self_hosted" },
   { key: "default_provider", description: "Default provider ID used when --provider is not specified", example: "abc12345" },
   { key: "failover-providers", description: "Comma-separated provider IDs used as failover for send()", example: "abc12345,def67890" },
   { key: "attachment_storage", description: "Where to store inbound attachments: local | s3 | none", example: "local" },

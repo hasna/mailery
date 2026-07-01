@@ -167,7 +167,7 @@ describe("CLI JSON contracts", () => {
     expect(parsed.errors).toEqual([]);
   });
 
-  it("reports remote storage status with canonical env names", () => {
+  it("reports self-hosted storage status with canonical env names", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
     tempDirs.push(dir);
     const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
@@ -179,6 +179,7 @@ describe("CLI JSON contracts", () => {
     const parsed = JSON.parse(stdout) as {
       configured: boolean;
       mode: string;
+      modeLabel: string;
       env: string[];
       canonical: {
         cluster: string;
@@ -192,6 +193,7 @@ describe("CLI JSON contracts", () => {
     };
     expect(parsed.configured).toBe(false);
     expect(parsed.mode).toBe("local");
+    expect(parsed.modeLabel).toBe("Local");
     expect(parsed.env).toEqual(["HASNA_EMAILS_DATABASE_URL", "EMAILS_DATABASE_URL"]);
     expect(parsed.canonical).toEqual({
       cluster: "hasna-xyz-infra-apps-prod-postgres",
@@ -218,7 +220,7 @@ describe("CLI JSON contracts", () => {
     expect(stdout).not.toContain("postgres://");
   });
 
-  it("rejects remote storage mode for runtime commands until a remote adapter exists", () => {
+  it("treats legacy remote mode as a deprecated self_hosted alias", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
     tempDirs.push(dir);
     const env = {
@@ -227,23 +229,16 @@ describe("CLI JSON contracts", () => {
     };
 
     const result = runCli(["--json", "inbox", "list"], env);
-    const stdout = new TextDecoder().decode(result.stdout);
-    const stderr = new TextDecoder().decode(result.stderr);
-    expect(result.exitCode).toBe(1);
-    expect(stdout).toBe("");
-    const parsed = JSON.parse(stderr) as { error: { message: string; code: string; fix_commands: string[] } };
-    expect(parsed.error.code).toBe("remote_storage_runtime_unsupported");
-    expect(parsed.error.message).toContain("remote source-of-truth runtime");
-    expect(parsed.error.fix_commands).toContain("mailery storage status --json");
+    expect(result.exitCode).toBe(0);
 
     const storage = runCli(["--json", "storage", "status"], env);
     expect(storage.exitCode).toBe(0);
+    const parsedStorage = JSON.parse(stdoutText(storage)) as { mode: string; modeWarning: string | null };
+    expect(parsedStorage.mode).toBe("self_hosted");
+    expect(parsedStorage.modeWarning).toContain("Deprecated Mailery mode 'remote'");
 
     const feedback = runCli(["--json", "storage", "feedback", "hello"], env);
-    expect(feedback.exitCode).toBe(1);
-    expect(stdoutText(feedback)).toBe("");
-    const feedbackParsed = JSON.parse(stderrText(feedback)) as { error: { code: string } };
-    expect(feedbackParsed.error.code).toBe("remote_storage_runtime_unsupported");
+    expect(feedback.exitCode).toBe(0);
 
     const mcpDryRun = runCli(["--json", "mcp", "--claude", "--dry-run"], env);
     expect(mcpDryRun.exitCode).toBe(0);
@@ -270,7 +265,7 @@ describe("CLI JSON contracts", () => {
     const result = runCli(["storage", "--help"], env);
     const stdout = new TextDecoder().decode(result.stdout);
     expect(result.exitCode).toBe(0);
-    expect(stdout).toContain("remote PostgreSQL storage");
+    expect(stdout).toContain("self-hosted PostgreSQL storage");
     expect(stdout).not.toContain("cloud");
   });
 

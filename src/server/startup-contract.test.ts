@@ -30,9 +30,13 @@ function routeFiles(): string[] {
 }
 
 describe("server startup contract", () => {
-  it("rejects remote storage mode before starting the HTTP runtime", () => {
+  it("accepts legacy remote mode as self_hosted before starting the HTTP runtime", () => {
     const result = Bun.spawnSync({
-      cmd: ["bun", "src/server/index.ts"],
+      cmd: [
+        "bun",
+        "-e",
+        "import { remoteRuntimeErrorForEntrypoint } from './src/lib/remote-runtime-guard.ts'; console.log(remoteRuntimeErrorForEntrypoint('mailery-serve') ?? 'ok')",
+      ],
       cwd: join(import.meta.dir, "..", ".."),
       env: {
         ...process.env,
@@ -41,12 +45,14 @@ describe("server startup contract", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
+    const stdout = new TextDecoder().decode(result.stdout);
     const stderr = new TextDecoder().decode(result.stderr);
-    expect(result.exitCode).toBe(1);
-    expect(stderr).toContain("remote source-of-truth runtime");
+    expect(result.exitCode).toBe(0);
+    expect(stdout.trim()).toBe("ok");
+    expect(stderr).toBe("");
   });
 
-  it("keeps direct help and version available in remote storage mode", () => {
+  it("keeps direct help and version available with a legacy remote mode alias", () => {
     for (const args of [["--help"], ["--version"]]) {
       const result = Bun.spawnSync({
         cmd: ["bun", "src/server/index.ts", ...args],

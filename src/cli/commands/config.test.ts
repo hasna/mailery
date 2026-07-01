@@ -61,6 +61,8 @@ describe("config command redaction", () => {
 
   it("shows attachment storage and actual inbound config keys", async () => {
     const result = await runConfigCommand(["config", "keys"]);
+    expect(result.out).toContain("mailery_mode");
+    expect(result.out).toContain("local | self_hosted | cloud");
     expect(result.out).toContain("attachment_storage");
     expect(result.out).toContain("attachment_s3_bucket");
     expect(result.out).toContain("inbound_s3_bucket");

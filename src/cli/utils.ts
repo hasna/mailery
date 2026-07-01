@@ -93,7 +93,7 @@ function fixCommands(message: string): string[] {
   const lower = message.toLowerCase();
   if (lower.includes("remote source-of-truth runtime") || lower.includes("hasna_emails_storage_mode=remote")) {
     return [
-      "HASNA_EMAILS_STORAGE_MODE=hybrid mailery status --json",
+      "MAILERY_MODE=self_hosted mailery status --json",
       "mailery storage status --json",
       "mailery storage pull --help",
     ];

@@ -1,5 +1,5 @@
 /**
- * `mailery storage` — repo-native sync commands for local SQLite and remote PostgreSQL storage.
+ * `mailery storage` — repo-native sync commands for local SQLite and self-hosted PostgreSQL storage.
  */
 
 import type { Command } from "commander";
@@ -54,7 +54,7 @@ function assertNoBidirectionalSyncErrors(result: { pull: SyncResult[]; push: Syn
 function installStorageSubcommands(storageCmd: Command, output: (data: unknown, formatted: string) => void): void {
   storageCmd
     .command("status")
-    .description("Show remote storage sync status for the emails service")
+    .description("Show self-hosted storage sync status for the emails service")
     .option("--json", "Output as JSON")
     .action(async (opts: { json?: boolean }) => {
       try {
@@ -65,7 +65,8 @@ function installStorageSubcommands(storageCmd: Command, output: (data: unknown, 
           return;
         }
         console.log(`Storage configured: ${info.configured ? "yes" : "no"}`);
-        console.log(`Mode: ${info.mode}`);
+        console.log(`Mode: ${info.mode} (${info.modeLabel})`);
+        if (info.modeWarning) console.log(chalk.yellow(`Mode note: ${info.modeWarning}`));
         console.log(`Env: ${info.env.join(", ")}`);
         console.log(`Canonical RDS: ${info.canonical.cluster}/${info.canonical.database}`);
         console.log(`Runtime secret path: ${info.canonical.runtimePath}`);
@@ -79,7 +80,7 @@ function installStorageSubcommands(storageCmd: Command, output: (data: unknown, 
 
   storageCmd
     .command("push")
-    .description("Push local email data to remote PostgreSQL storage")
+    .description("Push local email data to self-hosted PostgreSQL storage")
     .option("--tables <tables>", "Comma-separated table names")
     .option("--batch-size <n>", "Rows to read per table batch")
     .option("--json", "Output as JSON")
@@ -99,7 +100,7 @@ function installStorageSubcommands(storageCmd: Command, output: (data: unknown, 
 
   storageCmd
     .command("pull")
-    .description("Pull email data from remote PostgreSQL storage to local SQLite")
+    .description("Pull email data from self-hosted PostgreSQL storage to local SQLite")
     .option("--tables <tables>", "Comma-separated table names")
     .option("--batch-size <n>", "Rows to read per table batch")
     .option("--json", "Output as JSON")
@@ -141,7 +142,7 @@ function installStorageSubcommands(storageCmd: Command, output: (data: unknown, 
 
   storageCmd
     .command("migrate")
-    .description("Apply PostgreSQL migrations for emails remote storage")
+    .description("Apply PostgreSQL migrations for self-hosted emails storage")
     .option("--dry-run", "Print SQL without executing")
     .action(async (opts: { dryRun?: boolean }) => {
       try {
@@ -162,7 +163,7 @@ function installStorageSubcommands(storageCmd: Command, output: (data: unknown, 
 
   storageCmd
     .command("setup")
-    .description("Show remote storage database configuration instructions")
+    .description("Show self-hosted database configuration instructions")
     .action(async () => {
       const { getStorageStatus } = await import("../../db/storage-sync.js");
       const info = getStorageStatus();
@@ -171,6 +172,8 @@ function installStorageSubcommands(storageCmd: Command, output: (data: unknown, 
       console.log("\nLoad that secret into the canonical PostgreSQL connection string env var:");
       console.log(`  ${info.canonical.env}`);
       console.log(`\nFallback env for local/self-hosted compatibility: ${info.canonical.fallbackEnv}`);
+      console.log(`\nMode: ${info.mode} (${info.modeLabel})`);
+      console.log(`Set explicitly with: MAILERY_MODE=self_hosted`);
       console.log("\nThen run: mailery storage status");
     });
 
@@ -195,6 +198,6 @@ function installStorageSubcommands(storageCmd: Command, output: (data: unknown, 
 export function registerStorageCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const storageCmd = program
     .command("storage")
-    .description("Sync email data with remote PostgreSQL storage");
+    .description("Sync email data with self-hosted PostgreSQL storage");
   installStorageSubcommands(storageCmd, output);
 }

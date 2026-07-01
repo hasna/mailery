@@ -115,7 +115,8 @@ describe("emails storage sync configuration", () => {
     expect(getStorageStatus()).toMatchObject({
       configured: true,
       activeEnv: "HASNA_EMAILS_DATABASE_URL",
-      mode: "hybrid",
+      mode: "self_hosted",
+      modeLabel: "Self-hosted",
       service: "emails",
       canonical: {
         cluster: "hasna-xyz-infra-apps-prod-postgres",
@@ -140,10 +141,12 @@ describe("emails storage sync configuration", () => {
     expect(getStorageMode()).toBe("local");
 
     process.env["EMAILS_DATABASE_URL"] = "postgres://remote";
-    expect(getStorageMode()).toBe("hybrid");
+    expect(getStorageMode()).toBe("self_hosted");
 
     process.env["HASNA_EMAILS_STORAGE_MODE"] = "remote";
-    expect(getStorageMode()).toBe("remote");
+    const status = getStorageStatus();
+    expect(status.mode).toBe("self_hosted");
+    expect(status.modeWarning).toContain("Deprecated Mailery mode 'remote'");
   });
 
   it("parses and validates storage table filters", () => {

@@ -93,21 +93,24 @@ class StatefulRemote extends FakeRemote {
     const columns = match[2]!
       .split(",")
       .map((column) => column.trim().replace(/^"|"$/g, ""));
-    const row = Object.fromEntries(columns.map((column, index) => [column, params[index]]));
     const primaryKey = table === "mailbox_message_state"
       ? ["mailbox_id", "mail_message_id"]
       : table === "inbound_recipients" || table === "inbound_labels"
         ? ["inbound_email_id", table === "inbound_recipients" ? "address" : "label"]
         : ["id"];
-    const key = primaryKey.map((column) => String(row[column] ?? "")).join("\0");
     const tableRows = this.rows.get(table) ?? [];
-    const existingIndex = tableRows.findIndex((candidate) => (
-      primaryKey.map((column) => String(candidate[column] ?? "")).join("\0") === key
-    ));
-    if (existingIndex >= 0) tableRows[existingIndex] = { ...tableRows[existingIndex], ...row };
-    else tableRows.push(row);
+    for (let offset = 0; offset < params.length; offset += columns.length) {
+      const values = params.slice(offset, offset + columns.length);
+      const row = Object.fromEntries(columns.map((column, index) => [column, values[index]]));
+      const key = primaryKey.map((column) => String(row[column] ?? "")).join("\0");
+      const existingIndex = tableRows.findIndex((candidate) => (
+        primaryKey.map((column) => String(candidate[column] ?? "")).join("\0") === key
+      ));
+      if (existingIndex >= 0) tableRows[existingIndex] = { ...tableRows[existingIndex], ...row };
+      else tableRows.push(row);
+    }
     this.rows.set(table, tableRows);
-    return { changes: 1 };
+    return { changes: Math.trunc(params.length / Math.max(1, columns.length)) };
   }
 
   setRows(table: string, rows: Row[]): void {
@@ -362,7 +365,10 @@ describe("storage table sync batching", () => {
     expect(result).toMatchObject({ table: "providers", rowsRead: 5, rowsWritten: 5, errors: [] });
     expect(dataReads.map((call) => call.args)).toEqual([[2, 0], [2, 2], [2, 4]]);
     expect(dataReads.every((call) => call.sql.includes("LIMIT ? OFFSET ?"))).toBe(true);
-    expect(remote.runCalls).toHaveLength(5);
+    expect(remote.runCalls).toHaveLength(3);
+    const columnCount = Object.keys(localRows[0]!).length;
+    expect(remote.runCalls.map((call) => call.params.length)).toEqual([columnCount * 2, columnCount * 2, columnCount]);
+    expect(remote.runCalls[0]!.sql).toContain(`VALUES (${Array.from({ length: columnCount }, () => "?").join(", ")}), (${Array.from({ length: columnCount }, () => "?").join(", ")})`);
   });
 
   it("pushes only rows matching a parameterized row filter", async () => {

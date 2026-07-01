@@ -56,6 +56,7 @@ export type StorageTable = (typeof STORAGE_TABLES)[number];
 type Row = Record<string, unknown>;
 type StorageTableFilterParam = string | number | bigint | boolean | null | Uint8Array;
 export const STORAGE_SYNC_BATCH_SIZE = 500;
+const POSTGRES_UPSERT_PARAM_BUDGET = 30_000;
 
 const PRIMARY_KEYS: Record<StorageTable, string[]> = {
   providers: ["id"],
@@ -516,20 +517,26 @@ async function upsertPg(remote: PgAdapterAsync, table: StorageTable, columns: st
   if (columns.length === 0) return 0;
   const primaryKeys = PRIMARY_KEYS[table];
   const columnList = columns.map(quoteIdent).join(", ");
-  const placeholders = columns.map(() => "?").join(", ");
   const keyList = primaryKeys.map(quoteIdent).join(", ");
   const updateColumns = columns.filter((column) => !primaryKeys.includes(column));
   const fallbackKey = primaryKeys[0]!;
   const setClause = updateColumns.length > 0
     ? updateColumns.map((column) => `${quoteIdent(column)} = EXCLUDED.${quoteIdent(column)}`).join(", ")
     : `${quoteIdent(fallbackKey)} = EXCLUDED.${quoteIdent(fallbackKey)}`;
-  for (const row of rows) {
+  const maxRowsPerStatement = Math.max(1, Math.floor(POSTGRES_UPSERT_PARAM_BUDGET / columns.length));
+  let written = 0;
+  for (let offset = 0; offset < rows.length; offset += maxRowsPerStatement) {
+    const batch = rows.slice(offset, offset + maxRowsPerStatement);
+    const rowPlaceholder = `(${columns.map(() => "?").join(", ")})`;
+    const placeholders = batch.map(() => rowPlaceholder).join(", ");
+    const params = batch.flatMap((row) => columns.map((column) => coerceForPg(row[column], remoteColumns.get(column))));
     await remote.run(
-      `INSERT INTO ${quoteIdent(table)} (${columnList}) VALUES (${placeholders}) ON CONFLICT (${keyList}) DO UPDATE SET ${setClause}`,
-      ...columns.map((column) => coerceForPg(row[column], remoteColumns.get(column))),
+      `INSERT INTO ${quoteIdent(table)} (${columnList}) VALUES ${placeholders} ON CONFLICT (${keyList}) DO UPDATE SET ${setClause}`,
+      ...params,
     );
+    written += batch.length;
   }
-  return rows.length;
+  return written;
 }
 
 function upsertSqlite(db: Database, table: StorageTable, columns: string[], rows: Row[]): number {

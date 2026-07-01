@@ -65,11 +65,11 @@ function installStorageSubcommands(storageCmd: Command, output: (data: unknown, 
           return;
         }
         console.log(`Storage configured: ${info.configured ? "yes" : "no"}`);
-        console.log(`Mode: ${info.mode} (${info.modeLabel})`);
-        if (info.modeWarning) console.log(chalk.yellow(`Mode note: ${info.modeWarning}`));
-        console.log(`Env: ${info.env.join(", ")}`);
-        console.log(`Canonical RDS: ${info.canonical.cluster}/${info.canonical.database}`);
-        console.log(`Runtime secret path: ${info.canonical.runtimePath}`);
+        console.log(`Storage mode: ${info.mode}`);
+        console.log(`Mailery mode: ${info.maileryMode} (${info.maileryModeLabel})`);
+        if (info.maileryModeWarning) console.log(chalk.yellow(`Mode note: ${info.maileryModeWarning}`));
+        console.log(`Database env: ${info.env.join(", ")}`);
+        console.log(`Storage mode env: ${info.modeEnv.join(", ")}`);
         console.log(`Tables: ${info.tables.join(", ")}`);
         if (info.sync.length === 0) console.log(chalk.dim("Sync: no local sync history"));
         for (const entry of info.sync) {
@@ -167,13 +167,14 @@ function installStorageSubcommands(storageCmd: Command, output: (data: unknown, 
     .action(async () => {
       const { getStorageStatus } = await import("../../db/storage-sync.js");
       const info = getStorageStatus();
-      console.log(`Canonical RDS: ${info.canonical.cluster}/${info.canonical.database}`);
-      console.log(`Runtime secret path: ${info.canonical.runtimePath}`);
-      console.log("\nLoad that secret into the canonical PostgreSQL connection string env var:");
-      console.log(`  ${info.canonical.env}`);
-      console.log(`\nFallback env for local/self-hosted compatibility: ${info.canonical.fallbackEnv}`);
-      console.log(`\nMode: ${info.mode} (${info.modeLabel})`);
-      console.log(`Set explicitly with: MAILERY_MODE=self_hosted`);
+      console.log("Self-hosted storage uses your PostgreSQL connection string.");
+      console.log("\nSet the canonical database URL env var:");
+      console.log(`  export ${info.canonical.env}='<postgresql-connection-url>'`);
+      console.log(`\nFallback env for compatibility: ${info.canonical.fallbackEnv}`);
+      console.log("\nSet the deployment mode explicitly:");
+      console.log("  export MAILERY_MODE=self_hosted");
+      console.log("\nOptional storage sync mode:");
+      console.log("  export HASNA_EMAILS_STORAGE_MODE=hybrid");
       console.log("\nThen run: mailery storage status");
     });
 

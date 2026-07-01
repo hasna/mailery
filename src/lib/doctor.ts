@@ -33,7 +33,7 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
   // 2. Config file
   const { getDataDir } = await import("../db/database.js");
   const configPath = join(getDataDir(), "config.json");
-  const mode = resolveMaileryMode({ migrateConfig: true });
+  const mode = resolveMaileryMode();
   checks.push({
     name: "Mode",
     status: mode.warning ? "warn" : "pass",

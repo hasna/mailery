@@ -47,13 +47,9 @@ function hasDynamicImport(source: string, specifier: string): boolean {
 }
 
 describe("MCP startup contract", () => {
-  it("accepts legacy remote mode as self_hosted before starting the MCP runtime", () => {
+  it("rejects remote storage mode before starting the MCP runtime", () => {
     const result = Bun.spawnSync({
-      cmd: [
-        "bun",
-        "-e",
-        "import { remoteRuntimeErrorForEntrypoint } from './src/lib/remote-runtime-guard.ts'; console.log(remoteRuntimeErrorForEntrypoint('mailery-mcp') ?? 'ok')",
-      ],
+      cmd: ["bun", "src/mcp/index.ts"],
       cwd: join(import.meta.dir, "..", ".."),
       env: {
         ...process.env,
@@ -62,11 +58,9 @@ describe("MCP startup contract", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
-    const stdout = new TextDecoder().decode(result.stdout);
     const stderr = new TextDecoder().decode(result.stderr);
-    expect(result.exitCode).toBe(0);
-    expect(stdout.trim()).toBe("ok");
-    expect(stderr).toBe("");
+    expect(result.exitCode).toBe(1);
+    expect(stderr).toContain("remote source-of-truth runtime");
   });
 
   it("keeps heavy provider and sync dependencies behind tool-local dynamic imports", () => {

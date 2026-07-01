@@ -380,9 +380,12 @@ Mailery modes:
   SES/S3, not Mailery SaaS.
 - `cloud` - Hasna-operated Mailery Cloud SaaS at `https://mailery.co`.
 
-Deprecated `remote` and `hybrid` mode values are accepted as aliases for
-`self_hosted`; `mailery storage status` reports a warning so old installs can
-migrate.
+Deprecated `remote` and `hybrid` values are accepted as aliases only for the
+deployment mode (`MAILERY_MODE`, `HASNA_EMAILS_MODE`, or legacy config keys) and
+map to `self_hosted`. The lower-level storage sync mode remains separate:
+`HASNA_EMAILS_STORAGE_MODE=hybrid` means local runtime plus explicit PostgreSQL
+sync, while `HASNA_EMAILS_STORAGE_MODE=remote` is still reserved until a true
+remote source-of-truth runtime exists.
 
 ```bash
 # Configure RDS/PostgreSQL

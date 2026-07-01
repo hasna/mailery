@@ -12,8 +12,6 @@ export const LEGACY_MODE_CONFIG_KEYS = ["mode", "storage_mode"] as const;
 export const MAILERY_MODE_ENV_KEYS = [
   MAILERY_MODE_ENV,
   HASNA_EMAILS_MODE_ENV,
-  LEGACY_STORAGE_MODE_ENV,
-  LEGACY_STORAGE_MODE_FALLBACK_ENV,
 ] as const;
 
 export interface MaileryModeSource {
@@ -140,5 +138,5 @@ export function resolveMaileryMode(opts: ResolveMaileryModeOptions = {}): Mailer
 }
 
 export function getMaileryMode(): MaileryMode {
-  return resolveMaileryMode({ migrateConfig: true }).mode;
+  return resolveMaileryMode().mode;
 }

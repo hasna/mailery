@@ -3,10 +3,8 @@ import { getDatabase, rebuildInboundLabelState, reconcileMailboxMessageState } f
 import type { PgAdapterAsync } from "./remote-storage.js";
 import { getCanonicalOpenEmailsRdsConfig, type CanonicalOpenEmailsRdsConfig } from "../lib/config.js";
 import {
-  HASNA_EMAILS_MODE_ENV,
   LEGACY_STORAGE_MODE_ENV,
   LEGACY_STORAGE_MODE_FALLBACK_ENV,
-  MAILERY_MODE_ENV,
   resolveMaileryMode,
   type MaileryMode,
   type MaileryModeLabel,
@@ -122,7 +120,7 @@ export interface StorageSyncHooks {
   push?: (options?: StorageSyncOptions) => Promise<SyncResult[]>;
 }
 
-export type StorageMode = MaileryMode;
+export type StorageMode = "local" | "hybrid" | "remote";
 
 export interface StorageEnv {
   name: string;
@@ -131,9 +129,10 @@ export interface StorageEnv {
 export interface StorageStatus {
   configured: boolean;
   mode: StorageMode;
-  modeLabel: MaileryModeLabel;
-  modeSource: MaileryModeSource;
-  modeWarning: string | null;
+  maileryMode: MaileryMode;
+  maileryModeLabel: MaileryModeLabel;
+  maileryModeSource: MaileryModeSource;
+  maileryModeWarning: string | null;
   env: typeof STORAGE_DATABASE_ENV;
   modeEnv: typeof STORAGE_MODE_ENV;
   activeEnv: string | null;
@@ -148,7 +147,7 @@ export const EMAILS_STORAGE_FALLBACK_ENV = "EMAILS_DATABASE_URL";
 export const EMAILS_STORAGE_MODE_ENV = LEGACY_STORAGE_MODE_ENV;
 export const EMAILS_STORAGE_MODE_FALLBACK_ENV = LEGACY_STORAGE_MODE_FALLBACK_ENV;
 export const STORAGE_DATABASE_ENV = [EMAILS_STORAGE_ENV, EMAILS_STORAGE_FALLBACK_ENV] as const;
-export const STORAGE_MODE_ENV = [MAILERY_MODE_ENV, HASNA_EMAILS_MODE_ENV, EMAILS_STORAGE_MODE_ENV, EMAILS_STORAGE_MODE_FALLBACK_ENV] as const;
+export const STORAGE_MODE_ENV = [EMAILS_STORAGE_MODE_ENV, EMAILS_STORAGE_MODE_FALLBACK_ENV] as const;
 
 function readEnv(name: string): string | null {
   const value = process.env[name]?.trim();
@@ -172,19 +171,30 @@ export function getStorageDatabaseUrl(): string | null {
   return env ? readEnv(env.name) : null;
 }
 
+function normalizeStorageMode(value: string): StorageMode {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "local" || normalized === "hybrid" || normalized === "remote") return normalized;
+  throw new Error(`Unknown emails storage mode: ${value}`);
+}
+
 export function getStorageMode(): StorageMode {
-  return resolveMaileryMode({ migrateConfig: true }).mode;
+  for (const env of STORAGE_MODE_ENV) {
+    const value = readEnv(env);
+    if (value) return normalizeStorageMode(value);
+  }
+  return getStorageDatabaseUrl() ? "hybrid" : "local";
 }
 
 export function getStorageStatus(): StorageStatus {
   const activeEnv = getStorageDatabaseEnv();
-  const mode = resolveMaileryMode({ migrateConfig: true });
+  const maileryMode = resolveMaileryMode();
   return {
     configured: Boolean(activeEnv),
-    mode: mode.mode,
-    modeLabel: mode.label,
-    modeSource: mode.source,
-    modeWarning: mode.warning,
+    mode: getStorageMode(),
+    maileryMode: maileryMode.mode,
+    maileryModeLabel: maileryMode.label,
+    maileryModeSource: maileryMode.source,
+    maileryModeWarning: maileryMode.warning,
     env: STORAGE_DATABASE_ENV,
     modeEnv: STORAGE_MODE_ENV,
     activeEnv: activeEnv?.name ?? null,

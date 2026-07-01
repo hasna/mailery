@@ -305,7 +305,7 @@ function firstDomainFixCommand(
 }
 
 export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemStatus {
-  const mode = resolveMaileryMode({ migrateConfig: true });
+  const mode = resolveMaileryMode();
   const allProviders = listProviderSummaries(db);
   const providers = allProviders.filter((provider) => provider.type !== "gmail");
   const legacyGmailProviders = allProviders.filter((provider) => provider.type === "gmail");

@@ -156,7 +156,7 @@ Created: 2026-06-18
 - Goal 8: updated Bun global install to `@hasna/mailery@0.6.48` using `--minimum-release-age=0`; Bun reported duplicate `@hasna/models` metadata warnings in the global package manifest, but installation and binary linking succeeded.
 - Goal 8: installed `mailery` smoke passed for `mailery --version` (`0.6.48`), `mailery ui --help`, `mailery agent digest today --local --json`, `mailery agent organize --help`, `mailery provider list --json`, `mailery inbox list --limit 1 --json`, and `mailery sandbox count --json`.
 - Goal 8: npm registry verification returned latest version `0.6.48`.
-- Goal 8 follow-up: Groq API key was stored in the local `secrets` vault at `hasna/xyz/opensource/emails/prod/env/groq_api_key` and in Mailery local config as redacted `groq_api_key`.
+- Goal 8 follow-up: Groq API key was stored in the local secrets vault and in Mailery local config as redacted `groq_api_key`.
 - Goal 8 follow-up: the first live Groq organization pass exposed Groq's incompatibility with AI SDK JSON schema output plus function tools for `llama-3.3-70b-versatile`; `c1c4e0e` fixes Groq agent/digest generation by using strict JSON-text prompts with local validation, keeps function tools for non-Groq providers, and retries prior errored agent runs.
 - Goal 8 follow-up: `EMAILS_DB_PATH=:memory: bun test src/lib/email-agents.test.ts src/lib/email-digest.test.ts src/cli/commands/status.test.ts` passed: 13 tests, 0 failures.
 - Goal 8 follow-up: `./node_modules/.bin/tsc --noEmit`, `git diff --check`, `EMAILS_DB_PATH=:memory: bun test`, `bun run build`, and `npm pack --dry-run --silent` passed for `0.6.49`; the full suite passed with 1594 tests, 0 failures, and 4834 expect calls across 146 files.

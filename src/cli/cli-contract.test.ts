@@ -198,9 +198,9 @@ describe("CLI JSON contracts", () => {
     expect(parsed.maileryModeLabel).toBe("Local");
     expect(parsed.env).toEqual(["HASNA_EMAILS_DATABASE_URL", "EMAILS_DATABASE_URL"]);
     expect(parsed.canonical).toEqual({
-      cluster: "hasna-xyz-infra-apps-prod-postgres",
+      cluster: "mailery-postgres",
       database: "emails",
-      runtimePath: "hasna/xyz/opensource/emails/prod/rds",
+      runtimePath: "mailery/self-hosted/emails/prod/rds",
       env: "HASNA_EMAILS_DATABASE_URL",
       fallbackEnv: "EMAILS_DATABASE_URL",
     });

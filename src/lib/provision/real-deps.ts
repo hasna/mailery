@@ -4,9 +4,9 @@
  * (identity/MAIL FROM/verify), the direct Cloudflare DNS publish, and SES
  * inbound. Used by the provisioning daemon. No @hasna/connectors.
  *
- * Cross-account note: SES uses the configured SES provider's stored creds
- * (alumia); Cloudflare uses env auth; Route53 NS delegation uses the ambient AWS
- * env (run the daemon with the registrar account's profile). Steps already done
+ * Cross-account note: SES uses the configured SES provider's stored creds;
+ * Cloudflare uses env auth; Route53 NS delegation uses the ambient AWS env
+ * (run the daemon with the registrar account's profile). Steps already done
  * (zone exists, NS delegated, verified) are detected and skipped.
  */
 
@@ -34,8 +34,8 @@ export function makeDomainDeps(opts: RealDepsOptions): DomainDeps {
   const adapter = getAdapter(opts.provider);
 
   return {
-    // The domain is bought + delegated by `domains buy` (xyz-infra). Here we
-    // only confirm ownership/skip — the daemon focuses on SES setup.
+    // The domain is bought + delegated by `domains buy`. Here we only confirm
+    // ownership/skip; the daemon focuses on SES setup.
     async buyOrSkip() {
       return { registrar: null };
     },

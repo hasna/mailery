@@ -14,16 +14,16 @@ export interface EmailsConfig {
   [key: string]: unknown;
 }
 
-export const CANONICAL_OPEN_EMAILS_S3_BUCKET = "hasna-xyz-opensource-emails-prod";
+export const CANONICAL_OPEN_EMAILS_S3_BUCKET = "mailery-email-archive";
 export const CANONICAL_OPEN_EMAILS_S3_REGION = "us-east-1";
-export const CANONICAL_OPEN_EMAILS_SECRETS_BASE = "hasna/xyz/opensource/emails/prod";
+export const CANONICAL_OPEN_EMAILS_SECRETS_BASE = "mailery/self-hosted/emails/prod";
 export const CANONICAL_OPEN_EMAILS_SECRET_PATHS = {
   env: `${CANONICAL_OPEN_EMAILS_SECRETS_BASE}/env`,
   aws: `${CANONICAL_OPEN_EMAILS_SECRETS_BASE}/aws`,
   s3: `${CANONICAL_OPEN_EMAILS_SECRETS_BASE}/s3`,
   rds: `${CANONICAL_OPEN_EMAILS_SECRETS_BASE}/rds`,
 } as const;
-export const CANONICAL_OPEN_EMAILS_RDS_CLUSTER = "hasna-xyz-infra-apps-prod-postgres";
+export const CANONICAL_OPEN_EMAILS_RDS_CLUSTER = "mailery-postgres";
 export const CANONICAL_OPEN_EMAILS_RDS_DATABASE = "emails";
 export const CANONICAL_OPEN_EMAILS_RDS_SECRET_PATH = CANONICAL_OPEN_EMAILS_SECRET_PATHS.rds;
 
@@ -162,9 +162,9 @@ export interface GmailArchiveConfig {
 }
 
 /**
- * Default inbound mailbox store (SES receipt rules → S3). For this app SES runs
- * in the hasna-studio-alumia account, so the default bucket is the alumia
- * inbound bucket. Resolved from config, env, then a sensible default.
+ * Default inbound mailbox store (SES receipt rules -> S3). Resolved from config,
+ * env, then a local default. Production operators should configure this
+ * explicitly for their own AWS account.
  */
 export function getInboundConfig(): { bucket?: string; region: string; prefix?: string; profile?: string } {
   const config = loadConfig();
@@ -210,8 +210,8 @@ export function addInboundBucket(bucket: string, region: string, providerId?: st
 }
 
 /**
- * AWS profile to use for SES + inbound S3 operations (so the operator does not
- * pass --profile every time). For this app SES runs in hasna-studio-alumia.
+ * AWS profile to use for SES + inbound S3 operations so the operator does not
+ * pass --profile every time.
  */
 export function getSesProfile(): string | undefined {
   const config = loadConfig();
@@ -249,14 +249,11 @@ export interface BrandsightAuth {
 export function getBrandsightAuth(): BrandsightAuth | undefined {
   const config = loadConfig();
   const apiKey = (config["brandsight_api_key"] as string | undefined)
-    ?? process.env["BRANDSIGHT_API_KEY"]
-    ?? process.env["HASNAXYZ_BRANDSIGHT_LIVE_API_KEY"];
+    ?? process.env["BRANDSIGHT_API_KEY"];
   const apiSecret = (config["brandsight_api_secret"] as string | undefined)
-    ?? process.env["BRANDSIGHT_API_SECRET"]
-    ?? process.env["HASNAXYZ_BRANDSIGHT_LIVE_API_SECRET"];
+    ?? process.env["BRANDSIGHT_API_SECRET"];
   const customerId = (config["brandsight_customer_id"] as string | undefined)
-    ?? process.env["BRANDSIGHT_CUSTOMER_ID"]
-    ?? process.env["HASNAXYZ_BRANDSIGHT_LIVE_CUSTOMER_ID"];
+    ?? process.env["BRANDSIGHT_CUSTOMER_ID"];
   if (!apiKey || !apiSecret || !customerId) return undefined;
   return { apiKey, apiSecret, customerId };
 }

@@ -120,9 +120,9 @@ describe("emails storage sync configuration", () => {
       maileryModeLabel: "Self-hosted",
       service: "emails",
       canonical: {
-        cluster: "hasna-xyz-infra-apps-prod-postgres",
+        cluster: "mailery-postgres",
         database: "emails",
-        runtimePath: "hasna/xyz/opensource/emails/prod/rds",
+        runtimePath: "mailery/self-hosted/emails/prod/rds",
         env: "HASNA_EMAILS_DATABASE_URL",
         fallbackEnv: "EMAILS_DATABASE_URL",
       },

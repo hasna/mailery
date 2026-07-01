@@ -65,17 +65,17 @@ Verified end-to-end: 3 funny `.com` domains bought, DNS in Cloudflare, SES DKIM
 verified, 3 addresses/domain, **144/144 emails** sent via the `emails` CLI and
 received (SES→S3→SQLite). See `docs/PLAN-PROVISIONING.md` for the architecture.
 
-## AWS account architecture (this app)
+## AWS account architecture (self-hosted operator example)
 | Concern | AWS account | Notes |
 |---|---|---|
-| **SES** (send + inbound) | **hasna-studio-alumia** (638389534677) | Production access (50k/day). All domain identities, MAIL FROM, receipt rules → operator-configured S3 live here (`inbound_s3_bucket` / `inbound_s3_buckets`). |
-| **Domain purchase** (Route53 Domains) | **hasna-xyz-infra** (789877399345) | Run `domains domain buy` with `AWS_PROFILE=hasna-xyz-infra`. |
-| **DNS** | Cloudflare (account `4f59afea…`) | Always Cloudflare — DKIM/SPF/DMARC/MAIL-FROM/inbound-MX + Email Routing. |
+| **SES** (send + inbound) | Operator mail account | Production access. All domain identities, MAIL FROM, and receipt rules live here; configure S3 with `inbound_s3_bucket` / `inbound_s3_buckets`. |
+| **Domain purchase** (Route53 Domains) | Operator registrar account | Run `domains domain buy` with the operator's AWS profile or ambient credentials. |
+| **DNS** | Operator Cloudflare account | Always Cloudflare — DKIM/SPF/DMARC/MAIL-FROM/inbound-MX + Email Routing. |
 | **Send (secondary)** | Resend | Provider integrated; sends proven. Free plan caps Resend-verified domains at 1. |
 
 `emails config set inbound_s3_bucket <bucket>` makes `emails inbox sync-s3` default to that inbound bucket (no `--bucket` needed). Inbound buckets must block public access and use server-side encryption; keep the versioning policy explicit because raw MIME objects are the mailbox for the `ses-s3` strategy. `emails doctor` reports SES sandbox/production + provisioning creds.
 
 ### Integration status (priority: SES, Resend, Cloudflare — not Gmail)
-- **SES (alumia)**: ✅ all 3 domains verified + send/receive tested (6/6 round-trip).
+- **SES**: verified + send/receive tested with operator-owned domains.
 - **Resend**: ✅ send tested end-to-end (Resend send → our domain → SES inbound).
 - **Cloudflare**: ✅ DNS + Email Routing client.

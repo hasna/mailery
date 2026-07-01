@@ -293,7 +293,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .option("--timeout <sec>", "Max seconds to wait for SES verification", "600")
     .option("--no-test", "Skip the final round-trip test")
     .option("--buy-if-needed", "Buy + delegate the domain first (via @hasna/domains SDK) if not already owned")
-    .option("--purchase-profile <profile>", "AWS profile for the purchase (default: hasna-xyz-infra)")
+    .option("--purchase-profile <profile>", "AWS profile for the purchase (defaults to the current AWS_PROFILE or ambient credentials)")
     .action(async (domain: string, opts: { provider: string; addresses: string; bucket?: string; addMx?: boolean; forceMxSwitch?: boolean; count: string; timeout: string; test?: boolean; buyIfNeeded?: boolean; purchaseProfile?: string }) => {
       try {
         const db = getDatabase();
@@ -320,9 +320,9 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
           step("Buy + delegate domain (Route53 → Cloudflare)");
           const dom = await import("@hasna/domains");
           // Purchase runs in the purchase account; restore the SES profile after.
-          const purchaseProfile = opts.purchaseProfile ?? "hasna-xyz-infra";
+          const purchaseProfile = opts.purchaseProfile;
           const prevProfile = process.env["AWS_PROFILE"];
-          process.env["AWS_PROFILE"] = purchaseProfile;
+          if (purchaseProfile) process.env["AWS_PROFILE"] = purchaseProfile;
           try {
             const avail = await (dom as any).r53CheckAvailability(domain);
             if (avail.available) {

@@ -17,6 +17,12 @@ const PRIVATE_PLATFORM_PATTERNS = [
   new RegExp(`${["HASNA", "CLOUD", ""].join("_")}`),
   new RegExp(`${["HASNA", "RDS"].join("_")}`),
   new RegExp(`\\b${["rds", "cluster"].join("_")}\\b`, "i"),
+  new RegExp(`${["hasna", "xyz"].join("-")}`, "i"),
+  new RegExp(`${["hasna", "xyz"].join("/")}`, "i"),
+  new RegExp(`${["hasna", "studio"].join("-")}`, "i"),
+  new RegExp(`${["hasna", "studio"].join("")}`, "i"),
+  new RegExp(`${["HASNA", "XYZ", ""].join("_")}`, "i"),
+  new RegExp(`${["apps", "prod", "postgres"].join("-")}`, "i"),
 ] as const;
 
 const SOURCE_ROOTS = [

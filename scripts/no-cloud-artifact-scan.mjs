@@ -18,6 +18,13 @@ const forbiddenMarkers = [
   [".hasna", "cloud"].join("/"),
   ["HASNA", "CLOUD", ""].join("_"),
   ["HASNA", "RDS"].join("_"),
+  ["hasna", "xyz"].join("-"),
+  ["hasna", "xyz"].join("/"),
+  ["hasna", "studio"].join("-"),
+  ["hasna", "studio"].join(""),
+  ["HASNA", "XYZ"].join(""),
+  ["apps", "prod", "postgres"].join("-"),
+  ["HASNA", "XYZ", ""].join("_"),
 ];
 const platformNativeArtifactPattern = /(^|\/)(?:libopentui|opentui).*\.(?:so|dylib|dll|node)$/i;
 

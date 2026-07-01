@@ -149,22 +149,22 @@ describe("config", () => {
     });
   });
 
-  it("exports canonical Hasna XYZ emails resource paths", () => {
-    expect(CANONICAL_OPEN_EMAILS_S3_BUCKET).toBe("hasna-xyz-opensource-emails-prod");
+  it("exports generic self-hosted emails resource defaults", () => {
+    expect(CANONICAL_OPEN_EMAILS_S3_BUCKET).toBe("mailery-email-archive");
     expect(CANONICAL_OPEN_EMAILS_S3_REGION).toBe("us-east-1");
     expect(CANONICAL_OPEN_EMAILS_SECRET_PATHS).toEqual({
-      env: "hasna/xyz/opensource/emails/prod/env",
-      aws: "hasna/xyz/opensource/emails/prod/aws",
-      s3: "hasna/xyz/opensource/emails/prod/s3",
-      rds: "hasna/xyz/opensource/emails/prod/rds",
+      env: "mailery/self-hosted/emails/prod/env",
+      aws: "mailery/self-hosted/emails/prod/aws",
+      s3: "mailery/self-hosted/emails/prod/s3",
+      rds: "mailery/self-hosted/emails/prod/rds",
     });
-    expect(CANONICAL_OPEN_EMAILS_RDS_CLUSTER).toBe("hasna-xyz-infra-apps-prod-postgres");
+    expect(CANONICAL_OPEN_EMAILS_RDS_CLUSTER).toBe("mailery-postgres");
     expect(CANONICAL_OPEN_EMAILS_RDS_DATABASE).toBe("emails");
-    expect(CANONICAL_OPEN_EMAILS_RDS_SECRET_PATH).toBe("hasna/xyz/opensource/emails/prod/rds");
+    expect(CANONICAL_OPEN_EMAILS_RDS_SECRET_PATH).toBe("mailery/self-hosted/emails/prod/rds");
     expect(getCanonicalOpenEmailsRdsConfig()).toEqual({
-      cluster: "hasna-xyz-infra-apps-prod-postgres",
+      cluster: "mailery-postgres",
       database: "emails",
-      runtimePath: "hasna/xyz/opensource/emails/prod/rds",
+      runtimePath: "mailery/self-hosted/emails/prod/rds",
       env: "HASNA_EMAILS_DATABASE_URL",
       fallbackEnv: "EMAILS_DATABASE_URL",
     });

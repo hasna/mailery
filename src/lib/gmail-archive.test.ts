@@ -31,7 +31,7 @@ describe("legacy Gmail archive helpers", () => {
   it("uploads attachments into the legacy archive prefix", async () => {
     const sent: unknown[] = [];
     const result = await uploadGmailArchiveAttachment({
-      bucket: "hasna-xyz-opensource-emails-prod",
+      bucket: "mailery-email-archive",
       prefix: "gmail",
       profile: "maxim@staris.ro",
       messageId: "msg/1",
@@ -44,7 +44,7 @@ describe("legacy Gmail archive helpers", () => {
     expect(result).toEqual({
       filename: "invoice final.pdf",
       key: "gmail/maxim_staris.ro/attachments/msg_1/invoice_final.pdf",
-      s3_url: "s3://hasna-xyz-opensource-emails-prod/gmail/maxim_staris.ro/attachments/msg_1/invoice_final.pdf",
+      s3_url: "s3://mailery-email-archive/gmail/maxim_staris.ro/attachments/msg_1/invoice_final.pdf",
     });
     expect(sent).toHaveLength(1);
   });
@@ -56,7 +56,7 @@ describe("legacy Gmail archive helpers", () => {
       "gmail/profile/manifests/msg.json",
     ]);
     const result = await verifyGmailArchive({
-      bucket: "hasna-xyz-opensource-emails-prod",
+      bucket: "mailery-email-archive",
       profile: "profile",
       messageId: "msg",
       expectedAttachments: ["invoice.pdf"],

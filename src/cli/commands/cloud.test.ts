@@ -450,4 +450,135 @@ describe("cloud command", () => {
       folder_id: "folder:mbx:agent@example.com:trash",
     });
   });
+
+  it("updates existing cloud cache rows from the hosted source of truth", async () => {
+    const stale = storeInboundEmail({
+      provider_id: null,
+      message_id: "cloud:cloud_msg_1",
+      in_reply_to_email_id: null,
+      from_address: "old@example.com",
+      to_addresses: ["agent@example.com"],
+      cc_addresses: [],
+      subject: "Old subject",
+      text_body: "old body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 8,
+      received_at: "2026-06-29T10:00:00.000Z",
+    });
+
+    const result = await runCloudCommand(["cloud", "messages", "pull", "--limit", "1"], {
+      createClient: () => ({
+        listMessages: async () => [{
+          id: "cloud_msg_1",
+          tenantId: "ten_1",
+          mailboxId: "mbx_cloud",
+          direction: "inbound",
+          status: "stored",
+          subject: "Fresh subject",
+          fromAddress: "fresh@example.com",
+          toAddresses: ["agent@example.com"],
+          ccAddresses: [],
+          receivedAt: "2026-06-30T10:00:00.000Z",
+          sentAt: null,
+          textBody: "fresh body",
+          htmlBody: null,
+          cleanMarkdown: null,
+          summary: null,
+          parserModel: null,
+          classification: {},
+          importanceScore: 0,
+          isRead: false,
+          isImportant: false,
+          isSpam: false,
+          isTrash: false,
+          isArchived: false,
+          createdAt: "2026-06-30T10:00:00.000Z",
+          updatedAt: "2026-06-30T10:00:00.000Z",
+        }],
+        getMessage: async () => ({
+          id: "cloud_msg_1",
+          tenantId: "ten_1",
+          mailboxId: "mbx_cloud",
+          direction: "inbound",
+          status: "stored",
+          subject: "Fresh subject",
+          fromAddress: "fresh@example.com",
+          toAddresses: ["agent@example.com"],
+          ccAddresses: [],
+          receivedAt: "2026-06-30T10:00:00.000Z",
+          sentAt: null,
+          textBody: "fresh body",
+          htmlBody: null,
+          cleanMarkdown: null,
+          summary: null,
+          parserModel: null,
+          classification: {},
+          importanceScore: 0,
+          isRead: false,
+          isImportant: false,
+          isSpam: false,
+          isTrash: false,
+          isArchived: false,
+          createdAt: "2026-06-30T10:00:00.000Z",
+          updatedAt: "2026-06-30T10:00:00.000Z",
+          attachments: [],
+        }),
+      } as never),
+    });
+
+    const db = getDatabase();
+    const rows = db.query("SELECT id, subject, from_address, text_body FROM inbound_emails WHERE message_id = ?").all("cloud:cloud_msg_1") as Array<{ id: string; subject: string; from_address: string; text_body: string }>;
+
+    expect(rows).toEqual([{ id: stale.id, subject: "Fresh subject", from_address: "fresh@example.com", text_body: "fresh body" }]);
+    expect(result.data).toMatchObject({ read: 1, stored: 0, updated: 1, pruned: 0, source_of_truth: false });
+  });
+
+  it("replace mode prunes stale cloud cache rows without deleting local-only mail", async () => {
+    storeInboundEmail({
+      provider_id: null,
+      message_id: "cloud:stale_cloud_msg",
+      in_reply_to_email_id: null,
+      from_address: "old@example.com",
+      to_addresses: ["agent@example.com"],
+      cc_addresses: [],
+      subject: "Stale cloud",
+      text_body: "old",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 3,
+      received_at: "2026-06-29T10:00:00.000Z",
+    });
+    storeInboundEmail({
+      provider_id: null,
+      message_id: "local-only",
+      in_reply_to_email_id: null,
+      from_address: "local@example.com",
+      to_addresses: ["agent@example.com"],
+      cc_addresses: [],
+      subject: "Local only",
+      text_body: "local",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 5,
+      received_at: "2026-06-29T10:00:00.000Z",
+    });
+
+    const before = getDatabase().query("SELECT COUNT(*) AS count FROM inbound_emails WHERE message_id LIKE 'cloud:%'").get() as { count: number };
+    const result = await runCloudCommand(["cloud", "messages", "pull", "--replace", "--limit", "1"], {
+      createClient: () => ({
+        listMessages: async () => [],
+        getMessage: async () => { throw new Error("unused"); },
+      } as never),
+    });
+
+    const db = getDatabase();
+    expect(db.query("SELECT COUNT(*) AS count FROM inbound_emails WHERE message_id LIKE 'cloud:%'").get()).toEqual({ count: 0 });
+    expect(db.query("SELECT subject FROM inbound_emails WHERE message_id = ?").get("local-only")).toEqual({ subject: "Local only" });
+    expect(result.data).toMatchObject({ read: 0, stored: 0, updated: 0, source_of_truth: true });
+    expect((result.data as { pruned?: number }).pruned).toBeGreaterThanOrEqual(before.count);
+  });
 });

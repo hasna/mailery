@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { getDatabase, reconcileMailboxMessageState } from "../../db/database.js";
+import { getDatabase, reconcileMailboxMessageState, type Database } from "../../db/database.js";
 import { getInboundEmail, listInboundEmailSummaries, storeInboundEmail, type InboundEmail } from "../../db/inbound.js";
 import { getConfigValue, loadConfig, saveConfig, setConfigValue } from "../../lib/config.js";
 import { openLocalTarget, type LocalOpenResult } from "../../lib/local-actions.js";
@@ -253,11 +253,125 @@ function rawSize(message: MaileryCloudMessageWithAttachments): number {
   return Buffer.byteLength(`${message.textBody ?? ""}${message.htmlBody ?? ""}`);
 }
 
-function storeCloudMessage(message: MaileryCloudMessageWithAttachments, deps: CloudCommandDeps): { stored: boolean; id?: string; skipped?: boolean } {
+function cloudMessageId(message: MaileryCloudMessage): string {
+  return `cloud:${message.id}`;
+}
+
+function cloudLabels(message: MaileryCloudMessage): string[] {
+  return [
+    message.direction === "outbound" ? "sent" : "",
+    message.isImportant ? "important" : "",
+    message.isSpam ? "spam" : "",
+    message.isTrash ? "trash" : "",
+    message.isArchived ? "archived" : "",
+  ].filter(Boolean);
+}
+
+function cloudHeaders(message: MaileryCloudMessage): Record<string, string> {
+  return {
+    "X-Mailery-Cloud-Message-Id": message.id,
+    "X-Mailery-Cloud-Mailbox-Id": message.mailboxId,
+    "X-Mailery-Cloud-Updated-At": message.updatedAt,
+  };
+}
+
+function applyCloudMessageState(db: Database, id: string, message: MaileryCloudMessage): void {
+  const existing = db.query("SELECT read_at FROM inbound_emails WHERE id = ? LIMIT 1").get(id) as { read_at: string | null } | null;
+  const readAt = message.isRead ? existing?.read_at ?? new Date().toISOString() : null;
+  db.run(
+    `UPDATE inbound_emails
+        SET is_read = ?,
+            read_at = ?,
+            is_archived = ?,
+            is_starred = ?,
+            is_spam = ?,
+            is_trash = ?,
+            is_sent = ?
+      WHERE id = ?`,
+    [
+      message.isRead ? 1 : 0,
+      readAt,
+      message.isArchived ? 1 : 0,
+      message.isImportant ? 1 : 0,
+      message.isSpam ? 1 : 0,
+      message.isTrash ? 1 : 0,
+      message.direction === "outbound" ? 1 : 0,
+      id,
+    ],
+  );
+}
+
+function updateCloudMessageCache(message: MaileryCloudMessageWithAttachments, id: string, db: Database): void {
+  db.run(
+    `UPDATE inbound_emails
+        SET provider_id = NULL,
+            message_id = ?,
+            in_reply_to_email_id = NULL,
+            provider_thread_id = NULL,
+            provider_history_id = NULL,
+            provider_internal_date = NULL,
+            label_ids_json = ?,
+            raw_s3_url = NULL,
+            metadata_s3_url = NULL,
+            from_address = ?,
+            to_addresses = ?,
+            cc_addresses = ?,
+            subject = ?,
+            text_body = ?,
+            html_body = ?,
+            attachments_json = ?,
+            attachment_paths = ?,
+            headers_json = ?,
+            raw_size = ?,
+            received_at = ?
+      WHERE id = ?`,
+    [
+      cloudMessageId(message),
+      JSON.stringify(cloudLabels(message)),
+      message.fromAddress || "unknown@mailery.co",
+      JSON.stringify(message.toAddresses ?? []),
+      JSON.stringify(message.ccAddresses ?? []),
+      message.subject ?? "",
+      message.textBody ?? message.cleanMarkdown ?? message.summary ?? null,
+      message.htmlBody ?? null,
+      JSON.stringify(message.attachments.map((attachment) => ({
+        filename: attachment.filename,
+        content_type: attachment.contentType,
+        size: attachment.sizeBytes,
+      }))),
+      JSON.stringify([]),
+      JSON.stringify(cloudHeaders(message)),
+      rawSize(message),
+      message.receivedAt ?? message.sentAt ?? message.createdAt,
+      id,
+    ],
+  );
+  applyCloudMessageState(db, id, message);
+}
+
+function pruneStaleCloudCache(keepMessageIds: Set<string>, db: Database): number {
+  const rows = db
+    .query("SELECT id, message_id FROM inbound_emails WHERE message_id LIKE 'cloud:%'")
+    .all() as Array<{ id: string; message_id: string }>;
+  let pruned = 0;
+  for (const row of rows) {
+    if (keepMessageIds.has(row.message_id)) continue;
+    const result = db.run("DELETE FROM inbound_emails WHERE id = ?", [row.id]);
+    pruned += result.changes;
+  }
+  if (pruned > 0) reconcileMailboxMessageState(db);
+  return pruned;
+}
+
+function storeCloudMessage(message: MaileryCloudMessageWithAttachments, deps: CloudCommandDeps): { stored: boolean; updated?: boolean; id?: string; skipped?: boolean } {
   const messageId = `cloud:${message.id}`;
   const db = getDatabase();
   const existing = db.query("SELECT id FROM inbound_emails WHERE message_id = ? LIMIT 1").get(messageId) as { id: string } | null;
-  if (existing) return { stored: false, skipped: true, id: existing.id };
+  if (existing) {
+    updateCloudMessageCache(message, existing.id, db);
+    reconcileMailboxMessageState(db);
+    return { stored: false, updated: true, id: existing.id };
+  }
   const stored = (deps.storeInboundEmail ?? storeInboundEmail)({
     provider_id: null,
     message_id: messageId,
@@ -274,36 +388,12 @@ function storeCloudMessage(message: MaileryCloudMessageWithAttachments, deps: Cl
       size: attachment.sizeBytes,
     })),
     attachment_paths: [],
-    headers: { "X-Mailery-Cloud-Message-Id": message.id },
+    headers: cloudHeaders(message),
     raw_size: rawSize(message),
     received_at: message.receivedAt ?? message.sentAt ?? message.createdAt,
-    label_ids: [
-      message.isImportant ? "important" : "",
-      message.isSpam ? "spam" : "",
-      message.isTrash ? "trash" : "",
-      message.isArchived ? "archived" : "",
-    ].filter(Boolean),
+    label_ids: cloudLabels(message),
   }, db);
-  const readAt = message.isRead ? new Date().toISOString() : null;
-  db.run(
-    `UPDATE inbound_emails
-        SET is_read = ?,
-            read_at = ?,
-            is_archived = ?,
-            is_starred = ?,
-            is_spam = ?,
-            is_trash = ?
-      WHERE id = ?`,
-    [
-      message.isRead ? 1 : 0,
-      readAt,
-      message.isArchived ? 1 : 0,
-      message.isImportant ? 1 : 0,
-      message.isSpam ? 1 : 0,
-      message.isTrash ? 1 : 0,
-      stored.id,
-    ],
-  );
+  applyCloudMessageState(db, stored.id, message);
   reconcileMailboxMessageState(db);
   return { stored: true, id: stored.id };
 }
@@ -747,19 +837,30 @@ export function registerCloudCommands(program: Command, output: OutputFn, deps: 
     .description("Pull cloud messages into the local SQLite inbox")
     .option("--group <group>", "Cloud message group", "inbox")
     .option("--limit <n>", "Maximum messages", "50")
-    .action(async (opts: { group?: string; limit?: string }, cmd: Command) => {
+    .option("--replace", "Replace the local cloud cache with the returned cloud source-of-truth window")
+    .option("--source-of-truth", "Alias for --replace")
+    .action(async (opts: { group?: string; limit?: string; replace?: boolean; sourceOfTruth?: boolean }, cmd: Command) => {
       try {
         const client = makeClient(cmd, deps);
         const rows = await client.listMessages({ group: opts.group, limit: parseCliPositiveIntOption(opts.limit, 50, 200) });
         let stored = 0;
+        let updated = 0;
         let skipped = 0;
+        const seen = new Set<string>();
         for (const row of rows) {
           const message = await client.getMessage(row.id);
+          seen.add(cloudMessageId(message));
           const result = storeCloudMessage(message, deps);
           if (result.stored) stored += 1;
+          if (result.updated) updated += 1;
           if (result.skipped) skipped += 1;
         }
-        output({ read: rows.length, stored, skipped }, chalk.green(`Pulled ${stored} cloud message(s), skipped ${skipped} duplicate(s).`));
+        const sourceOfTruth = Boolean(opts.replace || opts.sourceOfTruth);
+        const pruned = sourceOfTruth ? pruneStaleCloudCache(seen, getDatabase()) : 0;
+        output(
+          { read: rows.length, stored, updated, skipped, pruned, source_of_truth: sourceOfTruth },
+          chalk.green(`Pulled ${stored} new and ${updated} updated cloud message(s).${pruned ? ` Pruned ${pruned} stale cloud cache row(s).` : ""}`),
+        );
       } catch (e) {
         handleError(new Error(cloudErrorText(e)));
       }

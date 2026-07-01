@@ -17,9 +17,9 @@ import {
   addInboundLabelSummary, removeInboundLabelSummary,
   getInboundEmail,
 } from "../../db/inbound.js";
-import { getEmail, createEmail } from "../../db/emails.js";
-import { getEmailContent, storeEmailContent } from "../../db/email-content.js";
-import { getEmailThreading, getThreadMessages, setEmailThreading, setInboundThreadId } from "../../db/threads.js";
+import { getEmail } from "../../db/emails.js";
+import { getEmailContent } from "../../db/email-content.js";
+import { getEmailThreading, getThreadMessages, setInboundThreadId } from "../../db/threads.js";
 import { getLatestActiveProviderId, listProviderSummaries, listProviderNamesByIds } from "../../db/providers.js";
 import { listDomains } from "../../db/domains.js";
 import { findAddressesByEmail, getPreferredActiveAddressEmail, listActiveAddressCountsByDomains } from "../../db/addresses.js";
@@ -27,6 +27,7 @@ import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAdd
 import { getInboundBuckets, loadConfig, saveConfig } from "../../lib/config.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
 import { listS3Sources } from "../../lib/s3-sync.js";
+import { createSentEmailLedger, setSentEmailThreading, storeSentEmailContent } from "../../lib/sent-ledger.js";
 import { buildThreadingHeaders, generateMessageId, parseReferences } from "../../lib/threading.js";
 import { marked } from "marked";
 import { normalizeThemeMode, type TuiThemeMode } from "./theme.js";
@@ -1281,12 +1282,12 @@ export async function sendComposed(input: ComposeInput, db?: Database): Promise<
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
   };
   const { sendWithFailover } = await import("../../lib/send.js");
-  const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, d);
-  const email = createEmail(actual, sendOpts, messageId, d);
+  const { messageId, providerId: actual, selfHostedSendAttemptId } = await sendWithFailover(providerId, sendOpts, d);
+  const email = await createSentEmailLedger(actual, sendOpts, messageId, d, selfHostedSendAttemptId);
   if (generatedMessageId) {
-    setEmailThreading(email.id, { message_id: generatedMessageId, thread_id: threadId, in_reply_to: inReplyTo, references }, d);
+    await setSentEmailThreading(email.id, { message_id: generatedMessageId, thread_id: threadId, in_reply_to: inReplyTo, references }, d);
   }
-  storeEmailContent(email.id, { text: input.body, ...(html ? { html } : {}) }, d);
+  await storeSentEmailContent(email.id, { text: input.body, ...(html ? { html } : {}) }, d);
   return { id: email.id, messageId };
 }
 

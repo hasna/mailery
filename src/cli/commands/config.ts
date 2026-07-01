@@ -12,7 +12,7 @@ const KNOWN_KEYS: { key: string; description: string; example: string }[] = [
   { key: "attachment_s3_bucket", description: "S3 bucket name for inbound attachment storage (requires attachment_storage=s3)", example: "my-email-archive" },
   { key: "attachment_s3_prefix", description: "S3 key prefix for inbound attachments (default: emails)", example: "emails" },
   { key: "attachment_s3_region", description: "AWS region for inbound attachment S3 uploads (default: us-east-1)", example: "us-east-1" },
-  { key: "gmail_archive_s3_bucket", description: "Legacy Gmail archive bucket override for old imports", example: "mailery-email-archive" },
+  { key: "gmail_archive_s3_bucket", description: "Legacy Gmail archive bucket override for old imports", example: "my-legacy-mail-archive" },
   { key: "gmail_archive_s3_region", description: "Legacy Gmail archive region override for old imports", example: "us-east-1" },
   { key: "gmail_archive_s3_prefix", description: "Legacy Gmail archive key prefix for old imports", example: "gmail" },
   { key: "cloudflare_api_token", description: "Cloudflare API token for auto DNS setup (also reads CLOUDFLARE_API_TOKEN env var)", example: "abc123..." },

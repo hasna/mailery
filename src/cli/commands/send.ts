@@ -1,8 +1,7 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { readFileSync } from "node:fs";
-import { createEmail, getEmail } from "../../db/emails.js";
-import { storeEmailContent } from "../../db/email-content.js";
+import { getEmail } from "../../db/emails.js";
 import { getLatestActiveProviderId, getProvider } from "../../db/providers.js";
 import { getTemplate, renderTemplate } from "../../db/templates.js";
 import { getSuppressedEmailSet, incrementSendCounts } from "../../db/contacts.js";
@@ -10,6 +9,7 @@ import { createScheduledEmail } from "../../db/scheduled.js";
 import { getGroupByName, listMembers } from "../../db/groups.js";
 import { getDatabase } from "../../db/database.js";
 import { log } from "../../lib/logger.js";
+import { createSentEmailLedger, setSentEmailThreading, storeSentEmailContent } from "../../lib/sent-ledger.js";
 import { handleError, resolveId } from "../utils.js";
 
 export function registerSendCommands(program: Command, _output: (data: unknown, formatted: string) => void): void {
@@ -211,7 +211,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         // Threading: assign our own RFC Message-ID, and (if replying) build the
         // full In-Reply-To / References ancestry chain + inherit the thread_id.
         const { generateMessageId, buildThreadingHeaders } = await import("../../lib/threading.js");
-        const { getEmailThreading, setEmailThreading } = await import("../../db/threads.js");
+        const { getEmailThreading } = await import("../../db/threads.js");
         const ourMessageId = generateMessageId(fromDomain ?? "localhost");
         let threadId = ourMessageId.replace(/[<>]/g, "");
         let inReplyTo: string | null = null;
@@ -267,12 +267,12 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         }
 
         const { sendWithFailover } = await import("../../lib/send.js");
-        const { messageId, providerId: actualProviderId, usedFailover } = await sendWithFailover(providerId, sendOpts, db);
+        const { messageId, providerId: actualProviderId, usedFailover, selfHostedSendAttemptId } = await sendWithFailover(providerId, sendOpts, db);
         if (usedFailover) log.info(chalk.yellow(`  (Used failover provider)`));
 
-        const email = createEmail(actualProviderId, sendOpts, messageId, db);
+        const email = await createSentEmailLedger(actualProviderId, sendOpts, messageId, db, selfHostedSendAttemptId);
         // Persist threading (own Message-ID, thread_id, In-Reply-To, References).
-        setEmailThreading(email.id, { message_id: ourMessageId, thread_id: threadId, in_reply_to: inReplyTo, references }, db);
+        await setSentEmailThreading(email.id, { message_id: ourMessageId, thread_id: threadId, in_reply_to: inReplyTo, references }, db);
 
         // Store email content (with tracking injected if requested)
         let storedHtml = htmlBody;
@@ -286,7 +286,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           storedHtml = await prepareTrackedHtml(htmlBody, email.id, !!opts.trackOpens, !!opts.trackClicks);
           log.info(chalk.dim("  Tracking enabled — open mailery serve to record opens/clicks"));
         }
-        storeEmailContent(email.id, { html: storedHtml, text: textBody }, db);
+        await storeSentEmailContent(email.id, { html: storedHtml, text: textBody }, db);
 
         // Track contacts
         incrementSendCounts(allRecipients, db);

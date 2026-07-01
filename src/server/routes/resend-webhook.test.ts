@@ -5,7 +5,13 @@ import { listInboundEmails } from "../../db/inbound.js";
 import { handleResendWebhook } from "./resend-webhook.js";
 
 beforeEach(() => { process.env["EMAILS_DB_PATH"] = ":memory:"; resetDatabase(); createProvider({ name: "Resend", type: "resend", active: true }); });
-afterEach(() => { closeDatabase(); delete process.env["EMAILS_DB_PATH"]; delete process.env["RESEND_WEBHOOK_SECRET"]; });
+afterEach(() => {
+  closeDatabase();
+  delete process.env["EMAILS_DB_PATH"];
+  delete process.env["RESEND_WEBHOOK_SECRET"];
+  delete process.env["MAILERY_MODE"];
+  delete process.env["HASNA_EMAILS_DATABASE_URL"];
+});
 
 function post(body: unknown): Request {
   return new Request("http://x/webhook/resend-inbound", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -29,6 +35,19 @@ describe("resend inbound webhook", () => {
     expect(inbox).toHaveLength(1);
     expect(inbox[0]!.subject).toBe("Hello via Resend");
     expect(inbox[0]!.from_address).toBe("alice@ext.com");
+  });
+
+  it("does not store Resend inbound email locally in self-hosted mode", async () => {
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://self-hosted-test";
+
+    const res = (await handleResendWebhook(post(inboundEvent), "/webhook/resend-inbound", "POST"))!;
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      error: expect.stringContaining("disabled in self_hosted mode"),
+    });
+    expect(listInboundEmails({}, getDatabase())).toHaveLength(0);
   });
 
   it("ignores non-inbound events", async () => {

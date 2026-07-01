@@ -34,6 +34,9 @@ if (args.includes("--version") || args.includes("-V")) {
 
 async function main(): Promise<void> {
   assertRemoteRuntimeSupported("mailery-mcp");
+  const { installSelfHostedRuntimeShutdownHooks, startSelfHostedRuntimeCache } = await import("../lib/self-hosted-runtime.js");
+  await startSelfHostedRuntimeCache({ source: "mailery-mcp" });
+  installSelfHostedRuntimeShutdownHooks({ source: "mailery-mcp", cleanupCache: true });
   const { isStdioMode, resolveHttpPort } = await import("./options.js");
   if (isStdioMode(args)) {
     const [{ StdioServerTransport }, { buildServer }] = await Promise.all([

@@ -19,7 +19,8 @@ npm install -g @hasna/mailery
 Users install the open-source package: `@hasna/mailery`.
 
 Mailery stays local-first by default: local SQLite, local provider credentials,
-local MCP, and optional self-hosted PostgreSQL sync. Mailery Cloud is an opt-in
+and local MCP. Self-hosted mode uses user-owned PostgreSQL/S3/SES as source of
+truth with local SQLite as a runtime cache. Mailery Cloud is an opt-in
 hosted source of truth at `https://mailery.co`; the same public CLI can sign up,
 create an agent API key, create a billing link, create hosted mailboxes, read
 hosted messages, generate hosted digests, and pull cloud mail into local SQLite.
@@ -66,8 +67,9 @@ mailery inbox list --folder unread --source provider:<id>
 # Check sent email log
 mailery email list
 
-# Sync email data to self-hosted PostgreSQL storage
-mailery storage push
+# Use self-hosted PostgreSQL/S3/SES as source of truth
+mailery self-hosted status
+mailery self-hosted migrate-local
 ```
 
 ## Mailery Cloud
@@ -159,7 +161,8 @@ mailery group             # recipient groups
 mailery sequence          # drip sequences
 mailery schedule          # scheduled emails: list, cancel, run
 mailery triage            # AI triage: classify, prioritize, draft replies
-mailery storage           # sync to/from self-hosted PostgreSQL storage: push, pull, migrate
+mailery storage           # self-hosted PostgreSQL storage: status, migrate, migrate-local, push, pull
+mailery self-hosted       # source-of-truth runtime setup/status/migrate commands
 mailery cloud             # optional Mailery Cloud signup/login/billing/mailbox/message/digest/domain workflow
 mailery aws               # AWS setup: SES receipt rules, S3 inbound bucket
 mailery config            # configuration (key=value)
@@ -359,10 +362,15 @@ mailery inbox watch                        # auto-delivers new mail in real-time
 Alternatively, point an SNS HTTP subscription at `POST /webhook/ses-inbound` on
 `mailery serve` auto-confirms the subscription and syncs on each notification.
 
-## Storage Sync (PostgreSQL)
+## Self-Hosted Runtime (PostgreSQL/S3/SES)
+
+The canonical local/self-hosted/cloud runtime contract lives in
+[`docs/SELF_HOSTED_RUNTIME.md`](docs/SELF_HOSTED_RUNTIME.md). That document is
+the source of truth for the active migration from local-authoritative mail to a
+self-hosted PostgreSQL/S3 runtime.
 
 Mailery is local-first. The public OSS default is local SQLite and files under
-`~/.hasna/emails/`, with no remote dependency. Self-hosted storage is opt-in,
+`~/.hasna/emails/`, with no remote dependency. Self-hosted runtime is opt-in,
 and uses the `emails` slug for database URL compatibility: use
 `HASNA_EMAILS_DATABASE_URL`, not `HASNA_MAILERY_DATABASE_URL`.
 
@@ -373,19 +381,23 @@ installs can use the fallback `EMAILS_DATABASE_URL`.
 Mailery modes:
 
 - `local` - all reads/writes stay in local SQLite/files.
-- `self_hosted` - user/org-owned infrastructure. Local remains the fast/offline
-  store, while explicit
-  `mailery storage push`, `mailery storage pull`, or `mailery storage sync --force`
-  mirrors state to self-hosted PostgreSQL. For Hasna, this means AWS RDS plus
-  SES/S3, not Mailery SaaS.
+- `self_hosted` - user/org-owned infrastructure. PostgreSQL is the source of
+  truth for provider, mailbox, message, label, send, and state rows. S3 stores
+  raw SES MIME and optional attachment objects. Local SQLite is a runtime cache
+  that is prepared from PostgreSQL and flushed back after CLI commands; long
+  running MCP/server processes flush periodically. For Hasna's own self-hosted
+  deployment this means AWS RDS plus SES/S3, but the concrete cluster, bucket,
+  and secret-path values live in private deployment secrets and are not package
+  defaults.
 - `cloud` - Hasna-operated Mailery Cloud SaaS at `https://mailery.co`.
 
 Deprecated `remote` and `hybrid` values are accepted as aliases only for the
 deployment mode (`MAILERY_MODE`, `HASNA_EMAILS_MODE`, or legacy config keys) and
 map to `self_hosted`. The lower-level storage sync mode remains separate:
-`HASNA_EMAILS_STORAGE_MODE=hybrid` means local runtime plus explicit PostgreSQL
-sync, while `HASNA_EMAILS_STORAGE_MODE=remote` is still reserved until a true
-remote source-of-truth runtime exists.
+`HASNA_EMAILS_STORAGE_MODE=remote` means PostgreSQL source of truth with local
+runtime cache. `HASNA_EMAILS_STORAGE_MODE=hybrid` keeps local SQLite as source
+and only syncs when `mailery storage pull`, `mailery storage push`, or
+`mailery storage sync --force` is run explicitly.
 
 ```bash
 # Configure RDS/PostgreSQL
@@ -395,23 +407,32 @@ export HASNA_EMAILS_DATABASE_URL="postgres://..."
 
 # Optional explicit mode; default is local without a DB URL, self_hosted with one.
 export MAILERY_MODE=self_hosted
+export HASNA_EMAILS_STORAGE_MODE=remote
 
-# Check config and sync history
-mailery storage status
+# Optional AWS/S3 settings for self-hosted inbound and attachments.
+# Use your own bucket names and account-specific secrets.
+export EMAILS_INBOUND_S3_BUCKET="your-mailery-inbound-bucket"
+mailery config set attachment_storage s3
+mailery config set attachment_s3_bucket "your-mailery-attachments-bucket"
 
-# Push local SQLite → RDS
-mailery storage push
+# Check source-of-truth runtime status
+mailery self-hosted status
 
-# Pull RDS → local
-mailery storage pull
+# Apply PostgreSQL migrations
+mailery self-hosted migrate
+
+# One-time local SQLite → self-hosted PostgreSQL migration
+mailery self-hosted migrate-local
 ```
 
-Storage internals are intentionally kept off the default library entrypoint. Import
-them from the explicit subpath when building storage tooling:
+Storage internals are intentionally kept off the default library entrypoint.
+Import them from the explicit subpath when building storage tooling:
 
 ```ts
-import { getStorageStatus, storagePush, storagePull } from "@hasna/mailery/storage";
+import { getStorageStatus, prepareSelfHostedRuntimeCache } from "@hasna/mailery/storage";
 ```
+
+See `docs/SELF_HOSTED_RUNTIME.md` for the source-of-truth contract.
 
 ## Data
 

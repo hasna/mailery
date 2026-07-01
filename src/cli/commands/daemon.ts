@@ -18,10 +18,10 @@ const LOG_FILES: Record<LogComponent, string[]> = {
 
 async function daemonStatus() {
   const db = getDatabase();
-  const { getEmailSystemStatus } = await import("../../lib/agent-context.js");
+  const { getEmailSystemStatusForRuntime } = await import("../../lib/agent-context.js");
   const now = new Date().toISOString();
   const queue = getProvisioningWorkSummary(now, db);
-  const system = getEmailSystemStatus(db);
+  const system = await getEmailSystemStatusForRuntime(db);
   return {
     generated_at: now,
     queue: {

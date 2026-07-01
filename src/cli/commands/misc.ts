@@ -3,14 +3,13 @@ import chalk from "../../lib/chalk-lite.js";
 import type { Database } from "../../db/database.js";
 import type { Provider, SendEmailOptions } from "../../types/index.js";
 import type { Template } from "../../db/templates.js";
-import type { ProviderAdapter } from "../../providers/interface.js";
 import { listScheduledEmailSummaries, cancelScheduledEmail, getDueEmails, markSent, markFailed } from "../../db/scheduled.js";
 import { getActiveProvider, getLatestActiveProviderId, getProvider } from "../../db/providers.js";
-import { createEmail } from "../../db/emails.js";
 import { getTemplate, renderTemplate } from "../../db/templates.js";
-import { getAdapter } from "../../providers/index.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { truncate } from "../../lib/format.js";
+import { createSentEmailLedger } from "../../lib/sent-ledger.js";
+import { sendWithFailover } from "../../lib/send.js";
 import {
   getDueEnrollments, advanceEnrollment, getStepAtIndex,
 } from "../../db/sequences.js";
@@ -35,7 +34,6 @@ interface SchedulerTickOptions {
 interface SchedulerTickCache {
   db: Database;
   providers: Map<string, Provider | null>;
-  adapters: Map<string, ProviderAdapter>;
   templates: Map<string, Template | null>;
   fromAddresses: Map<string, string | null>;
   defaultProvider?: Provider | null;
@@ -45,7 +43,6 @@ function schedulerCache(db: Database): SchedulerTickCache {
   return {
     db,
     providers: new Map(),
-    adapters: new Map(),
     templates: new Map(),
     fromAddresses: new Map(),
   };
@@ -70,14 +67,6 @@ function getCachedDefaultProvider(cache: SchedulerTickCache): Provider | null {
     cache.defaultProvider = null;
   }
   return cache.defaultProvider;
-}
-
-function getCachedAdapter(cache: SchedulerTickCache, provider: Provider): ProviderAdapter {
-  const cached = cache.adapters.get(provider.id);
-  if (cached) return cached;
-  const adapter = getAdapter(provider);
-  cache.adapters.set(provider.id, adapter);
-  return adapter;
 }
 
 function getCachedTemplate(cache: SchedulerTickCache, name: string): Template | null {
@@ -119,8 +108,8 @@ async function processDueScheduledEmails(cache: SchedulerTickCache, log: Schedul
         html: scheduled.html || undefined,
         text: scheduled.text_body || undefined,
       };
-      const messageId = await getCachedAdapter(cache, provider).sendEmail(sendOpts);
-      createEmail(scheduled.provider_id, sendOpts, messageId, cache.db);
+      const sent = await sendWithFailover(provider.id, sendOpts, cache.db);
+      await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, cache.db, sent.selfHostedSendAttemptId);
       markSent(scheduled.id, cache.db);
       result.sent++;
       log(chalk.green(`✓ Sent scheduled email ${scheduled.id.slice(0, 8)} to ${scheduled.to_addresses.join(", ")}`));
@@ -184,8 +173,8 @@ async function processDueSequenceEnrollments(cache: SchedulerTickCache, log: Sch
         text: template.text_template ? renderTemplate(template.text_template, vars) : undefined,
       };
 
-      const messageId = await getCachedAdapter(cache, provider).sendEmail(sendOpts);
-      createEmail(provider.id, sendOpts, messageId, cache.db);
+      const sent = await sendWithFailover(provider.id, sendOpts, cache.db);
+      await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, cache.db, sent.selfHostedSendAttemptId);
       advanceEnrollment(enrollment.id, cache.db);
       result.sent++;
       log(chalk.green(`✓ Sent sequence step ${step.step_number} to ${enrollment.contact_email}`));

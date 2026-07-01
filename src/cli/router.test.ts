@@ -6,6 +6,7 @@ import {
   remoteStorageRuntimeError,
   requestedCommand,
   routeRootPromptArgs,
+  shouldUseSelfHostedRuntimeCacheForArgs,
   shouldPrintVersionEarly,
 } from "./router.js";
 
@@ -33,6 +34,7 @@ describe("CLI router", () => {
       [["project-panel"], ["status"]],
       [["logs"], ["daemon"]],
       [["cloud", "status"], ["cloud"]],
+      [["self-hosted", "status"], ["storage"]],
     ];
 
     for (const [args, modules] of cases) {
@@ -64,9 +66,11 @@ describe("CLI router", () => {
     expect(routeRootPromptArgs(["--help"])).toEqual(["--help"]);
   });
 
-  it("blocks runtime commands when remote storage mode is requested", () => {
+  it("supports runtime commands when remote storage mode is requested", () => {
     const previous = process.env["HASNA_EMAILS_STORAGE_MODE"];
+    const previousDb = process.env["HASNA_EMAILS_DATABASE_URL"];
     process.env["HASNA_EMAILS_STORAGE_MODE"] = "remote";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
     try {
       expect(remoteStorageRuntimeError(["storage", "status"])).toBeNull();
       expect(remoteStorageRuntimeError(["--json", "storage", "pull"])).toBeNull();
@@ -75,15 +79,34 @@ describe("CLI router", () => {
       expect(remoteStorageRuntimeError(["mcp", "--gemini"])).toBeNull();
       expect(remoteStorageRuntimeError(["mcp", "--codex", "--gemini"])).toBeNull();
       expect(remoteStorageRuntimeError(["mcp", "--claude", "--codex", "--dry-run"])).toBeNull();
-      expect(remoteStorageRuntimeError(["mcp", "--claude"])).toContain("remote source-of-truth runtime");
-      expect(remoteStorageRuntimeError(["mcp", "--claude", "--codex"])).toContain("remote source-of-truth runtime");
-      expect(remoteStorageRuntimeError(["mcp", "--uninstall", "--gemini"])).toContain("remote source-of-truth runtime");
+      expect(remoteStorageRuntimeError(["mcp", "--claude"])).toBeNull();
+      expect(remoteStorageRuntimeError(["mcp", "--claude", "--codex"])).toBeNull();
+      expect(remoteStorageRuntimeError(["mcp", "--uninstall", "--gemini"])).toBeNull();
       expect(remoteStorageRuntimeError(["cloud", "status"])).toBeNull();
-      expect(remoteStorageRuntimeError(["inbox", "list"])).toContain("remote source-of-truth runtime");
+      expect(remoteStorageRuntimeError(["inbox", "list"])).toBeNull();
       expect(remoteStorageRuntimeError(["send", "--help"])).toBeNull();
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "list"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "attachment", "email_123"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "sources"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "mailboxes"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "sync-status"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "mark-read", "email_123"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "archive", "email_123"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "star", "email_123"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "label", "email_123", "work"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "delete", "email_123"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "clear", "--yes"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "wait", "ops@example.com"])).toBe(true);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["storage", "status"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["self-hosted", "migrate-local"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["cloud", "status"])).toBe(false);
+      delete process.env["HASNA_EMAILS_DATABASE_URL"];
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "list"])).toBe(false);
     } finally {
       if (previous === undefined) delete process.env["HASNA_EMAILS_STORAGE_MODE"];
       else process.env["HASNA_EMAILS_STORAGE_MODE"] = previous;
+      if (previousDb === undefined) delete process.env["HASNA_EMAILS_DATABASE_URL"];
+      else process.env["HASNA_EMAILS_DATABASE_URL"] = previousDb;
     }
   });
 });

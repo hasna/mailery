@@ -10,7 +10,7 @@
  */
 import { parseSesNotification } from "../../lib/inbound-realtime.js";
 import { json, badRequest } from "./helpers.js";
-import { loadConfig } from "../../lib/config.js";
+import { getInboundBuckets, loadConfig } from "../../lib/config.js";
 import { emitMaileryEventBestEffort } from "../../lib/mailery-events.js";
 import { verifySnsStructure } from "../../lib/webhook-events.js";
 
@@ -52,7 +52,7 @@ export async function handleInboundWebhook(
   req: Request,
   path: string,
   method: string,
-  deps?: { fetchUrl?: FetchLike; sync?: (bucket: string, prefix: string | undefined, region: string | undefined, opts?: { keys?: string[] }) => Promise<{ synced: number }> },
+  deps?: { fetchUrl?: FetchLike; sync?: (bucket: string, prefix: string | undefined, region: string | undefined, opts?: { keys?: string[]; providerId?: string }) => Promise<{ synced: number }> },
 ): Promise<Response | null> {
   if (path !== "/webhook/ses-inbound" || method !== "POST") return null;
 
@@ -94,15 +94,16 @@ export async function handleInboundWebhook(
     const region = inbound.region;
     const prefix = inbound.prefix;
     if (!bucket) return json({ ok: true, ignored: "no bucket configured" });
+    const providerId = getInboundBuckets().find((entry) => entry.bucket === bucket)?.providerId;
     const objectKey = note.objectKey?.replace(/^\/+/, "");
     if (objectKey && prefix && !objectKey.startsWith(prefix)) {
       return json({ ok: true, ignored: "notification object key outside configured prefix", message_id: note.messageId, object_key: objectKey });
     }
     const exactKeys = objectKey ? [objectKey] : undefined;
 
-    const sync = deps?.sync ?? (async (b: string, p: string | undefined, r: string | undefined, syncOpts?: { keys?: string[] }) => {
+    const sync = deps?.sync ?? (async (b: string, p: string | undefined, r: string | undefined, syncOpts?: { keys?: string[]; providerId?: string }) => {
       const { syncS3Inbox } = await import("../../lib/s3-sync.js");
-      return syncS3Inbox({ bucket: b, prefix: p, region: r, keys: syncOpts?.keys, limit: syncOpts?.keys?.length ?? 100 });
+      return syncS3Inbox({ bucket: b, prefix: p, region: r, providerId: syncOpts?.providerId, keys: syncOpts?.keys, limit: syncOpts?.keys?.length ?? 100 });
     });
     emitMaileryEventBestEffort({
       type: "mailery.inbound.sync.requested",
@@ -116,13 +117,14 @@ export async function handleInboundWebhook(
         prefix: prefix ?? "",
         region,
         object_key: objectKey ?? null,
+        provider_id: providerId ?? null,
       },
       metadata: {
         route: "/webhook/ses-inbound",
         exact_key: Boolean(exactKeys?.length),
       },
     });
-    const result = await sync(bucket, prefix, region, { keys: exactKeys });
+    const result = await sync(bucket, prefix, region, { keys: exactKeys, providerId });
     return json({ ok: true, synced: result.synced, message_id: note.messageId, object_key: objectKey ?? null });
   }
 

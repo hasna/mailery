@@ -75,6 +75,6 @@ describe("config command redaction", () => {
 
     const verbose = await runConfigCommand(["config", "keys", "--verbose"]);
     expect(verbose.out).toContain("my-email-archive");
-    expect(verbose.out).toContain("mailery-email-archive");
+    expect(verbose.out).toContain("my-legacy-mail-archive");
   });
 });

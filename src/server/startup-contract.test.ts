@@ -30,7 +30,7 @@ function routeFiles(): string[] {
 }
 
 describe("server startup contract", () => {
-  it("rejects remote storage mode before starting the HTTP runtime", () => {
+  it("requires database configuration before starting the remote HTTP runtime", () => {
     const result = Bun.spawnSync({
       cmd: ["bun", "src/server/index.ts"],
       cwd: join(import.meta.dir, "..", ".."),
@@ -43,7 +43,7 @@ describe("server startup contract", () => {
     });
     const stderr = new TextDecoder().decode(result.stderr);
     expect(result.exitCode).toBe(1);
-    expect(stderr).toContain("remote source-of-truth runtime");
+    expect(stderr).toContain("Self-hosted source-of-truth mode requires");
   });
 
   it("keeps direct help and version available in remote storage mode", () => {
@@ -62,8 +62,15 @@ describe("server startup contract", () => {
       const stderr = new TextDecoder().decode(result.stderr);
       expect(result.exitCode).toBe(0);
       expect(stderr).toBe("");
-      expect(stdout).not.toContain("remote source-of-truth runtime");
+      expect(stdout).not.toContain("Self-hosted source-of-truth mode requires");
     }
+  });
+
+  it("installs self-hosted shutdown hooks for the long-running HTTP runtime", () => {
+    const source = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+
+    expect(source).toContain("installSelfHostedRuntimeShutdownHooks");
+    expect(source).toContain('source: "mailery-serve", cleanupCache: true');
   });
 
   it("keeps route modules lazy behind the API dispatcher", () => {

@@ -52,8 +52,9 @@ export const STORAGE_TABLES = [
 ] as const;
 export const EMAILS_STORAGE_TABLES = STORAGE_TABLES;
 
-type StorageTable = (typeof STORAGE_TABLES)[number];
+export type StorageTable = (typeof STORAGE_TABLES)[number];
 type Row = Record<string, unknown>;
+type StorageTableFilterParam = string | number | bigint | boolean | null | Uint8Array;
 export const STORAGE_SYNC_BATCH_SIZE = 500;
 
 const PRIMARY_KEYS: Record<StorageTable, string[]> = {
@@ -109,10 +110,17 @@ export interface SyncMeta {
   direction: "push" | "pull";
 }
 
+export interface StorageTableFilter {
+  where: string;
+  params?: StorageTableFilterParam[];
+}
+
 export interface StorageSyncOptions {
   tables?: string[];
   batchSize?: number;
   force?: boolean;
+  replace?: boolean;
+  rowFilters?: Partial<Record<StorageTable, StorageTableFilter>>;
 }
 
 export interface StorageSyncHooks {
@@ -129,6 +137,8 @@ export interface StorageEnv {
 export interface StorageStatus {
   configured: boolean;
   mode: StorageMode;
+  sourceOfTruth: "local" | "postgres";
+  localCache: "source" | "explicit-sync" | "runtime-cache";
   maileryMode: MaileryMode;
   maileryModeLabel: MaileryModeLabel;
   maileryModeSource: MaileryModeSource;
@@ -140,6 +150,10 @@ export interface StorageStatus {
   service: "emails";
   tables: readonly StorageTable[];
   sync: SyncMeta[];
+}
+
+export interface StorageStatusOptions {
+  includeSyncMeta?: boolean;
 }
 
 export const EMAILS_STORAGE_ENV = "HASNA_EMAILS_DATABASE_URL";
@@ -182,15 +196,18 @@ export function getStorageMode(): StorageMode {
     const value = readEnv(env);
     if (value) return normalizeStorageMode(value);
   }
-  return getStorageDatabaseUrl() ? "hybrid" : "local";
+  return resolveMaileryMode().mode === "self_hosted" ? "remote" : "local";
 }
 
-export function getStorageStatus(): StorageStatus {
+export function getStorageStatus(options: StorageStatusOptions = {}): StorageStatus {
   const activeEnv = getStorageDatabaseEnv();
   const maileryMode = resolveMaileryMode();
+  const mode = getStorageMode();
   return {
     configured: Boolean(activeEnv),
-    mode: getStorageMode(),
+    mode,
+    sourceOfTruth: mode === "remote" ? "postgres" : "local",
+    localCache: mode === "remote" ? "runtime-cache" : mode === "hybrid" ? "explicit-sync" : "source",
     maileryMode: maileryMode.mode,
     maileryModeLabel: maileryMode.label,
     maileryModeSource: maileryMode.source,
@@ -201,7 +218,7 @@ export function getStorageStatus(): StorageStatus {
     canonical: getCanonicalOpenEmailsRdsConfig(),
     service: "emails",
     tables: STORAGE_TABLES,
-    sync: getSyncMetaAll(),
+    sync: options.includeSyncMeta ? getSyncMetaAll() : [],
   };
 }
 
@@ -240,7 +257,12 @@ export async function storagePush(options?: StorageSyncOptions): Promise<SyncRes
   try {
     await runStorageMigrations(remote);
     const results: SyncResult[] = [];
-    for (const table of parseStorageTables(options?.tables)) results.push(await pushTable(db, remote, table, { batchSize: options?.batchSize }));
+    for (const table of parseStorageTables(options?.tables)) {
+      results.push(await pushTable(db, remote, table, {
+        batchSize: options?.batchSize,
+        filter: options?.rowFilters?.[table],
+      }));
+    }
     await reconcileRemoteDerivedState(remote);
     recordSyncMeta(db, "push", results);
     return results;
@@ -285,7 +307,13 @@ export async function pullTablesFromRemote(remote: PgAdapterAsync, db: Database,
   let finished = false;
   try {
     const results: SyncResult[] = [];
-    for (const table of parseStorageTables(options?.tables)) {
+    const tables = parseStorageTables(options?.tables);
+    if (options?.replace) {
+      for (const table of [...tables].reverse()) {
+        if (sqliteTableExists(db, table)) db.run(`DELETE FROM ${quoteIdent(table)}`);
+      }
+    }
+    for (const table of tables) {
       results.push(await pullTable(remote, db, table, { batchSize: options?.batchSize }));
     }
     const failures = results.filter((result) => result.errors.length > 0);
@@ -393,16 +421,24 @@ export function parseStorageTables(tables?: string[]): StorageTable[] {
 
 export const resolveTables = parseStorageTables;
 
-export async function pushTable(db: Database, remote: PgAdapterAsync, table: StorageTable, options?: { batchSize?: number }): Promise<SyncResult> {
+export async function pushTable(
+  db: Database,
+  remote: PgAdapterAsync,
+  table: StorageTable,
+  options?: { batchSize?: number; filter?: StorageTableFilter },
+): Promise<SyncResult> {
   const result: SyncResult = { table, rowsRead: 0, rowsWritten: 0, errors: [] };
   try {
     if (!sqliteTableExists(db, table)) return result;
     const remoteColumns = await getRemoteColumns(remote, table);
     const batchSize = normalizeBatchSize(options?.batchSize);
+    const filter = normalizeStorageTableFilter(options?.filter);
+    const whereSql = filter ? ` WHERE ${filter.where}` : "";
     for (let offset = 0; ; offset += batchSize) {
+      const params = [...(filter?.params ?? []), batchSize, offset];
       const rows = db
-        .query<Row, [number, number]>(`SELECT * FROM ${quoteIdent(table)} ORDER BY ${orderByPrimaryKey(table)} LIMIT ? OFFSET ?`)
-        .all(batchSize, offset);
+        .query<Row, StorageTableFilterParam[]>(`SELECT * FROM ${quoteIdent(table)}${whereSql} ORDER BY ${orderByPrimaryKey(table)} LIMIT ? OFFSET ?`)
+        .all(...params);
       result.rowsRead += rows.length;
       if (rows.length === 0) break;
       const columns = filterRemoteColumns(remoteColumns, Object.keys(rows[0]!));
@@ -413,6 +449,16 @@ export async function pushTable(db: Database, remote: PgAdapterAsync, table: Sto
     result.errors.push(error instanceof Error ? error.message : String(error));
   }
   return result;
+}
+
+function normalizeStorageTableFilter(filter: StorageTableFilter | undefined): StorageTableFilter | null {
+  if (!filter) return null;
+  const where = filter.where.trim();
+  if (!where) return null;
+  if (/[;]/.test(where) || /--|\/\*/.test(where)) {
+    throw new Error("Storage table filters must be a single parameterized SQL predicate.");
+  }
+  return { where, params: filter.params ?? [] };
 }
 
 export async function pullTable(remote: PgAdapterAsync, db: Database, table: StorageTable, options?: { batchSize?: number }): Promise<SyncResult> {

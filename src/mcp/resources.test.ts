@@ -4,7 +4,16 @@ import { createAddress } from "../db/addresses.js";
 import { createDomain, updateDnsStatus } from "../db/domains.js";
 import { createProvider } from "../db/providers.js";
 import { setAddressProvisioning, setDomainProvisioning } from "../db/provisioning.js";
-import { addressesResourcePayload, agentContextResourcePayload, domainsResourcePayload, mailboxesResourcePayload, recentErrorsResourcePayload, sourcesResourcePayload } from "./resources.js";
+import {
+  addressesResourcePayload,
+  agentContextResourcePayload,
+  domainsResourcePayload,
+  mailboxesResourcePayload,
+  mailboxesResourcePayloadForRuntime,
+  recentErrorsResourcePayload,
+  sourcesResourcePayload,
+  sourcesResourcePayloadForRuntime,
+} from "./resources.js";
 import { storeInboundEmail } from "../db/inbound.js";
 
 beforeEach(() => {
@@ -144,6 +153,43 @@ describe("MCP resource payloads", () => {
     expect(payload.truncated).toEqual({ domains: true, addresses: true });
     expect(payload.full_context_resource).toBe("emails://agent/context/full");
     expect(payload.full_context_cli).toBe("mailery agent context --json");
+  });
+
+  it("uses self-hosted remote status for MCP agent, mailbox, and source resources", async () => {
+    const countFor = (sql: string) => {
+      if (sql.includes("provider_id IS NULL")) return "0";
+      if (sql.includes("raw_s3_url LIKE")) return "4";
+      if (sql.includes("provider_id = ?")) return "3";
+      if (sql.includes("COALESCE(is_sent, 0) = 1")) return "1";
+      if (sql.includes("COALESCE(is_read, 0) = 0")) return "2";
+      return "7";
+    };
+    const remote = {
+      all: async (sql: string) => {
+        if (sql.includes("MAX(received_at)")) return [{ latest: "2026-07-01T09:00:00.000Z" }];
+        if (sql.includes("FROM providers p")) return [{ id: "provider_123", name: "SES", type: "ses", active: true, has_mail: true }];
+        if (sql.includes("SELECT DISTINCT raw_s3_url")) return [{ raw_s3_url: "s3://runtime-bucket/raw/email.eml" }];
+        if (sql.includes("LEFT JOIN providers p")) return [];
+        if (sql.includes("SELECT COUNT(*) AS count FROM emails")) return [{ count: sql.includes("provider_id IS NULL") ? "0" : "1" }];
+        if (sql.includes("SELECT COUNT(*) AS count FROM inbound_emails")) return [{ count: countFor(sql) }];
+        return [];
+      },
+      run: async () => undefined,
+      close: async () => undefined,
+    };
+
+    const context = await agentContextResourcePayload(getDatabase(), remote) as {
+      status: { inbox: { total: number; unread: number }; mailboxes?: { counts: { sent: number } } };
+    };
+    const mailboxes = await mailboxesResourcePayloadForRuntime(getDatabase(), remote) as { counts: { inbox: number; sent: number } };
+    const sources = await sourcesResourcePayloadForRuntime(getDatabase(), remote) as { sources: Array<{ id: string; total: number }> };
+
+    expect(context.status.inbox).toMatchObject({ total: 7, unread: 2 });
+    expect(mailboxes.counts).toMatchObject({ inbox: 7, sent: 2 });
+    expect(sources.sources.map((source) => source.id)).toEqual(expect.arrayContaining([
+      "provider:provider_123",
+      "s3:runtime-bucket",
+    ]));
   });
 
   it("returns only failed provisioning rows for recent errors", () => {

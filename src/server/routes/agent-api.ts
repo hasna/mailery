@@ -9,12 +9,19 @@ import { verifySendKey, canOwnerSendFrom } from "../../db/send-keys.js";
 import { getOwner, assignAddressOwner, listAddressesByOwner, listAdministeredAddressesNotOwnedBy, getAddressOwnership } from "../../db/owners.js";
 import { getActiveProvider, getProvider } from "../../db/providers.js";
 import { createAddress, getAddressByEmail } from "../../db/addresses.js";
-import { createEmail } from "../../db/emails.js";
-import { storeEmailContent } from "../../db/email-content.js";
 import { listInboundEmailSummariesForOwner, getInboundEmail, getInboundEmailSummary, setInboundReadFlag, inboundEmailBelongsToOwner } from "../../db/inbound.js";
 import { getAdapter } from "../../providers/index.js";
 import { getDatabase } from "../../db/database.js";
 import { json, badRequest, notFound, internalError, parseBody, queryInteger, resolveIdStrict } from "./helpers.js";
+import { getSelfHostedRuntimeStatus } from "../../lib/self-hosted-runtime.js";
+import { createSentEmailLedger, storeSentEmailContent } from "../../lib/sent-ledger.js";
+import {
+  assertSelfHostedDirectRuntimeConfigured,
+  getSelfHostedInboundEmail,
+  listSelfHostedInboundEmailSummariesForOwner,
+  selfHostedInboundEmailBelongsToOwner,
+  setSelfHostedInboundRead,
+} from "../../db/self-hosted-inbound.js";
 
 function unauthorized(msg = "Missing or invalid send key"): Response {
   return json({ error: msg }, 401);
@@ -45,6 +52,14 @@ function queryBoolean(url: URL, key: string): boolean | undefined {
 function queryText(url: URL, key: string): string | undefined {
   const value = url.searchParams.get(key)?.trim();
   return value ? value : undefined;
+}
+
+function selfHostedRuntimeRequested(): boolean {
+  return getSelfHostedRuntimeStatus().enabled;
+}
+
+function requireSelfHostedRuntime(): void {
+  assertSelfHostedDirectRuntimeConfigured();
 }
 
 export async function handle(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
@@ -125,9 +140,9 @@ export async function handle(req: Request, url: URL, path: string, method: strin
       };
       const db = getDatabase();
       const { sendWithFailover } = await import("../../lib/send.js");
-      const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, db);
-      const email = createEmail(actual, sendOpts, messageId, db);
-      storeEmailContent(email.id, { html: sendOpts.html, text: sendOpts.text }, db);
+      const { messageId, providerId: actual, selfHostedSendAttemptId } = await sendWithFailover(providerId, sendOpts, db);
+      const email = await createSentEmailLedger(actual, sendOpts, messageId, db, selfHostedSendAttemptId);
+      await storeSentEmailContent(email.id, { html: sendOpts.html, text: sendOpts.text }, db);
       return json({ id: email.id, message_id: messageId }, 201);
     } catch (e) { return internalError(e); }
   }
@@ -137,7 +152,7 @@ export async function handle(req: Request, url: URL, path: string, method: strin
   // truncated by a global row cap.
   if (path === "/api/v1/inbox" && method === "GET") {
     try {
-      const mine = listInboundEmailSummariesForOwner(owner.id, {
+      const opts = {
         limit: queryInteger(url, "limit", 200, { min: 1, max: 1000 }),
         offset: queryInteger(url, "offset", 0, { min: 0 }),
         since: queryText(url, "since"),
@@ -148,7 +163,10 @@ export async function handle(req: Request, url: URL, path: string, method: strin
         read: queryBoolean(url, "read"),
         starred: queryBoolean(url, "starred"),
         archived: queryBoolean(url, "archived"),
-      });
+      };
+      const mine = selfHostedRuntimeRequested()
+        ? await (requireSelfHostedRuntime(), listSelfHostedInboundEmailSummariesForOwner(owner.id, opts))
+        : listInboundEmailSummariesForOwner(owner.id, opts);
       return json(mine);
     } catch (e) { return internalError(e); }
   }
@@ -157,6 +175,15 @@ export async function handle(req: Request, url: URL, path: string, method: strin
   const inboxMatch = path.match(/^\/api\/v1\/inbox\/([^/]+)$/);
   if (inboxMatch && method === "GET") {
     try {
+      if (selfHostedRuntimeRequested()) {
+        requireSelfHostedRuntime();
+        const id = inboxMatch[1]!;
+        if (!await selfHostedInboundEmailBelongsToOwner(id, owner.id)) return forbidden("This email is not addressed to one of your addresses");
+        let email = await getSelfHostedInboundEmail(id);
+        if (!email) return notFound("Inbound email not found");
+        if (!email.is_read) email = await setSelfHostedInboundRead(email.id, true);
+        return json(email);
+      }
       const db = getDatabase();
       const id = resolveIdStrict("inbound_emails", inboxMatch[1]!);
       const summary = getInboundEmailSummary(id, db);

@@ -23,14 +23,25 @@ const PRIVATE_PLATFORM_PATTERNS = [
   new RegExp(`${["hasna", "studio"].join("")}`, "i"),
   new RegExp(`${["HASNA", "XYZ", ""].join("_")}`, "i"),
   new RegExp(`${["apps", "prod", "postgres"].join("-")}`, "i"),
+  new RegExp(`${["mailery", "postgres"].join("-")}`, "i"),
+  new RegExp(`${["mailery", "email", "archive"].join("-")}`, "i"),
+  new RegExp(`${["mailery", "archive"].join("-")}`, "i"),
+  new RegExp(`${["mailery", "self-hosted"].join("/")}`, "i"),
+  new RegExp(`${["mailery", "self-hosted", "postgres"].join("-")}`, "i"),
+  new RegExp(`${["mailery", "self-hosted", "emails", "prod"].join("/")}`, "i"),
 ] as const;
 
 const SOURCE_ROOTS = [
   "AGENTS.md",
+  "Package.swift",
   "README.md",
+  "Sources",
+  "dashboard",
   "docs",
+  "scripts",
   "sdk",
   "src",
+  "web",
 ] as const;
 
 const TEXT_EXTENSIONS = new Set([

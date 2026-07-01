@@ -3,7 +3,7 @@ import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { commandModulesFor, remoteStorageRuntimeError, routeRootPromptArgs, shouldPrintVersionEarly, type CommandModule } from "./router.js";
+import { commandModulesFor, remoteStorageRuntimeError, routeRootPromptArgs, shouldPrintVersionEarly, shouldUseSelfHostedRuntimeCacheForArgs, type CommandModule } from "./router.js";
 import { createMaileryEventsClient, getMaileryEventsDataDir } from "../lib/mailery-events.js";
 
 function getPackageVersion(): string {
@@ -84,6 +84,12 @@ async function registerOptionalEventsCommands(program: Command): Promise<void> {
   }
 }
 
+function configureJsonCommanderErrors(command: Command): void {
+  command.exitOverride();
+  command.configureOutput({ writeErr: () => {} });
+  for (const subcommand of command.commands) configureJsonCommanderErrors(subcommand);
+}
+
 async function main(): Promise<void> {
   const version = getPackageVersion();
   const rawArgs = process.argv.slice(2);
@@ -98,6 +104,34 @@ async function main(): Promise<void> {
     import("../lib/logger.js"),
     import("./utils.js"),
   ]);
+  const jsonRequested = cliArgs.includes("--json");
+  const verboseRequested = cliArgs.includes("--verbose") || cliArgs.includes("-v");
+  const quietRequested = cliArgs.includes("--quiet") || cliArgs.includes("-q");
+  configureCliRuntime({ json: jsonRequested, verbose: verboseRequested });
+  setLogLevel(quietRequested, verboseRequested);
+
+  let selfHostedRuntimePrepared = false;
+
+  async function prepareSelfHostedRuntimeIfNeeded(): Promise<void> {
+    if (!shouldUseSelfHostedRuntimeCacheForArgs(cliArgs)) return;
+    try {
+      const { prepareSelfHostedRuntimeCache } = await import("../lib/self-hosted-runtime.js");
+      const result = await prepareSelfHostedRuntimeCache({ source: "mailery-cli" });
+      selfHostedRuntimePrepared = result.enabled;
+    } catch (e) {
+      handleError(e);
+    }
+  }
+
+  async function flushSelfHostedRuntimeIfNeeded(): Promise<void> {
+    if (!selfHostedRuntimePrepared) return;
+    try {
+      const { flushSelfHostedRuntimeCache } = await import("../lib/self-hosted-runtime.js");
+      await flushSelfHostedRuntimeCache({ source: "mailery-cli", cleanupCache: true });
+    } catch (e) {
+      handleError(e);
+    }
+  }
 
   program
     .name("mailery")
@@ -106,10 +140,14 @@ async function main(): Promise<void> {
     .option("--json", "Output JSON instead of formatted text")
     .option("-q, --quiet", "Suppress info output")
     .option("-v, --verbose", "Show debug info")
-    .hook("preAction", () => {
+    .hook("preAction", async () => {
       const opts = program.opts();
       configureCliRuntime({ json: !!opts.json, verbose: !!opts.verbose });
       setLogLevel(!!opts.quiet, !!opts.verbose);
+      await prepareSelfHostedRuntimeIfNeeded();
+    })
+    .hook("postAction", async () => {
+      await flushSelfHostedRuntimeIfNeeded();
     });
 
   function output(data: unknown, formatted: string): void {
@@ -123,15 +161,22 @@ async function main(): Promise<void> {
 
   const remoteRuntimeError = remoteStorageRuntimeError(cliArgs);
   if (remoteRuntimeError) {
-    configureCliRuntime({ json: cliArgs.includes("--json"), verbose: cliArgs.includes("--verbose") || cliArgs.includes("-v") });
-    setLogLevel(cliArgs.includes("--quiet") || cliArgs.includes("-q"), cliArgs.includes("--verbose") || cliArgs.includes("-v"));
     handleError(new Error(remoteRuntimeError));
   }
 
   await registerCommandsForArgs(program, output, cliArgs);
   await registerOptionalEventsCommands(program);
 
-  await program.parseAsync([process.argv[0] ?? "bun", process.argv[1] ?? "mailery", ...cliArgs]);
+  if (jsonRequested && !cliArgs.includes("--help") && !cliArgs.includes("-h")) {
+    configureJsonCommanderErrors(program);
+  }
+
+  try {
+    await program.parseAsync([process.argv[0] ?? "bun", process.argv[1] ?? "mailery", ...cliArgs]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    handleError(new Error(message));
+  }
 }
 
 await main();

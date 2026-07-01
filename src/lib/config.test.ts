@@ -149,25 +149,93 @@ describe("config", () => {
     });
   });
 
-  it("exports generic self-hosted emails resource defaults", () => {
-    expect(CANONICAL_OPEN_EMAILS_S3_BUCKET).toBe("mailery-email-archive");
+  it("getInboundAttachmentStorageConfig defaults self-hosted attachments to S3 when a bucket is configured", () => {
+    const previousMode = process.env["MAILERY_MODE"];
+    try {
+      process.env["MAILERY_MODE"] = "self_hosted";
+      setConfigValue("inbound_s3_bucket", "self-hosted-inbound");
+
+      expect(getInboundAttachmentStorageConfig()).toMatchObject({
+        attachment_storage: "s3",
+        s3_bucket: "self-hosted-inbound",
+        s3_region: "us-east-1",
+        s3_prefix: "emails",
+      });
+    } finally {
+      if (previousMode === undefined) delete process.env["MAILERY_MODE"];
+      else process.env["MAILERY_MODE"] = previousMode;
+    }
+  });
+
+  it("getInboundAttachmentStorageConfig avoids local attachment files in self-hosted mode without a bucket", () => {
+    const previousMode = process.env["MAILERY_MODE"];
+    try {
+      process.env["MAILERY_MODE"] = "self_hosted";
+
+      expect(getInboundAttachmentStorageConfig()).toMatchObject({
+        attachment_storage: "none",
+        s3_region: "us-east-1",
+        s3_prefix: "emails",
+      });
+    } finally {
+      if (previousMode === undefined) delete process.env["MAILERY_MODE"];
+      else process.env["MAILERY_MODE"] = previousMode;
+    }
+  });
+
+  it("getInboundAttachmentStorageConfig does not allow explicit local attachment storage in self-hosted mode", () => {
+    const previousMode = process.env["MAILERY_MODE"];
+    try {
+      process.env["MAILERY_MODE"] = "self_hosted";
+      setConfigValue("attachment_storage", "local");
+      setConfigValue("attachment_s3_bucket", "self-hosted-attachments");
+
+      expect(getInboundAttachmentStorageConfig()).toMatchObject({
+        attachment_storage: "s3",
+        s3_bucket: "self-hosted-attachments",
+      });
+    } finally {
+      if (previousMode === undefined) delete process.env["MAILERY_MODE"];
+      else process.env["MAILERY_MODE"] = previousMode;
+    }
+  });
+
+  it("does not export concrete self-hosted infrastructure defaults in the OSS package", () => {
+    expect(CANONICAL_OPEN_EMAILS_S3_BUCKET).toBeNull();
     expect(CANONICAL_OPEN_EMAILS_S3_REGION).toBe("us-east-1");
     expect(CANONICAL_OPEN_EMAILS_SECRET_PATHS).toEqual({
-      env: "mailery/self-hosted/emails/prod/env",
-      aws: "mailery/self-hosted/emails/prod/aws",
-      s3: "mailery/self-hosted/emails/prod/s3",
-      rds: "mailery/self-hosted/emails/prod/rds",
+      env: null,
+      aws: null,
+      s3: null,
+      rds: null,
     });
-    expect(CANONICAL_OPEN_EMAILS_RDS_CLUSTER).toBe("mailery-postgres");
-    expect(CANONICAL_OPEN_EMAILS_RDS_DATABASE).toBe("emails");
-    expect(CANONICAL_OPEN_EMAILS_RDS_SECRET_PATH).toBe("mailery/self-hosted/emails/prod/rds");
+    expect(CANONICAL_OPEN_EMAILS_RDS_CLUSTER).toBeNull();
+    expect(CANONICAL_OPEN_EMAILS_RDS_DATABASE).toBeNull();
+    expect(CANONICAL_OPEN_EMAILS_RDS_SECRET_PATH).toBeNull();
     expect(getCanonicalOpenEmailsRdsConfig()).toEqual({
-      cluster: "mailery-postgres",
-      database: "emails",
-      runtimePath: "mailery/self-hosted/emails/prod/rds",
+      cluster: null,
+      database: null,
+      runtimePath: null,
       env: "HASNA_EMAILS_DATABASE_URL",
       fallbackEnv: "EMAILS_DATABASE_URL",
     });
+  });
+
+  it("getInboundAttachmentStorageConfig fails closed for explicit S3 storage without a bucket in self-hosted mode", () => {
+    const previousMode = process.env["MAILERY_MODE"];
+    try {
+      process.env["MAILERY_MODE"] = "self_hosted";
+      setConfigValue("attachment_storage", "s3");
+
+      expect(getInboundAttachmentStorageConfig()).toMatchObject({
+        attachment_storage: "none",
+        s3_region: "us-east-1",
+        s3_prefix: "emails",
+      });
+    } finally {
+      if (previousMode === undefined) delete process.env["MAILERY_MODE"];
+      else process.env["MAILERY_MODE"] = previousMode;
+    }
   });
 
   it("getInboundAttachmentStorageConfig reads explicit inbound attachment overrides", () => {
@@ -195,7 +263,7 @@ describe("config", () => {
   });
 
   it("keeps legacy Gmail archive config helpers for old imports", () => {
-    expect(getDefaultGmailArchiveS3Bucket()).toBe(CANONICAL_OPEN_EMAILS_S3_BUCKET);
+    expect(getDefaultGmailArchiveS3Bucket()).toBeNull();
     expect(getDefaultGmailArchiveS3Region()).toBe(CANONICAL_OPEN_EMAILS_S3_REGION);
     expect(getDefaultGmailArchiveS3Prefix()).toBe("gmail");
 

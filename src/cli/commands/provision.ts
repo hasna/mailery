@@ -413,7 +413,11 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
           const report = await runRoundtrip(
             {
               send: async ({ from, to, subject, text }) => {
-                const r = await sendWithFailover(providerId, { from, to, subject, text, html: `<p>${text}</p>` }, db);
+                const sendOpts = { from, to, subject, text, html: `<p>${text}</p>` };
+                const r = await sendWithFailover(providerId, sendOpts, db);
+                const { createSentEmailLedger, storeSentEmailContent } = await import("../../lib/sent-ledger.js");
+                const email = await createSentEmailLedger(r.providerId, sendOpts, r.messageId, db, r.selfHostedSendAttemptId);
+                await storeSentEmailContent(email.id, { html: sendOpts.html, text }, db);
                 await new Promise((res) => setTimeout(res, 1100));
                 return { messageId: r.messageId };
               },
@@ -481,7 +485,11 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
         const report = await runRoundtrip(
           {
             send: async ({ from, to, subject, text }) => {
-              const r = await sendWithFailover(providerId, { from, to, subject, text, html: `<p>${text}</p>` }, db);
+              const sendOpts = { from, to, subject, text, html: `<p>${text}</p>` };
+              const r = await sendWithFailover(providerId, sendOpts, db);
+              const { createSentEmailLedger, storeSentEmailContent } = await import("../../lib/sent-ledger.js");
+              const email = await createSentEmailLedger(r.providerId, sendOpts, r.messageId, db, r.selfHostedSendAttemptId);
+              await storeSentEmailContent(email.id, { html: sendOpts.html, text }, db);
               await new Promise((res) => setTimeout(res, throttle));
               return { messageId: r.messageId };
             },

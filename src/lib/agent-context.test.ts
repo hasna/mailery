@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
 import { createProvider, updateProvider } from "../db/providers.js";
 import { createAddress, markVerified } from "../db/addresses.js";
@@ -6,9 +9,15 @@ import { createDomain, updateDnsStatus } from "../db/domains.js";
 import { storeInboundEmail, setInboundArchived, setInboundRead } from "../db/inbound.js";
 import { createOwner, assignAddressOwner } from "../db/owners.js";
 import { setAddressProvisioning, setDomainProvisioning } from "../db/provisioning.js";
-import { getEmailSystemStatus, getNextEmailAction } from "./agent-context.js";
+import { getAgentContextForRuntime, getEmailSystemStatus, getEmailSystemStatusForRuntime, getNextEmailAction } from "./agent-context.js";
+
+let previousHome: string | undefined;
+let tempHome: string | undefined;
 
 beforeEach(() => {
+  previousHome = process.env["HOME"];
+  tempHome = mkdtempSync(join(tmpdir(), "mailery-agent-context-test-home-"));
+  process.env["HOME"] = tempHome;
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
 });
@@ -16,6 +25,11 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  if (previousHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = previousHome;
+  if (tempHome) rmSync(tempHome, { recursive: true, force: true });
+  tempHome = undefined;
+  previousHome = undefined;
 });
 
 describe("agent context", () => {
@@ -283,5 +297,56 @@ describe("agent context", () => {
     expect(queries.some((sql) => sql.includes("WHERE is_sent = 0"))).toBe(true);
     expect(queries.filter((sql) => sql.includes("COUNT(*) as count FROM inbound_emails"))).toHaveLength(0);
     expect(queries.filter((sql) => sql.includes("MAX(received_at) as latest FROM inbound_emails"))).toHaveLength(0);
+  });
+
+  it("uses self-hosted Postgres/S3 metadata for runtime status with an empty local inbox", async () => {
+    const remoteCalls: string[] = [];
+    const countFor = (sql: string) => {
+      if (sql.includes("provider_id IS NULL")) return "0";
+      if (sql.includes("raw_s3_url LIKE")) return "4";
+      if (sql.includes("provider_id = ?")) return "3";
+      if (sql.includes("COALESCE(is_sent, 0) = 1")) return "1";
+      if (sql.includes("COALESCE(is_read, 0) = 0")) return "2";
+      return "7";
+    };
+    const remote = {
+      all: async (sql: string) => {
+        remoteCalls.push(sql);
+        if (sql.includes("MAX(received_at)")) return [{ latest: "2026-07-01T09:00:00.000Z" }];
+        if (sql.includes("FROM providers p")) return [{ id: "provider_123", name: "SES", type: "ses", active: true, has_mail: true }];
+        if (sql.includes("SELECT DISTINCT raw_s3_url")) return [{ raw_s3_url: "s3://runtime-bucket/raw/email.eml" }];
+        if (sql.includes("LEFT JOIN providers p")) return [];
+        if (sql.includes("SELECT COUNT(*) AS count FROM emails")) return [{ count: sql.includes("provider_id IS NULL") ? "0" : "1" }];
+        if (sql.includes("SELECT COUNT(*) AS count FROM inbound_emails")) return [{ count: countFor(sql) }];
+        return [];
+      },
+      run: async () => undefined,
+      close: async () => undefined,
+    };
+
+    const status = await getEmailSystemStatusForRuntime(getDatabase(), remote);
+
+    expect(status.inbox).toMatchObject({
+      total: 7,
+      unread: 2,
+      latest_received_at: "2026-07-01T09:00:00.000Z",
+    });
+    expect(status.mailboxes.counts.inbox).toBe(7);
+    expect(status.mailboxes.counts.sent).toBe(2);
+    expect(status.sources).toMatchObject({
+      total: 2,
+      active: 2,
+      legacy: 1,
+      orphaned: 0,
+    });
+    expect(status.sources.items.map((source) => source.id)).toEqual(expect.arrayContaining([
+      "provider:provider_123",
+      "s3:runtime-bucket",
+    ]));
+
+    const context = await getAgentContextForRuntime(getDatabase(), remote);
+    expect((context.status as { inbox: { total: number } }).inbox.total).toBe(7);
+    expect(remoteCalls.some((sql) => sql.includes("FROM providers p"))).toBe(true);
+    expect(remoteCalls.some((sql) => sql.includes("SELECT DISTINCT raw_s3_url"))).toBe(true);
   });
 });

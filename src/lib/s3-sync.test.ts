@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,8 +27,8 @@ mock.module("@aws-sdk/client-s3", () => ({
 
 // ─── Mock mailparser ──────────────────────────────────────────────────────────
 
-mock.module("mailparser", () => ({
-  simpleParser: mock(async (_buf: unknown) => ({
+function defaultParsedMail() {
+  return {
     subject: "Test Subject",
     from: { text: "sender@example.com", value: [{ address: "sender@example.com" }] },
     to: { value: [{ address: "recipient@example.com" }] },
@@ -37,7 +38,23 @@ mock.module("mailparser", () => ({
     attachments: [],
     date: new Date("2026-03-01T10:00:00Z"),
     headers: new Map(),
-  })),
+  };
+}
+
+const simpleParserMock = mock(async (_buf: unknown) => ({
+  subject: "Test Subject",
+  from: { text: "sender@example.com", value: [{ address: "sender@example.com" }] },
+  to: { value: [{ address: "recipient@example.com" }] },
+  cc: null,
+  text: "Hello world",
+  html: "<p>Hello world</p>",
+  attachments: [],
+  date: new Date("2026-03-01T10:00:00Z"),
+  headers: new Map(),
+}));
+
+mock.module("mailparser", () => ({
+  simpleParser: simpleParserMock,
 }));
 
 process.env["EMAILS_DB_PATH"] = ":memory:";
@@ -46,8 +63,14 @@ const originalHome = process.env["HOME"];
 let tmpHome = "";
 
 const { syncS3Inbox, registerS3Source, retireS3Source } = await import("./s3-sync.js");
+const { setConfigValue } = await import("./config.js");
+const { readS3ObjectBytes } = await import("./s3-object.js");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function sha256Hex(input: Buffer): string {
+  return createHash("sha256").update(input).digest("hex");
+}
 
 function setupDb() {
   resetDatabase();
@@ -61,10 +84,15 @@ beforeEach(() => {
   tmpHome = mkdtempSync(join(tmpdir(), "emails-s3-source-"));
   process.env["HOME"] = tmpHome;
   mockSend.mockReset();
+  simpleParserMock.mockClear();
+  simpleParserMock.mockImplementation(async () => defaultParsedMail());
 });
 
 afterEach(() => {
   closeDatabase();
+  delete process.env["MAILERY_MODE"];
+  delete process.env["HASNA_EMAILS_DATABASE_URL"];
+  delete process.env["EMAILS_DATABASE_URL"];
   if (originalHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = originalHome;
   if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
@@ -215,6 +243,202 @@ describe("syncS3Inbox — with objects", () => {
     expect(row.raw_s3_url).toBe("s3://test-bucket/inbound/example.com/msg001");
   });
 
+  it("materializes raw mail and parsed attachments as S3-backed references", async () => {
+    const { db, providerId } = setupDb();
+    const putObjects: Array<Record<string, unknown>> = [];
+    const rawMail = Buffer.from("From: a@b.com\r\nSubject: Attachment\r\n\r\nBody");
+    const attachmentBytes = Buffer.from("hello-world");
+    const objectBytes = new Map<string, Buffer>([
+      ["raw-bucket/inbound/example.com/with-attachment", rawMail],
+    ]);
+    const objectContentTypes = new Map<string, string>([
+      ["raw-bucket/inbound/example.com/with-attachment", "message/rfc822"],
+    ]);
+    setConfigValue("attachment_storage", "s3");
+    setConfigValue("attachment_s3_bucket", "attachment-bucket");
+    setConfigValue("attachment_s3_prefix", "parsed-attachments");
+
+    simpleParserMock.mockImplementation(async () => ({
+      ...defaultParsedMail(),
+      subject: "With attachment",
+      attachments: [{
+        filename: "invoice.pdf",
+        contentType: "application/pdf",
+        size: attachmentBytes.length,
+        content: attachmentBytes,
+      }],
+    }));
+
+    mockSend.mockImplementation(async (cmd: unknown) => {
+      const input = (cmd as { input?: Record<string, unknown> }).input ?? {};
+      if ("Prefix" in input) {
+        return {
+          Contents: [{ Key: "inbound/example.com/with-attachment", Size: 2048 }],
+          IsTruncated: false,
+        };
+      }
+      if ("ContentType" in input) {
+        const key = `${String(input["Bucket"])}/${String(input["Key"])}`;
+        objectBytes.set(key, Buffer.from(input["Body"] as Uint8Array));
+        objectContentTypes.set(key, String(input["ContentType"]));
+        putObjects.push(input);
+        return {};
+      }
+      if ("Key" in input) {
+        const key = `${String(input["Bucket"])}/${String(input["Key"])}`;
+        const body = objectBytes.get(key);
+        if (!body) throw new Error(`missing test object: ${key}`);
+        return {
+          Body: (async function* () { yield body; })(),
+          ContentType: objectContentTypes.get(key),
+          ContentLength: body.length,
+        };
+      }
+      return {};
+    });
+
+    const result = await syncS3Inbox({ bucket: "raw-bucket", db, providerId });
+
+    expect(result).toMatchObject({ synced: 1, attachments_saved: 1, errors: [] });
+    const row = db.query(
+      "SELECT raw_s3_url, attachments_json, attachment_paths FROM inbound_emails WHERE raw_s3_url = ?",
+    ).get("s3://raw-bucket/inbound/example.com/with-attachment") as {
+      raw_s3_url: string;
+      attachments_json: string;
+      attachment_paths: string;
+    };
+    expect(row.raw_s3_url).toBe("s3://raw-bucket/inbound/example.com/with-attachment");
+    expect(JSON.parse(row.attachments_json)).toEqual([
+      { filename: "invoice.pdf", content_type: "application/pdf", size: 11 },
+    ]);
+    expect(JSON.parse(row.attachment_paths)).toEqual([
+      {
+        filename: "invoice.pdf",
+        content_type: "application/pdf",
+        size: attachmentBytes.length,
+        s3_url: expect.stringMatching(/^s3:\/\/attachment-bucket\/parsed-attachments\/.+\/invoice\.pdf$/),
+      },
+    ]);
+    expect(putObjects).toHaveLength(1);
+    expect(putObjects[0]).toMatchObject({
+      Bucket: "attachment-bucket",
+      Key: expect.stringMatching(/^parsed-attachments\/.+\/invoice\.pdf$/),
+      ContentType: "application/pdf",
+    });
+
+    const rawObject = await readS3ObjectBytes(row.raw_s3_url);
+    expect(rawObject.body.equals(rawMail)).toBe(true);
+    expect(sha256Hex(rawObject.body)).toBe(sha256Hex(rawMail));
+    expect(rawObject.contentType).toBe("message/rfc822");
+    expect(rawObject.contentLength).toBe(rawMail.length);
+
+    const [attachmentPath] = JSON.parse(row.attachment_paths) as Array<{ s3_url: string }>;
+    const attachmentObject = await readS3ObjectBytes(attachmentPath!.s3_url);
+    expect(attachmentObject.body.equals(attachmentBytes)).toBe(true);
+    expect(sha256Hex(attachmentObject.body)).toBe(sha256Hex(attachmentBytes));
+    expect(attachmentObject.contentType).toBe("application/pdf");
+    expect(attachmentObject.contentLength).toBe(attachmentBytes.length);
+  });
+
+  it("does not count or persist S3 attachment paths when attachment upload fails", async () => {
+    const { db, providerId } = setupDb();
+    const attachmentBytes = Buffer.from("failed-upload");
+    setConfigValue("attachment_storage", "s3");
+    setConfigValue("attachment_s3_bucket", "attachment-bucket");
+    setConfigValue("attachment_s3_prefix", "parsed-attachments");
+
+    simpleParserMock.mockImplementation(async () => ({
+      ...defaultParsedMail(),
+      subject: "Attachment upload failure",
+      attachments: [{
+        filename: "invoice.pdf",
+        contentType: "application/pdf",
+        size: attachmentBytes.length,
+        content: attachmentBytes,
+      }],
+    }));
+
+    mockSend.mockImplementation(async (cmd: unknown) => {
+      const input = (cmd as { input?: Record<string, unknown> }).input ?? {};
+      if ("ContentType" in input) {
+        throw new Error("put failed");
+      }
+      if ("Key" in input) {
+        return {
+          Body: (async function* () {
+            yield Buffer.from("From: a@b.com\r\nSubject: Upload Failure\r\n\r\nBody");
+          })(),
+        };
+      }
+      throw new Error("unexpected S3 list call");
+    });
+
+    const result = await syncS3Inbox({
+      bucket: "raw-bucket",
+      keys: ["inbound/example.com/upload-failure"],
+      db,
+      providerId,
+    });
+
+    expect(result.synced).toBe(1);
+    expect(result.attachments_saved).toBe(0);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("S3 upload invoice.pdf");
+    const row = db.query(
+      "SELECT attachments_json, attachment_paths FROM inbound_emails WHERE raw_s3_url = ?",
+    ).get("s3://raw-bucket/inbound/example.com/upload-failure") as {
+      attachments_json: string;
+      attachment_paths: string;
+    };
+    expect(JSON.parse(row.attachments_json)).toEqual([
+      { filename: "invoice.pdf", content_type: "application/pdf", size: attachmentBytes.length },
+    ]);
+    expect(JSON.parse(row.attachment_paths)).toEqual([]);
+  });
+
+  it("does not fall back to local attachment files when S3 storage lacks a bucket", async () => {
+    const { db, providerId } = setupDb();
+    const attachmentBytes = Buffer.from("no-local-fallback");
+    setConfigValue("attachment_storage", "s3");
+
+    simpleParserMock.mockImplementation(async () => ({
+      ...defaultParsedMail(),
+      subject: "Attachment without bucket",
+      attachments: [{
+        filename: "invoice.pdf",
+        contentType: "application/pdf",
+        size: attachmentBytes.length,
+        content: attachmentBytes,
+      }],
+    }));
+
+    mockSend.mockImplementation(async (cmd: unknown) => {
+      const input = (cmd as { input?: Record<string, unknown> }).input ?? {};
+      if ("Key" in input) {
+        return {
+          Body: (async function* () {
+            yield Buffer.from("From: a@b.com\r\nSubject: No Bucket\r\n\r\nBody");
+          })(),
+        };
+      }
+      throw new Error("unexpected S3 list call");
+    });
+
+    const result = await syncS3Inbox({
+      bucket: "raw-bucket",
+      keys: ["inbound/example.com/no-bucket"],
+      db,
+      providerId,
+    });
+
+    expect(result).toMatchObject({ synced: 1, attachments_saved: 0 });
+    expect(result.errors[0]).toContain("attachment_s3_bucket is required");
+    const row = db.query(
+      "SELECT attachment_paths FROM inbound_emails WHERE raw_s3_url = ?",
+    ).get("s3://raw-bucket/inbound/example.com/no-bucket") as { attachment_paths: string };
+    expect(JSON.parse(row.attachment_paths)).toEqual([]);
+  });
+
   it("syncs exact S3 object keys without listing the whole prefix", async () => {
     const { db, providerId } = setupDb();
     const calls: Array<Record<string, unknown>> = [];
@@ -239,6 +463,62 @@ describe("syncS3Inbox — with objects", () => {
     expect(result).toMatchObject({ synced: 1, skipped: 0, errors: [] });
     expect(calls).toEqual([{ Bucket: "test-bucket", Key: "inbound/example.com/msg-exact" }]);
     expect(db.query("SELECT id FROM inbound_emails WHERE raw_s3_url = ?").get("s3://test-bucket/inbound/example.com/msg-exact")).not.toBeNull();
+  });
+
+  it("flushes S3 materialization tables and keeps exact-key self-hosted ingestion idempotent", async () => {
+    const { providerId } = setupDb();
+    const flushCalls: Array<Record<string, unknown>> = [];
+    let getObjectCalls = 0;
+    mock.module("./self-hosted-runtime.js", () => ({
+      SELF_HOSTED_S3_MATERIALIZATION_TABLES: ["providers", "inbound_emails", "mail_messages"],
+      flushSelfHostedRuntimeCache: mock(async (options: Record<string, unknown>) => {
+        flushCalls.push(options);
+        return { enabled: true, action: "flush", source: "s3-sync", results: [] };
+      }),
+    }));
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
+
+    mockSend.mockImplementation(async (cmd: unknown) => {
+      const input = (cmd as { input?: Record<string, unknown> }).input ?? {};
+      if ("Key" in input) {
+        getObjectCalls++;
+        return { Body: (async function* () { yield Buffer.from("From: a@b.com\r\nSubject: Flush\r\n\r\nB"); })() };
+      }
+      throw new Error("unexpected S3 list call");
+    });
+
+    const result = await syncS3Inbox({
+      bucket: "test-bucket",
+      prefix: "inbound/",
+      keys: ["inbound/example.com/msg-flush"],
+      providerId,
+    });
+    const second = await syncS3Inbox({
+      bucket: "test-bucket",
+      prefix: "inbound/",
+      keys: ["inbound/example.com/msg-flush"],
+      providerId,
+    });
+
+    expect(result).toMatchObject({ synced: 1, skipped: 0, errors: [] });
+    expect(second).toMatchObject({ synced: 0, skipped: 1, errors: [] });
+    expect(getObjectCalls).toBe(1);
+    expect(flushCalls).toHaveLength(1);
+    expect(flushCalls[0]).toMatchObject({
+      source: "s3-sync",
+      tables: ["providers", "inbound_emails", "mail_messages"],
+    });
+    const rowFilters = flushCalls[0]!["rowFilters"] as Record<string, { where: string; params: string[] }>;
+    expect(rowFilters.inbound_emails).toEqual({
+      where: "raw_s3_url IN (?)",
+      params: ["s3://test-bucket/inbound/example.com/msg-flush"],
+    });
+    expect(rowFilters.mail_messages).toEqual({
+      where: "raw_s3_url IN (?)",
+      params: ["s3://test-bucket/inbound/example.com/msg-flush"],
+    });
+    expect(rowFilters.providers.where).toContain("provider_id");
   });
 
   it("rejects exact object keys outside the configured prefix", async () => {

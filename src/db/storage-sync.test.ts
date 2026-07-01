@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Database } from "./database.js";
 import { closeDatabase, getDatabase, resetDatabase } from "./database.js";
+import { storeInboundEmail } from "./inbound.js";
 import { listProviders } from "./providers.js";
 import type { PgAdapterAsync } from "./remote-storage.js";
 import {
@@ -70,6 +71,50 @@ class FailingReadRemote extends FakeRemote {
   }
 }
 
+class StatefulRemote extends FakeRemote {
+  private readonly rows = new Map<string, Row[]>();
+
+  async all(sql: string, ...params: unknown[]): Promise<unknown[]> {
+    this.allCalls.push({ sql, params });
+    if (sql.includes("FROM _migrations")) return [];
+    if (sql.includes("information_schema.columns")) return [];
+    const table = sql.match(/FROM "([^"]+)"/)?.[1];
+    if (!table) return [];
+    const limit = Number(params[0] ?? this.rows.get(table)?.length ?? 0);
+    const offset = Number(params[1] ?? 0);
+    return (this.rows.get(table) ?? []).slice(offset, offset + limit);
+  }
+
+  async run(sql: string, ...params: unknown[]): Promise<{ changes: number }> {
+    this.runCalls.push({ sql, params });
+    const match = sql.match(/INSERT INTO "([^"]+)" \(([^)]+)\) VALUES/i);
+    if (!match) return { changes: 1 };
+    const table = match[1]!;
+    const columns = match[2]!
+      .split(",")
+      .map((column) => column.trim().replace(/^"|"$/g, ""));
+    const row = Object.fromEntries(columns.map((column, index) => [column, params[index]]));
+    const primaryKey = table === "mailbox_message_state"
+      ? ["mailbox_id", "mail_message_id"]
+      : table === "inbound_recipients" || table === "inbound_labels"
+        ? ["inbound_email_id", table === "inbound_recipients" ? "address" : "label"]
+        : ["id"];
+    const key = primaryKey.map((column) => String(row[column] ?? "")).join("\0");
+    const tableRows = this.rows.get(table) ?? [];
+    const existingIndex = tableRows.findIndex((candidate) => (
+      primaryKey.map((column) => String(candidate[column] ?? "")).join("\0") === key
+    ));
+    if (existingIndex >= 0) tableRows[existingIndex] = { ...tableRows[existingIndex], ...row };
+    else tableRows.push(row);
+    this.rows.set(table, tableRows);
+    return { changes: 1 };
+  }
+
+  setRows(table: string, rows: Row[]): void {
+    this.rows.set(table, rows.map((row) => ({ ...row })));
+  }
+}
+
 function providerRow(id: string, name: string): Row {
   return {
     id,
@@ -115,14 +160,16 @@ describe("emails storage sync configuration", () => {
     expect(getStorageStatus()).toMatchObject({
       configured: true,
       activeEnv: "HASNA_EMAILS_DATABASE_URL",
-      mode: "hybrid",
+      mode: "remote",
+      sourceOfTruth: "postgres",
+      localCache: "runtime-cache",
       maileryMode: "self_hosted",
       maileryModeLabel: "Self-hosted",
       service: "emails",
       canonical: {
-        cluster: "mailery-postgres",
-        database: "emails",
-        runtimePath: "mailery/self-hosted/emails/prod/rds",
+        cluster: null,
+        database: null,
+        runtimePath: null,
         env: "HASNA_EMAILS_DATABASE_URL",
         fallbackEnv: "EMAILS_DATABASE_URL",
       },
@@ -142,11 +189,13 @@ describe("emails storage sync configuration", () => {
     expect(getStorageMode()).toBe("local");
 
     process.env["EMAILS_DATABASE_URL"] = "postgres://remote";
-    expect(getStorageMode()).toBe("hybrid");
+    expect(getStorageMode()).toBe("remote");
 
     process.env["HASNA_EMAILS_STORAGE_MODE"] = "remote";
     const status = getStorageStatus();
     expect(status.mode).toBe("remote");
+    expect(status.sourceOfTruth).toBe("postgres");
+    expect(status.localCache).toBe("runtime-cache");
     expect(status.maileryMode).toBe("self_hosted");
     expect(status.maileryModeWarning).toBeNull();
   });
@@ -315,6 +364,36 @@ describe("storage table sync batching", () => {
     expect(remote.runCalls).toHaveLength(5);
   });
 
+  it("pushes only rows matching a parameterized row filter", async () => {
+    const localRows = ["1", "2", "3"].map((id) => providerRow(id, `Provider ${id}`));
+    const dataReads: Array<{ sql: string; args: unknown[] }> = [];
+    const db = {
+      query: (sql: string) => ({
+        get: () => sql.includes("sqlite_master") ? { name: "providers" } : null,
+        all: (...args: unknown[]) => {
+          dataReads.push({ sql, args });
+          const filtered = localRows.filter((row) => row.name === args[0]);
+          const limit = Number(args[1]);
+          const offset = Number(args[2]);
+          return filtered.slice(offset, offset + limit);
+        },
+      }),
+    } as unknown as Database;
+    const remote = new FakeRemote();
+
+    const result = await pushTable(db, remote as unknown as PgAdapterAsync, "providers", {
+      batchSize: 2,
+      filter: { where: "name = ?", params: ["Provider 2"] },
+    });
+
+    expect(result).toMatchObject({ table: "providers", rowsRead: 1, rowsWritten: 1, errors: [] });
+    expect(dataReads).toHaveLength(1);
+    expect(dataReads[0]!.sql).toContain("WHERE name = ?");
+    expect(dataReads[0]!.args).toEqual(["Provider 2", 2, 0]);
+    expect(remote.runCalls).toHaveLength(1);
+    expect(remote.runCalls[0]!.params[0]).toBe("2");
+  });
+
   it("returns per-table push errors for CLI aggregation", async () => {
     const db = {
       query: (sql: string) => ({
@@ -342,5 +421,112 @@ describe("storage table sync batching", () => {
     expect(dataCalls.map((call) => call.params)).toEqual([[2, 0], [2, 2]]);
     expect(dataCalls.every((call) => call.sql.includes("LIMIT ? OFFSET ?"))).toBe(true);
     expect(listProviders().map((provider) => provider.name).sort()).toEqual(["Remote 1", "Remote 2", "Remote 3"]);
+  });
+
+  it("replace pulls delete stale local rows that are missing from the remote source of truth", async () => {
+    getDatabase().run(
+      `INSERT INTO providers (id, name, type, active, created_at, updated_at)
+       VALUES ('local-stale', 'Local stale', 'resend', 1, datetime('now'), datetime('now'))`,
+    );
+    const remote = new FakeRemote({
+      providers: [providerRow("1", "Remote 1")],
+    });
+
+    const result = await pullTablesFromRemote(
+      remote as unknown as PgAdapterAsync,
+      getDatabase(),
+      { tables: ["providers"], batchSize: 2, replace: true },
+    );
+
+    expect(result).toEqual([{ table: "providers", rowsRead: 1, rowsWritten: 1, errors: [] }]);
+    expect(listProviders().map((provider) => provider.name)).toEqual(["Remote 1"]);
+  });
+
+  it("round-trips mail rows through a disposable Postgres fixture and replaces stale cache state", async () => {
+    const db = getDatabase();
+    const remote = new StatefulRemote();
+    db.run(
+      `INSERT INTO providers (id, name, type, active, created_at, updated_at)
+       VALUES ('provider-1', 'Local source', 'ses', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+    );
+    const stored = storeInboundEmail({
+      provider_id: "provider-1",
+      message_id: "s3://fixture-bucket/inbound/msg-1",
+      in_reply_to_email_id: null,
+      raw_s3_url: "s3://fixture-bucket/inbound/msg-1",
+      from_address: "sender@example.com",
+      to_addresses: ["agent@example.com"],
+      cc_addresses: [],
+      subject: "Remote authoritative subject",
+      text_body: "remote body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 128,
+      received_at: "2026-07-01T12:00:00.000Z",
+    }, db);
+
+    expect(await pushTable(db, remote as unknown as PgAdapterAsync, "providers", { batchSize: 1 }))
+      .toMatchObject({ table: "providers", rowsRead: 1, rowsWritten: 1, errors: [] });
+    expect(await pushTable(db, remote as unknown as PgAdapterAsync, "inbound_emails", { batchSize: 1 }))
+      .toMatchObject({ table: "inbound_emails", rowsRead: 1, rowsWritten: 1, errors: [] });
+
+    db.run("UPDATE inbound_emails SET subject = 'Stale local subject', is_archived = 1 WHERE id = ?", [stored.id]);
+
+    const results = await pullTablesFromRemote(
+      remote as unknown as PgAdapterAsync,
+      db,
+      { tables: ["inbound_emails"], batchSize: 1, replace: true },
+    );
+
+    expect(results).toEqual([
+      { table: "inbound_emails", rowsRead: 1, rowsWritten: 1, errors: [] },
+    ]);
+    expect(db.query("SELECT subject, is_archived FROM inbound_emails WHERE id = ?").get(stored.id)).toEqual({
+      subject: "Remote authoritative subject",
+      is_archived: 0,
+    });
+  });
+
+  it("treats remote tombstones as authoritative for disposable self-hosted mail caches", async () => {
+    const db = getDatabase();
+    const remote = new StatefulRemote();
+    db.run(
+      `INSERT INTO providers (id, name, type, active, created_at, updated_at)
+       VALUES ('provider-1', 'Local source', 'ses', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+    );
+    const stored = storeInboundEmail({
+      provider_id: "provider-1",
+      message_id: "s3://fixture-bucket/inbound/tombstoned",
+      in_reply_to_email_id: null,
+      raw_s3_url: "s3://fixture-bucket/inbound/tombstoned",
+      from_address: "sender@example.com",
+      to_addresses: ["agent@example.com"],
+      cc_addresses: [],
+      subject: "Tombstoned locally",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 64,
+      received_at: "2026-07-01T12:00:00.000Z",
+    }, db);
+    remote.setRows("inbound_emails", []);
+    remote.setRows("mailbox_message_state", []);
+
+    const results = await pullTablesFromRemote(
+      remote as unknown as PgAdapterAsync,
+      db,
+      { tables: ["inbound_emails", "mailbox_message_state"], batchSize: 1, replace: true },
+    );
+
+    expect(results).toEqual([
+      { table: "inbound_emails", rowsRead: 0, rowsWritten: 0, errors: [] },
+      { table: "mailbox_message_state", rowsRead: 0, rowsWritten: 0, errors: [] },
+    ]);
+    expect(db.query("SELECT id FROM inbound_emails WHERE id = ?").get(stored.id)).toBeNull();
+    expect(db.query("SELECT COUNT(*) AS count FROM mailbox_message_state WHERE mail_message_id = ?").get(`msg:inbound:${stored.id}`)).toEqual({ count: 0 });
   });
 });

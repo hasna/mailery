@@ -14,23 +14,23 @@ export interface EmailsConfig {
   [key: string]: unknown;
 }
 
-export const CANONICAL_OPEN_EMAILS_S3_BUCKET = "mailery-email-archive";
+export const CANONICAL_OPEN_EMAILS_S3_BUCKET: string | null = null;
 export const CANONICAL_OPEN_EMAILS_S3_REGION = "us-east-1";
-export const CANONICAL_OPEN_EMAILS_SECRETS_BASE = "mailery/self-hosted/emails/prod";
+export const CANONICAL_OPEN_EMAILS_SECRETS_BASE: string | null = null;
 export const CANONICAL_OPEN_EMAILS_SECRET_PATHS = {
-  env: `${CANONICAL_OPEN_EMAILS_SECRETS_BASE}/env`,
-  aws: `${CANONICAL_OPEN_EMAILS_SECRETS_BASE}/aws`,
-  s3: `${CANONICAL_OPEN_EMAILS_SECRETS_BASE}/s3`,
-  rds: `${CANONICAL_OPEN_EMAILS_SECRETS_BASE}/rds`,
+  env: null,
+  aws: null,
+  s3: null,
+  rds: null,
 } as const;
-export const CANONICAL_OPEN_EMAILS_RDS_CLUSTER = "mailery-postgres";
-export const CANONICAL_OPEN_EMAILS_RDS_DATABASE = "emails";
+export const CANONICAL_OPEN_EMAILS_RDS_CLUSTER: string | null = null;
+export const CANONICAL_OPEN_EMAILS_RDS_DATABASE: string | null = null;
 export const CANONICAL_OPEN_EMAILS_RDS_SECRET_PATH = CANONICAL_OPEN_EMAILS_SECRET_PATHS.rds;
 
 export interface CanonicalOpenEmailsRdsConfig {
-  cluster: typeof CANONICAL_OPEN_EMAILS_RDS_CLUSTER;
-  database: typeof CANONICAL_OPEN_EMAILS_RDS_DATABASE;
-  runtimePath: typeof CANONICAL_OPEN_EMAILS_RDS_SECRET_PATH;
+  cluster: string | null;
+  database: string | null;
+  runtimePath: string | null;
   env: "HASNA_EMAILS_DATABASE_URL";
   fallbackEnv: "EMAILS_DATABASE_URL";
 }
@@ -156,7 +156,7 @@ export interface InboundAttachmentStorageConfig {
 }
 
 export interface GmailArchiveConfig {
-  archive_s3_bucket: string;
+  archive_s3_bucket: string | null;
   archive_s3_region: string;
   archive_s3_prefix: string;
 }
@@ -260,12 +260,42 @@ export function getBrandsightAuth(): BrandsightAuth | undefined {
 
 export function getInboundAttachmentStorageConfig(): InboundAttachmentStorageConfig {
   const config = loadConfig();
+  const configuredStorage = (config["attachment_storage"] as AttachmentStorage | undefined)
+    ?? (config["gmail_attachment_storage"] as AttachmentStorage | undefined);
+  const configuredBucket = (config["attachment_s3_bucket"] as string | undefined)
+    ?? (config["gmail_s3_bucket"] as string | undefined);
+  const inboundBucket = (config["inbound_s3_bucket"] as string | undefined)
+    ?? process.env["EMAILS_INBOUND_S3_BUCKET"];
+  const rawMode = String(
+    process.env["MAILERY_MODE"]
+      ?? process.env["HASNA_EMAILS_MODE"]
+      ?? config["mailery_mode"]
+      ?? config["mode"]
+      ?? "",
+  ).trim().toLowerCase().replace(/-/g, "_");
+  const storageMode = String(
+    process.env["HASNA_EMAILS_STORAGE_MODE"]
+      ?? process.env["EMAILS_STORAGE_MODE"]
+      ?? config["storage_mode"]
+      ?? "",
+  ).trim().toLowerCase().replace(/-/g, "_");
+  const selfHostedRuntime =
+    rawMode === "self_hosted" ||
+    rawMode === "remote" ||
+    rawMode === "hybrid" ||
+    storageMode === "remote" ||
+    !!process.env["HASNA_EMAILS_DATABASE_URL"] ||
+    !!process.env["EMAILS_DATABASE_URL"];
+  const effectiveStorage = selfHostedRuntime
+    ? configuredStorage === "local" || configuredStorage === "s3"
+      ? (configuredBucket || inboundBucket ? "s3" : "none")
+      : configuredStorage
+    : configuredStorage;
   return {
-    attachment_storage: (config["attachment_storage"] as AttachmentStorage)
-      ?? (config["gmail_attachment_storage"] as AttachmentStorage)
-      ?? "local",
-    s3_bucket: (config["attachment_s3_bucket"] as string | undefined)
-      ?? (config["gmail_s3_bucket"] as string | undefined),
+    attachment_storage: effectiveStorage
+      ?? (selfHostedRuntime ? (configuredBucket || inboundBucket ? "s3" : "none") : "local"),
+    s3_bucket: configuredBucket
+      ?? (selfHostedRuntime ? inboundBucket : undefined),
     s3_prefix: (config["attachment_s3_prefix"] as string | undefined)
       ?? (config["gmail_s3_prefix"] as string | undefined)
       ?? "emails",
@@ -275,7 +305,7 @@ export function getInboundAttachmentStorageConfig(): InboundAttachmentStorageCon
   };
 }
 
-export function getDefaultGmailArchiveS3Bucket(config: EmailsConfig = loadConfig()): string {
+export function getDefaultGmailArchiveS3Bucket(config: EmailsConfig = loadConfig()): string | null {
   return (config["gmail_archive_s3_bucket"] as string | undefined)
     ?? process.env["HASNA_EMAILS_ARCHIVE_S3_BUCKET"]
     ?? process.env["EMAILS_ARCHIVE_S3_BUCKET"]

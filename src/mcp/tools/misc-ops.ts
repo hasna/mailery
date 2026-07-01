@@ -368,7 +368,7 @@ export function registerMiscOpsTools(server: McpServer): void {
       const provider = getProvider(resolvedProviderId, db);
       if (!provider) throw new ProviderNotFoundError(resolvedProviderId);
       const { getSuppressedEmailSet, incrementSendCounts } = await import("../../db/contacts.js");
-      const { createEmail } = await import("../../db/emails.js");
+      const { createSentEmailLedger } = await import("../../lib/sent-ledger.js");
       let sent = 0, skipped = 0, failed = 0;
       const errors: string[] = [];
       const suppressedEmailSet = force ? new Set<string>() : getSuppressedEmailSet(recipients.map((r) => r.email), db);
@@ -381,8 +381,9 @@ export function registerMiscOpsTools(server: McpServer): void {
           const subject = renderTemplate(template.subject_template, vars);
           const html = template.html_template ? renderTemplate(template.html_template, vars) : undefined;
           const text = template.text_template ? renderTemplate(template.text_template, vars) : undefined;
-          const { messageId, providerId: actualId } = await sendWithFailover(resolvedProviderId, { from: from_address, to: r.email, subject, html, text }, db);
-          createEmail(actualId, { from: from_address, to: r.email, subject, html, text }, messageId, db);
+          const sendOpts = { from: from_address, to: r.email, subject, html, text };
+          const { messageId, providerId: actualId, selfHostedSendAttemptId } = await sendWithFailover(resolvedProviderId, sendOpts, db);
+          await createSentEmailLedger(actualId, sendOpts, messageId, db, selfHostedSendAttemptId);
           sentEmails.push(r.email);
           sent++;
         } catch (e) { failed++; errors.push(`${r.email}: ${e instanceof Error ? e.message : String(e)}`); }

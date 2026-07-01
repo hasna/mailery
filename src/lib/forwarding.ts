@@ -1,7 +1,5 @@
 import type { Database } from "../db/database.js";
 import { getDatabase } from "../db/database.js";
-import { createEmail } from "../db/emails.js";
-import { storeEmailContent } from "../db/email-content.js";
 import { getInboundEmail } from "../db/inbound.js";
 import { getLatestActiveProviderId } from "../db/providers.js";
 import {
@@ -9,6 +7,7 @@ import {
   recordForwardingDelivery,
   type ForwardingRule,
 } from "../db/forwarding.js";
+import { createSentEmailLedger, storeSentEmailContent } from "./sent-ledger.js";
 import { sendWithFailover, type SendResult } from "./send.js";
 
 export interface ForwardingRunOptions {
@@ -82,8 +81,8 @@ export async function processForwardingRules(opts: ForwardingRunOptions = {}): P
     try {
       const send = opts.send ?? sendWithFailover;
       const sent = await send(providerId, sendOpts, db);
-      const email = createEmail(sent.providerId, sendOpts, sent.messageId, db);
-      storeEmailContent(email.id, { text: body, html: sendOpts.html }, db);
+      const email = await createSentEmailLedger(sent.providerId, sendOpts, sent.messageId, db, sent.selfHostedSendAttemptId);
+      await storeSentEmailContent(email.id, { text: body, html: sendOpts.html }, db);
       recordForwardingDelivery({
         rule_id: pendingItem.rule.id,
         inbound_email_id: inbound.id,

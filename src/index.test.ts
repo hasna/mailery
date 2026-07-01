@@ -101,7 +101,7 @@ describe("public package entrypoint", () => {
     ]) {
       expect(typeof (emails as Record<string, unknown>)[name]).toBe("function");
     }
-    expect(emails.CANONICAL_OPEN_EMAILS_S3_BUCKET).toBe("mailery-email-archive");
+    expect(emails.CANONICAL_OPEN_EMAILS_S3_BUCKET).toBeNull();
     for (const storageInternal of ["PG_MIGRATIONS", "PgAdapterAsync", "storagePush", "storagePull", "storageSync"]) {
       expect((emails as Record<string, unknown>)[storageInternal]).toBeUndefined();
     }

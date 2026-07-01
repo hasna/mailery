@@ -184,7 +184,7 @@ export class SESAdapter implements ProviderAdapter {
       new PutEmailIdentityMailFromAttributesCommand({
         EmailIdentity: domain,
         MailFromDomain: mailFrom,
-        BehaviorOnMxFailure: "USE_DEFAULT_VALUE",
+        BehaviorOnMxFailure: "REJECT_MESSAGE",
       }),
     );
     return mailFrom;

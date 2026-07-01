@@ -43,8 +43,8 @@ export function registerStatusCommands(program: Command, output: (data: unknown,
     .description("Show email system health, configured sources, and next useful actions")
     .action(async () => {
       try {
-        const { getEmailSystemStatus, formatEmailSystemStatus } = await import("../../lib/agent-context.js");
-        const status = getEmailSystemStatus();
+        const { getEmailSystemStatusForRuntime, formatEmailSystemStatus } = await import("../../lib/agent-context.js");
+        const status = await getEmailSystemStatusForRuntime();
         output(status, formatEmailSystemStatus(status));
       } catch (e) {
         handleError(e);
@@ -92,8 +92,8 @@ export function registerStatusCommands(program: Command, output: (data: unknown,
     .option("--full", "Alias for --verbose")
     .action(async (opts: { verbose?: boolean; full?: boolean }) => {
       try {
-        const { formatAgentContextSummary, getAgentContext } = await import("../../lib/agent-context.js");
-        const context = getAgentContext();
+        const { formatAgentContextSummary, getAgentContextForRuntime } = await import("../../lib/agent-context.js");
+        const context = await getAgentContextForRuntime();
         const full = opts.verbose || opts.full || isCliVerboseOutput();
         output(context, full ? JSON.stringify(context, null, 2) : formatAgentContextSummary(context));
       } catch (e) {

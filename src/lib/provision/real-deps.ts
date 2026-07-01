@@ -116,7 +116,11 @@ export function makeAddressDeps(opts: RealDepsOptions): AddressDeps {
       const report = await runSelfRoundtrip(
         {
           send: async ({ from, to, subject, text }) => {
-            const r = await sendWithFailover(providerId, { from, to, subject, text, html: `<p>${text}</p>` }, opts.db);
+            const sendOpts = { from, to, subject, text, html: `<p>${text}</p>` };
+            const r = await sendWithFailover(providerId, sendOpts, opts.db);
+            const { createSentEmailLedger, storeSentEmailContent } = await import("../sent-ledger.js");
+            const email = await createSentEmailLedger(r.providerId, sendOpts, r.messageId, opts.db, r.selfHostedSendAttemptId);
+            await storeSentEmailContent(email.id, { html: sendOpts.html, text }, opts.db);
             await new Promise((res) => setTimeout(res, 1100));
             return { messageId: r.messageId };
           },

@@ -52,6 +52,7 @@ describe("inbound webhook", () => {
 
   it("syncs on an SNS-wrapped Notification", async () => {
     setConfigValue("inbound_s3_bucket", "configured-inbound");
+    setConfigValue("inbound_s3_buckets", [{ bucket: "configured-inbound", region: "us-east-1", providerId: "provider-123" }]);
     setConfigValue("inbound_s3_prefix", "inbound/");
     setConfigValue("inbound_s3_region", "us-east-1");
     try {
@@ -65,6 +66,7 @@ describe("inbound webhook", () => {
             expect(prefix).toBe("inbound/");
             expect(region).toBe("us-east-1");
             expect(opts?.keys).toEqual(["inbound/acme.com/msg-1"]);
+            expect(opts?.providerId).toBe("provider-123");
             synced++;
             return { synced: 2 };
           },
@@ -74,6 +76,7 @@ describe("inbound webhook", () => {
       expect(synced).toBe(1);
     } finally {
       setConfigValue("inbound_s3_bucket", undefined);
+      setConfigValue("inbound_s3_buckets", undefined);
       setConfigValue("inbound_s3_prefix", undefined);
       setConfigValue("inbound_s3_region", undefined);
     }

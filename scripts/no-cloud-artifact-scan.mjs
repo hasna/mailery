@@ -25,6 +25,12 @@ const forbiddenMarkers = [
   ["HASNA", "XYZ"].join(""),
   ["apps", "prod", "postgres"].join("-"),
   ["HASNA", "XYZ", ""].join("_"),
+  ["mailery", "postgres"].join("-"),
+  ["mailery", "email", "archive"].join("-"),
+  ["mailery", "archive"].join("-"),
+  ["mailery", "self-hosted"].join("/"),
+  ["mailery", "self-hosted", "postgres"].join("-"),
+  ["mailery", "self-hosted", "emails", "prod"].join("/"),
 ];
 const platformNativeArtifactPattern = /(^|\/)(?:libopentui|opentui).*\.(?:so|dylib|dll|node)$/i;
 
@@ -65,7 +71,7 @@ try {
       findings.push(`${relativePath} is a platform-native artifact`);
       continue;
     }
-    if (!/\.(json|md|ts|tsx|js|mjs|cjs|yml|yaml|toml|lock)$/.test(relativePath)) continue;
+    if (!/\.(html|json|md|ts|tsx|js|mjs|cjs|yml|yaml|toml|lock)$/.test(relativePath)) continue;
     const path = join(packageDir, relativePath);
     if (!existsSync(path)) continue;
 

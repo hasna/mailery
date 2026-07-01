@@ -14,6 +14,7 @@ import { getDatabase } from "../../db/database.js";
 import { json, badRequest } from "./helpers.js";
 import { verifyResendSignature } from "../../lib/webhook-events.js";
 import { emitMaileryEventBestEffort, inboundReceivedEventData } from "../../lib/mailery-events.js";
+import { getSelfHostedRuntimeStatus } from "../../lib/self-hosted-runtime.js";
 
 export async function handleResendWebhook(req: Request, path: string, method: string): Promise<Response | null> {
   if (path !== "/webhook/resend-inbound" || method !== "POST") return null;
@@ -34,6 +35,13 @@ export async function handleResendWebhook(req: Request, path: string, method: st
   }
 
   if (!isResendInboundEvent(event)) return json({ ok: true, ignored: `not an inbound event (${event.type ?? "?"})` });
+
+  const selfHosted = getSelfHostedRuntimeStatus();
+  if (selfHosted.enabled) {
+    return json({
+      error: "Resend local inbound webhook ingestion is disabled in self_hosted mode. Use /webhook/ses-inbound with SES/S3 receipt objects.",
+    }, selfHosted.configured ? 409 : 503);
+  }
 
   const parsed = parseResendInboundEvent(event);
   const db = getDatabase();

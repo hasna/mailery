@@ -2,11 +2,11 @@ import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { getDatabase, uuid, resolvePartialId, listPartialIdMatches, resolvePartialIdOrThrow, type Database } from "../../db/database.js";
 import { getInboundEmail, type InboundEmail } from "../../db/inbound.js";
-import { getEmail, createEmail } from "../../db/emails.js";
+import { getEmail } from "../../db/emails.js";
 import { getLatestActiveProviderId } from "../../db/providers.js";
 import type { Email } from "../../types/index.js";
-import { storeEmailContent } from "../../db/email-content.js";
-import { getEmailThreading, setEmailThreading, setInboundThreadId } from "../../db/threads.js";
+import { getEmailThreading, setInboundThreadId } from "../../db/threads.js";
+import { createSentEmailLedger, setSentEmailThreading, storeSentEmailContent } from "../../lib/sent-ledger.js";
 import { generateMessageId, buildThreadingHeaders, parseReferences } from "../../lib/threading.js";
 import { handleError } from "../utils.js";
 
@@ -88,10 +88,10 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
         const ourMessageId = generateMessageId(opts.from.split("@")[1] ?? "localhost");
         const sendOpts = { provider_id: providerId, from: opts.from, to: opts.to, subject, text: body, headers: { "Message-ID": ourMessageId } };
         const { sendWithFailover } = await import("../../lib/send.js");
-        const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, db);
-        const email = createEmail(actual, sendOpts, messageId, db);
-        setEmailThreading(email.id, { message_id: ourMessageId, thread_id: ourMessageId.replace(/[<>]/g, ""), in_reply_to: null, references: [] });
-        storeEmailContent(email.id, { text: body }, db);
+        const { messageId, providerId: actual, selfHostedSendAttemptId } = await sendWithFailover(providerId, sendOpts, db);
+        const email = await createSentEmailLedger(actual, sendOpts, messageId, db, selfHostedSendAttemptId);
+        await setSentEmailThreading(email.id, { message_id: ourMessageId, thread_id: ourMessageId.replace(/[<>]/g, ""), in_reply_to: null, references: [] }, db);
+        await storeSentEmailContent(email.id, { text: body }, db);
         output({ id: email.id, to: opts.to, subject }, chalk.green(`✓ forwarded to ${opts.to.join(", ")} — "${subject}"`));
       } catch (e) { handleError(e); }
     });
@@ -157,10 +157,10 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
           headers,
         };
         const { sendWithFailover } = await import("../../lib/send.js");
-        const { messageId, providerId: actual } = await sendWithFailover(providerId, sendOpts, db);
-        const email = createEmail(actual, sendOpts, messageId, db);
-        setEmailThreading(email.id, { message_id: ourMessageId, thread_id: threadId, in_reply_to: inReplyTo, references }, db);
-        storeEmailContent(email.id, opts.html ? { html: opts.body } : { text: opts.body }, db);
+        const { messageId, providerId: actual, selfHostedSendAttemptId } = await sendWithFailover(providerId, sendOpts, db);
+        const email = await createSentEmailLedger(actual, sendOpts, messageId, db, selfHostedSendAttemptId);
+        await setSentEmailThreading(email.id, { message_id: ourMessageId, thread_id: threadId, in_reply_to: inReplyTo, references }, db);
+        await storeSentEmailContent(email.id, opts.html ? { html: opts.body } : { text: opts.body }, db);
 
         output({ id: email.id, thread_id: threadId, to, subject },
           chalk.green(`✓ replied to ${to.join(", ")} — "${subject}" (thread ${threadId.slice(0, 8)})`));

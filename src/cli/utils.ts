@@ -80,8 +80,10 @@ export function emitJson(data: unknown): void {
 }
 
 function errorCode(message: string): string {
-  if (/remote source-of-truth runtime|HASNA_EMAILS_STORAGE_MODE=remote/i.test(message)) return "remote_storage_runtime_unsupported";
+  if (/self-hosted source-of-truth mode requires/i.test(message)) return "self_hosted_runtime_not_configured";
+  if (/unknown command/i.test(message)) return "unknown_command";
   if (/could not resolve id|not found/i.test(message)) return "not_found";
+  if (/no local mail rows/i.test(message)) return "missing_required_input";
   if (/requires|missing|required/i.test(message)) return "missing_required_input";
   if (/invalid|must be/i.test(message)) return "invalid_input";
   if (/credential|oauth|auth/i.test(message)) return "auth_error";
@@ -91,13 +93,15 @@ function errorCode(message: string): string {
 
 function fixCommands(message: string): string[] {
   const lower = message.toLowerCase();
-  if (lower.includes("remote source-of-truth runtime") || lower.includes("hasna_emails_storage_mode=remote")) {
+  if (lower.includes("self-hosted source-of-truth mode requires")) {
     return [
-      "HASNA_EMAILS_STORAGE_MODE=hybrid mailery status --json",
+      "mailery self-hosted setup",
       "mailery storage status --json",
-      "mailery storage pull --help",
+      "export HASNA_EMAILS_DATABASE_URL='<postgresql-connection-url>'",
     ];
   }
+  if (lower.includes("unknown command")) return ["mailery --help", "mailery self-hosted --help"];
+  if (lower.includes("no local mail rows")) return ["mailery self-hosted check --json", "mailery self-hosted migrate-local --dry-run --json"];
   if (lower.includes("storage sync") || lower.includes("--force")) return ["mailery storage sync --force --json", "mailery storage pull --json", "mailery storage push --json"];
   if (lower.includes("provider")) return ["mailery provider list --json", "mailery provider add --help"];
   if (lower.includes("domain")) return ["mailery domain list --json", "mailery domain add --help"];

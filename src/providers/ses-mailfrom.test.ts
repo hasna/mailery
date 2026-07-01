@@ -10,7 +10,7 @@ describe("SESAdapter.setMailFrom", () => {
     expect(mf).toBe("mail.example.com");
     expect(input.EmailIdentity).toBe("example.com");
     expect(input.MailFromDomain).toBe("mail.example.com");
-    expect(input.BehaviorOnMxFailure).toBe("USE_DEFAULT_VALUE");
+    expect(input.BehaviorOnMxFailure).toBe("REJECT_MESSAGE");
   });
   it("honors a custom mail-from", async () => {
     const adapter = new SESAdapter({ id: "p", name: "ses", type: "ses", region: "us-east-1", access_key: "x", secret_key: "y", active: true } as any);

@@ -6,11 +6,14 @@ import { countValue } from "../db/scalars.js";
 import { assessDomainReadiness } from "../lib/domain-readiness.js";
 import { loadConfig } from "../lib/config.js";
 import { listMailboxSources, listMailboxStatus } from "../cli/tui/data.js";
+import type { PgAdapterAsync } from "../db/remote-storage.js";
 
 const RECENT_ERROR_LIMIT_PER_COMPONENT = 50;
 const DOMAIN_RESOURCE_LIMIT = 50;
 const ADDRESS_RESOURCE_LIMIT = 100;
 const AGENT_CONTEXT_SAMPLE_LIMIT = 5;
+
+type SelfHostedStatusRemote = Pick<PgAdapterAsync, "all" | "run" | "close">;
 
 function jsonResource(uri: string, value: unknown) {
   return {
@@ -76,9 +79,15 @@ export async function addressesResourcePayload(db: Database = getDatabase()): Pr
   };
 }
 
-export async function agentContextResourcePayload(db: Database = getDatabase()): Promise<Record<string, unknown>> {
-  const { getAgentContext } = await import("../lib/agent-context.js");
-  const context = getAgentContext(db);
+async function selfHostedRuntimeEnabled(remote: SelfHostedStatusRemote | undefined): Promise<boolean> {
+  if (remote) return true;
+  const { getSelfHostedRuntimeStatus } = await import("../lib/self-hosted-runtime.js");
+  return getSelfHostedRuntimeStatus().enabled;
+}
+
+export async function agentContextResourcePayload(db: Database = getDatabase(), remote?: SelfHostedStatusRemote): Promise<Record<string, unknown>> {
+  const { getAgentContextForRuntime } = await import("../lib/agent-context.js");
+  const context = await getAgentContextForRuntime(db, remote);
   const status = context["status"] as Record<string, unknown>;
   const domains = status["domains"] as { usable?: unknown[]; usable_limit?: number; usable_truncated?: boolean } | undefined;
   const addresses = status["addresses"] as { usable_from?: Array<Record<string, unknown>>; usable_from_limit?: number; usable_from_truncated?: boolean } | undefined;
@@ -111,6 +120,8 @@ export async function agentContextResourcePayload(db: Database = getDatabase()):
         usable_from: usableFrom,
       },
       inbox: status["inbox"],
+      mailboxes: status["mailboxes"],
+      sources: status["sources"],
       provisioning: status["provisioning"],
       next_actions: status["next_actions"],
       cli_equivalents: status["cli_equivalents"],
@@ -138,9 +149,29 @@ export function mailboxesResourcePayload(db: Database = getDatabase()): Record<s
   };
 }
 
+export async function mailboxesResourcePayloadForRuntime(db: Database = getDatabase(), remote?: SelfHostedStatusRemote): Promise<Record<string, unknown>> {
+  if (!await selfHostedRuntimeEnabled(remote)) return mailboxesResourcePayload(db);
+  const { assertSelfHostedDirectRuntimeConfigured, getSelfHostedMailboxStatus } = await import("../db/self-hosted-inbound.js");
+  if (!remote) assertSelfHostedDirectRuntimeConfigured();
+  return {
+    ...await getSelfHostedMailboxStatus(undefined, remote),
+    cli_equivalent: "mailery inbox mailboxes --json",
+  };
+}
+
 export function sourcesResourcePayload(db: Database = getDatabase()): Record<string, unknown> {
   return {
     sources: listMailboxSources({ limit: 100 }, db),
+    cli_equivalent: "mailery inbox sources --json",
+  };
+}
+
+export async function sourcesResourcePayloadForRuntime(db: Database = getDatabase(), remote?: SelfHostedStatusRemote): Promise<Record<string, unknown>> {
+  if (!await selfHostedRuntimeEnabled(remote)) return sourcesResourcePayload(db);
+  const { assertSelfHostedDirectRuntimeConfigured, listSelfHostedSourceSummaries } = await import("../db/self-hosted-inbound.js");
+  if (!remote) assertSelfHostedDirectRuntimeConfigured();
+  return {
+    sources: await listSelfHostedSourceSummaries({ limit: 100 }, remote),
     cli_equivalent: "mailery inbox sources --json",
   };
 }
@@ -230,8 +261,8 @@ export function registerEmailResources(server: McpServer): void {
       mimeType: "application/json",
     },
     async () => {
-      const { getAgentContext } = await import("../lib/agent-context.js");
-      return jsonResource("emails://agent/context/full", getAgentContext());
+      const { getAgentContextForRuntime } = await import("../lib/agent-context.js");
+      return jsonResource("emails://agent/context/full", await getAgentContextForRuntime());
     },
   );
 
@@ -244,8 +275,8 @@ export function registerEmailResources(server: McpServer): void {
       mimeType: "application/json",
     },
     async () => {
-      const { getEmailSystemStatus } = await import("../lib/agent-context.js");
-      return jsonResource("emails://status", getEmailSystemStatus());
+      const { getEmailSystemStatusForRuntime } = await import("../lib/agent-context.js");
+      return jsonResource("emails://status", await getEmailSystemStatusForRuntime());
     },
   );
 
@@ -258,8 +289,8 @@ export function registerEmailResources(server: McpServer): void {
       mimeType: "application/json",
     },
     async () => {
-      const { getEmailSystemStatus } = await import("../lib/agent-context.js");
-      const status = getEmailSystemStatus();
+      const { getEmailSystemStatusForRuntime } = await import("../lib/agent-context.js");
+      const status = await getEmailSystemStatusForRuntime();
       return jsonResource("emails://inbox/sync-status", {
         inbox: status.inbox,
         mailboxes: status.mailboxes,
@@ -274,11 +305,11 @@ export function registerEmailResources(server: McpServer): void {
     "emails://mailboxes",
     {
       title: "Mailery Mailboxes",
-      description: "Folder counts for the local mailbox view.",
+      description: "Folder counts for the active mailbox source of truth.",
       mimeType: "application/json",
     },
     async () => {
-      return jsonResource("emails://mailboxes", mailboxesResourcePayload());
+      return jsonResource("emails://mailboxes", await mailboxesResourcePayloadForRuntime());
     },
   );
 
@@ -291,7 +322,7 @@ export function registerEmailResources(server: McpServer): void {
       mimeType: "application/json",
     },
     async () => {
-      return jsonResource("emails://sources", sourcesResourcePayload());
+      return jsonResource("emails://sources", await sourcesResourcePayloadForRuntime());
     },
   );
 

@@ -47,7 +47,7 @@ function hasDynamicImport(source: string, specifier: string): boolean {
 }
 
 describe("MCP startup contract", () => {
-  it("rejects remote storage mode before starting the MCP runtime", () => {
+  it("requires database configuration before starting the remote MCP runtime", () => {
     const result = Bun.spawnSync({
       cmd: ["bun", "src/mcp/index.ts"],
       cwd: join(import.meta.dir, "..", ".."),
@@ -60,7 +60,14 @@ describe("MCP startup contract", () => {
     });
     const stderr = new TextDecoder().decode(result.stderr);
     expect(result.exitCode).toBe(1);
-    expect(stderr).toContain("remote source-of-truth runtime");
+    expect(stderr).toContain("Self-hosted source-of-truth mode requires");
+  });
+
+  it("installs self-hosted shutdown hooks for long-running MCP runtimes", () => {
+    const source = readFileSync(join(mcpDir, "index.ts"), "utf8");
+
+    expect(source).toContain("installSelfHostedRuntimeShutdownHooks");
+    expect(source).toContain('source: "mailery-mcp", cleanupCache: true');
   });
 
   it("keeps heavy provider and sync dependencies behind tool-local dynamic imports", () => {
@@ -201,11 +208,11 @@ describe("MCP startup contract", () => {
       "../../db/templates.js",
       "../../db/providers.js",
       "../../db/contacts.js",
-      "../../db/emails.js",
       "../../lib/analytics.js",
       "../../lib/doctor.js",
       "../../lib/export.js",
       "../../lib/email-verify.js",
+      "../../lib/sent-ledger.js",
       "../../lib/send.js",
       "../helpers.js",
     ];

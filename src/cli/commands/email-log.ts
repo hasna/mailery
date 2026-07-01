@@ -7,13 +7,14 @@
  */
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { createEmail, listEmails, getEmail, searchEmails } from "../../db/emails.js";
+import { listEmails, getEmail, searchEmails } from "../../db/emails.js";
 import { getEmailContent } from "../../db/email-content.js";
 import { getLatestActiveProviderId, getProvider } from "../../db/providers.js";
 import { getPreferredActiveAddressEmail } from "../../db/addresses.js";
 import { getDatabase, resolvePartialId, resolvePartialIdOrThrow } from "../../db/database.js";
 import { getDefaultProviderId } from "../../lib/config.js";
 import { colorStatus } from "../../lib/format.js";
+import { createSentEmailLedger } from "../../lib/sent-ledger.js";
 import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption, resolveId } from "../utils.js";
 import { listReplies, listReplySummaries, getReplyCount } from "../../db/inbound.js";
 import type { InboundEmail, InboundEmailSummary } from "../../db/inbound.js";
@@ -452,10 +453,10 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
         const ts = new Date().toISOString();
         const subject = `Test from mailery \u2014 ${ts}`;
         const text = `This is a test email sent via Mailery at ${ts}. Provider: ${provider!.name} (${provider!.type})`;
-        const { getAdapter } = await import("../../providers/index.js");
-        const adapter = getAdapter(provider!);
-        const messageId = await adapter.sendEmail({ from: fromEmail!, to: toEmail!, subject, text });
-        createEmail(resolvedProviderId!, { from: fromEmail!, to: toEmail!, subject, text }, messageId, db);
+        const sendOpts = { from: fromEmail!, to: toEmail!, subject, text };
+        const { sendWithFailover } = await import("../../lib/send.js");
+        const { messageId, providerId: actualProviderId, selfHostedSendAttemptId } = await sendWithFailover(resolvedProviderId!, sendOpts, db);
+        await createSentEmailLedger(actualProviderId, sendOpts, messageId, db, selfHostedSendAttemptId);
         console.log(chalk.green(`✓ Test email sent to ${toEmail}`));
         if (messageId) console.log(chalk.dim(`  Message ID: ${messageId}`));
         console.log(chalk.dim(`  From: ${fromEmail!}`));

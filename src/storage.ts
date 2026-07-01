@@ -12,6 +12,19 @@ export {
   resolveMaileryMode,
 } from "./lib/mode.js";
 export {
+  SELF_HOSTED_RUNTIME_TABLES,
+  SELF_HOSTED_S3_MATERIALIZATION_TABLES,
+  checkSelfHostedRuntimeReadiness,
+  cleanupOwnedRuntimeCache,
+  describeSelfHostedRuntime,
+  flushSelfHostedRuntimeCache,
+  getSelfHostedRuntimeStatus,
+  migrateLocalToSelfHosted,
+  prepareSelfHostedRuntimeCache,
+  startSelfHostedRuntimeCache,
+  stopSelfHostedRuntimeCache,
+} from "./lib/self-hosted-runtime.js";
+export {
   EMAILS_STORAGE_ENV,
   EMAILS_STORAGE_FALLBACK_ENV,
   EMAILS_STORAGE_MODE_ENV,
@@ -35,6 +48,14 @@ export {
   storagePush,
   storageSync,
 } from "./db/storage-sync.js";
+export type {
+  SelfHostedRuntimeHooks,
+  SelfHostedRuntimeOptions,
+  SelfHostedRuntimeResult,
+  SelfHostedRuntimeStatus,
+  SelfHostedReadinessCheck,
+  SelfHostedReadinessReport,
+} from "./lib/self-hosted-runtime.js";
 export type {
   MaileryMode,
   MaileryModeLabel,

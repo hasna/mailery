@@ -1,5 +1,5 @@
 export const REMOTE_STORAGE_RUNTIME_ERROR =
-  "HASNA_EMAILS_STORAGE_MODE=remote is reserved for a future remote source-of-truth runtime. Mailery runtime commands still use local SQLite today. Use HASNA_EMAILS_STORAGE_MODE=hybrid, or run storage pull|push explicitly.";
+  "HASNA_EMAILS_STORAGE_MODE=remote now runs Mailery with self-hosted PostgreSQL as the source of truth and local SQLite as an explicit runtime cache.";
 
 export function readStorageMode(): string | null {
   const mode = process.env["HASNA_EMAILS_STORAGE_MODE"]?.trim() || process.env["EMAILS_STORAGE_MODE"]?.trim();
@@ -11,8 +11,8 @@ export function isRemoteStorageMode(): boolean {
 }
 
 export function remoteRuntimeErrorForEntrypoint(entrypoint: string): string | null {
-  if (!isRemoteStorageMode()) return null;
-  return `${entrypoint}: ${REMOTE_STORAGE_RUNTIME_ERROR}`;
+  void entrypoint;
+  return null;
 }
 
 export function assertRemoteRuntimeSupported(entrypoint: string): void {

@@ -51,8 +51,7 @@ export function registerEmailOpsTools(server: McpServer): void {
   async (input) => {
     try {
       const { getDatabase } = await import('../../db/database.js');
-      const { createEmail } = await import('../../db/emails.js');
-      const { storeEmailContent } = await import('../../db/email-content.js');
+      const { createSentEmailLedger, storeSentEmailContent } = await import('../../lib/sent-ledger.js');
       const { getTemplate, renderTemplate } = await import('../../db/templates.js');
       const { getActiveProvider, getProvider } = await import('../../db/providers.js');
       const { getWarmingSchedule } = await import('../../db/warming.js');
@@ -105,12 +104,12 @@ export function registerEmailOpsTools(server: McpServer): void {
 
       const sendInput = { ...input, subject, html, text };
       const { sendWithFailover } = await import('../../lib/send.js');
-      const { messageId, providerId: actualProviderId } = await sendWithFailover(providerId, sendInput, db);
+      const { messageId, providerId: actualProviderId, selfHostedSendAttemptId } = await sendWithFailover(providerId, sendInput, db);
 
-      const email = createEmail(actualProviderId, sendInput, messageId, db);
+      const email = await createSentEmailLedger(actualProviderId, sendInput, messageId, db, selfHostedSendAttemptId);
 
       // Store email content
-      storeEmailContent(email.id, { html, text }, db);
+      await storeSentEmailContent(email.id, { html, text }, db);
 
       return {
         content: [

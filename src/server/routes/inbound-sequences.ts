@@ -20,6 +20,17 @@ import {
   type Mailbox,
   type MailboxSource,
 } from '../../cli/tui/data.js';
+import { getSelfHostedRuntimeStatus } from '../../lib/self-hosted-runtime.js';
+import {
+  assertSelfHostedDirectRuntimeConfigured,
+  clearSelfHostedInboundEmails,
+  getSelfHostedInboundEmail,
+  getSelfHostedMailboxStatus,
+  listSelfHostedInboundEmailSummaries,
+  listSelfHostedSourceSummaries,
+  type ListSelfHostedInboundOpts,
+  type SelfHostedMailbox,
+} from '../../db/self-hosted-inbound.js';
 
 
 function normalizeDisplaySummary(value: string | null | undefined): string | null {
@@ -73,11 +84,22 @@ function normalizeMailboxParam(value: string | null | undefined): Mailbox {
   return MAILBOXES.includes(normalized as Mailbox) ? normalized as Mailbox : "inbox";
 }
 
+function selfHostedRuntimeRequested(): boolean {
+  return getSelfHostedRuntimeStatus().enabled;
+}
+
+function requireSelfHostedRuntime(): void {
+  assertSelfHostedDirectRuntimeConfigured();
+}
+
 function mailboxSourceFromUrl(url: URL, sourceId?: string): MailboxSource | undefined {
   const to = url.searchParams.get("to")?.trim().toLowerCase();
   const domain = url.searchParams.get("domain")?.trim().toLowerCase();
   const address = url.searchParams.get("address")?.trim().toLowerCase();
-  const providerId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
+  const rawProviderId = url.searchParams.get("provider_id")?.trim() || undefined;
+  const providerId = selfHostedRuntimeRequested()
+    ? rawProviderId
+    : resolveOptionalId("providers", url.searchParams.get("provider_id"));
   return mailboxSourceFromRef({
     sourceId: sourceId ?? url.searchParams.get("source_id") ?? url.searchParams.get("source") ?? undefined,
     providerId,
@@ -86,12 +108,48 @@ function mailboxSourceFromUrl(url: URL, sourceId?: string): MailboxSource | unde
   });
 }
 
+function selfHostedSourceOptions(source: MailboxSource | undefined): Pick<ListSelfHostedInboundOpts, "provider_id" | "sourceId" | "s3Bucket" | "legacy"> | undefined {
+  if (!source) return undefined;
+  let providerId = source.providerId;
+  let s3Bucket = source.s3Bucket;
+  let legacy = source.legacy;
+  const sourceId = source.sourceId;
+  if (sourceId === "legacy") legacy = true;
+  else if (sourceId?.startsWith("provider:")) providerId = sourceId.slice("provider:".length);
+  else if (sourceId?.startsWith("orphaned:")) providerId = sourceId.slice("orphaned:".length);
+  else if (sourceId?.startsWith("s3:")) s3Bucket = decodeURIComponent(sourceId.slice("s3:".length));
+  return { provider_id: providerId, sourceId, s3Bucket, legacy };
+}
+
 function mailboxPage(url: URL): { limit: number; offset: number } {
   return queryPage(url, 50, 1000);
 }
 
-function mailboxListPayload(mailbox: Mailbox, url: URL, source?: MailboxSource): Record<string, unknown> {
+async function mailboxListPayload(mailbox: Mailbox, url: URL, source?: MailboxSource): Promise<Record<string, unknown>> {
   const page = mailboxPage(url);
+  if (selfHostedRuntimeRequested()) {
+    requireSelfHostedRuntime();
+    const rows = await listSelfHostedInboundEmailSummaries({
+      ...selfHostedSourceOptions(source),
+      mailbox: mailbox as SelfHostedMailbox,
+      label: url.searchParams.get("label") ?? undefined,
+      search: url.searchParams.get("search") ?? url.searchParams.get("q") ?? undefined,
+      limit: page.limit + 1,
+      offset: page.offset,
+      recipients: source?.address ? [source.address] : undefined,
+      recipientDomains: source?.domain ? [source.domain] : undefined,
+    });
+    const items = rows.slice(0, page.limit);
+    return {
+      mailbox,
+      folder: mailbox,
+      source: source ?? null,
+      items,
+      limit: page.limit,
+      offset: page.offset,
+      truncated: rows.length > page.limit,
+    };
+  }
   const rows = listMailbox(mailbox, {
     ...page,
     limit: page.limit + 1,
@@ -118,13 +176,28 @@ export async function handle(req: Request, url: URL, path: string, method: strin
 // GET /api/inbound?provider_id=x&limit=50&since=...
 if (path === "/api/inbound" && method === "GET") {
   try {
-    const provider_id = resolveOptionalId("providers", url.searchParams.get("provider_id"));
+    const provider_id = selfHostedRuntimeRequested()
+      ? url.searchParams.get("provider_id")?.trim() || undefined
+      : resolveOptionalId("providers", url.searchParams.get("provider_id"));
     const since = url.searchParams.get("since") ?? undefined;
     const to = url.searchParams.get("to")?.trim().toLowerCase() || undefined;
     const unread = url.searchParams.get("unread") === "true" ? true : undefined;
     const read = url.searchParams.get("read") === "true" ? true : undefined;
     const archived = url.searchParams.get("archived") === "true" ? true : undefined;
     const page = queryPage(url, 50);
+    if (selfHostedRuntimeRequested()) {
+      requireSelfHostedRuntime();
+      return json(await listSelfHostedInboundEmailSummaries({
+        provider_id,
+        since,
+        ...page,
+        unread,
+        read,
+        archived,
+        recipients: to?.includes("@") ? [to] : undefined,
+        recipientDomains: to && !to.includes("@") ? [to] : undefined,
+      }));
+    }
     return json(listInboundEmailSummaries({
       provider_id,
       since,
@@ -142,6 +215,13 @@ if (path === "/api/inbound" && method === "GET") {
 if (path === "/api/mailboxes" && method === "GET") {
   try {
     const source = mailboxSourceFromUrl(url);
+    if (selfHostedRuntimeRequested()) {
+      requireSelfHostedRuntime();
+      return json({
+        source: source ?? null,
+        ...await getSelfHostedMailboxStatus(selfHostedSourceOptions(source)),
+      });
+    }
     return json({
       source: source ?? null,
       ...listMailboxStatus({ source }),
@@ -155,7 +235,7 @@ if (mailboxMatch && method === "GET" && mailboxMatch[1] !== "search") {
   try {
     const mailbox = normalizeMailboxParam(mailboxMatch[1]);
     const source = mailboxSourceFromUrl(url);
-    return json(mailboxListPayload(mailbox, url, source));
+    return json(await mailboxListPayload(mailbox, url, source));
   } catch (e) { return internalError(e); }
 }
 
@@ -167,6 +247,31 @@ if (path === "/api/mailbox/search" && method === "GET") {
     const page = mailboxPage(url);
     const mailbox = normalizeMailboxParam(url.searchParams.get("folder") ?? url.searchParams.get("mailbox"));
     const source = mailboxSourceFromUrl(url);
+    if (selfHostedRuntimeRequested()) {
+      requireSelfHostedRuntime();
+      const rows = await listSelfHostedInboundEmailSummaries({
+        ...selfHostedSourceOptions(source),
+        mailbox: mailbox as SelfHostedMailbox,
+        ...page,
+        limit: page.limit + 1,
+        sourceId: source?.sourceId,
+        label: url.searchParams.get("label") ?? undefined,
+        search: query,
+        recipients: source?.address ? [source.address] : undefined,
+        recipientDomains: source?.domain ? [source.domain] : undefined,
+      });
+      const items = rows.slice(0, page.limit);
+      return json({
+        mailbox,
+        folder: mailbox,
+        source: source ?? null,
+        query,
+        items,
+        limit: page.limit,
+        offset: page.offset,
+        truncated: rows.length > page.limit,
+      });
+    }
     const rows = searchMailbox(query, {
       mailbox,
       ...page,
@@ -192,6 +297,15 @@ if (path === "/api/mailbox/search" && method === "GET") {
 // GET /api/sources — ingestion stream status with legacy/orphaned badges.
 if (path === "/api/sources" && method === "GET") {
   try {
+    if (selfHostedRuntimeRequested()) {
+      requireSelfHostedRuntime();
+      return json({
+        sources: await listSelfHostedSourceSummaries({
+          limit: queryInteger(url, "limit", 100, { min: 1, max: 1000 }),
+          search: url.searchParams.get("search") ?? url.searchParams.get("q") ?? undefined,
+        }),
+      });
+    }
     return json({
       sources: listMailboxSources({
         limit: queryInteger(url, "limit", 100, { min: 1, max: 1000 }),
@@ -207,7 +321,7 @@ if (sourceMailboxMatch && method === "GET") {
   try {
     const sourceId = decodeURIComponent(sourceMailboxMatch[1]!);
     const mailbox = normalizeMailboxParam(sourceMailboxMatch[2]);
-    return json(mailboxListPayload(mailbox, url, mailboxSourceFromUrl(url, sourceId)));
+    return json(await mailboxListPayload(mailbox, url, mailboxSourceFromUrl(url, sourceId)));
   } catch (e) { return internalError(e); }
 }
 
@@ -221,6 +335,29 @@ if (sourceSearchMatch && method === "GET") {
     const page = mailboxPage(url);
     const mailbox = normalizeMailboxParam(url.searchParams.get("folder") ?? url.searchParams.get("mailbox"));
     const source = mailboxSourceFromUrl(url, sourceId);
+    if (selfHostedRuntimeRequested()) {
+      requireSelfHostedRuntime();
+      const rows = await listSelfHostedInboundEmailSummaries({
+        ...selfHostedSourceOptions(source),
+        mailbox: mailbox as SelfHostedMailbox,
+        ...page,
+        limit: page.limit + 1,
+        label: url.searchParams.get("label") ?? undefined,
+        search: query,
+        recipients: source?.address ? [source.address] : undefined,
+        recipientDomains: source?.domain ? [source.domain] : undefined,
+      });
+      return json({
+        mailbox,
+        folder: mailbox,
+        source,
+        query,
+        items: rows.slice(0, page.limit),
+        limit: page.limit,
+        offset: page.offset,
+        truncated: rows.length > page.limit,
+      });
+    }
     const rows = searchMailbox(query, {
       mailbox,
       ...page,
@@ -245,8 +382,12 @@ if (sourceSearchMatch && method === "GET") {
 // DELETE /api/inbound?provider_id=x
 if (path === "/api/inbound" && method === "DELETE") {
   try {
-    const provider_id = resolveOptionalId("providers", url.searchParams.get("provider_id"));
-    const count = clearInboundEmails(provider_id);
+    const provider_id = selfHostedRuntimeRequested()
+      ? url.searchParams.get("provider_id")?.trim() || undefined
+      : resolveOptionalId("providers", url.searchParams.get("provider_id"));
+    const count = selfHostedRuntimeRequested()
+      ? await (requireSelfHostedRuntime(), clearSelfHostedInboundEmails(provider_id))
+      : clearInboundEmails(provider_id);
     return json({ ok: true, count });
   } catch (e) { return internalError(e); }
 }
@@ -254,6 +395,12 @@ if (path === "/api/inbound" && method === "DELETE") {
 // POST /api/inbound — webhook endpoint for Resend/Mailgun inbound routing
 if (path === "/api/inbound" && method === "POST") {
   try {
+    if (selfHostedRuntimeRequested()) {
+      requireSelfHostedRuntime();
+      return json({
+        error: "Direct local inbound webhook ingestion is disabled in self_hosted mode. Use /webhook/ses-inbound with SES/S3 receipt objects.",
+      }, 409);
+    }
     const body = await parseBody(req) as Record<string, unknown>;
     let parsed: ReturnType<typeof parseMimeEmail>;
 
@@ -298,6 +445,12 @@ if (path === "/api/inbound" && method === "POST") {
 const inboundMatch = path.match(/^\/api\/inbound\/([^/]+)$/);
 if (inboundMatch && method === "GET") {
   try {
+    if (selfHostedRuntimeRequested()) {
+      requireSelfHostedRuntime();
+      const email = await getSelfHostedInboundEmail(inboundMatch[1]!);
+      if (!email) return notFound("Inbound email not found");
+      return json({ ...email, summary: null });
+    }
     const id = resolveId("inbound_emails", inboundMatch[1]!);
     if (!id) return notFound("Inbound email not found");
     const email = getInboundEmail(id);

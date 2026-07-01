@@ -42,6 +42,19 @@ function getDbPath(): string {
   return join(getDataDir(), "emails.db");
 }
 
+export function getDatabasePath(): string {
+  return getDbPath();
+}
+
+export function databaseFileExists(): boolean {
+  const path = getDbPath();
+  return isInMemoryDb(path) || existsSync(path);
+}
+
+export function isDatabaseOpen(): boolean {
+  return _db !== null;
+}
+
 function ensureDir(filePath: string): void {
   if (isInMemoryDb(filePath)) return;
   const dir = dirname(resolve(filePath));

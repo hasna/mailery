@@ -1,4 +1,5 @@
-import { readStorageMode, REMOTE_STORAGE_RUNTIME_ERROR } from "../lib/remote-runtime-guard.js";
+import { readStorageMode } from "../lib/remote-runtime-guard.js";
+import { resolveMaileryMode } from "../lib/mode.js";
 
 export function shouldPrintVersionEarly(args: string[]): boolean {
   return args.length === 1 && (args[0] === "--version" || args[0] === "-V");
@@ -94,6 +95,9 @@ export const knownCommandNames = new Set([
   "ask",
   "aws",
   "storage",
+  "self-hosted",
+  "self_hosted",
+  "selfhosted",
   "status",
   "project-panel",
   "daemon",
@@ -137,20 +141,29 @@ export function requestedCommand(args: string[]): string | null {
   return null;
 }
 
-const REMOTE_RUNTIME_ALLOWED_STORAGE_COMMANDS = new Set(["status", "setup", "push", "pull", "sync", "migrate"]);
+const REMOTE_RUNTIME_STORAGE_MANAGEMENT_COMMANDS = new Set(["status", "setup", "push", "pull", "sync", "migrate", "migrate-local", "migrate-to-self-hosted"]);
+const DIRECT_SELF_HOSTED_COMMANDS = new Set([
+  "list",
+  "search",
+  "read",
+  "latest",
+  "links",
+  "attachment",
+  "mark-read",
+  "archive",
+  "star",
+  "label",
+  "delete",
+  "clear",
+  "sources",
+  "mailboxes",
+  "status",
+  "sync-status",
+]);
 
 export function remoteStorageRuntimeError(args: string[]): string | null {
-  if (readStorageMode() !== "remote") return null;
-  if (args.includes("--help") || args.includes("-h")) return null;
-  const command = requestedCommand(args);
-  if (!command) return null;
-  if (command === "cloud") return null;
-  if (command === "storage") {
-    const subcommand = requestedStorageSubcommand(args);
-    if (!subcommand || REMOTE_RUNTIME_ALLOWED_STORAGE_COMMANDS.has(subcommand)) return null;
-  }
-  if (command === "mcp" && isMcpConfigOnlyCommand(args)) return null;
-  return REMOTE_STORAGE_RUNTIME_ERROR;
+  void args;
+  return null;
 }
 
 function isMcpConfigOnlyCommand(args: string[]): boolean {
@@ -159,9 +172,42 @@ function isMcpConfigOnlyCommand(args: string[]): boolean {
 }
 
 function requestedStorageSubcommand(args: string[]): string | null {
-  const storageIndex = args.findIndex((arg) => arg === "storage");
+  const storageIndex = args.findIndex((arg) => arg === "storage" || arg === "self-hosted" || arg === "self_hosted" || arg === "selfhosted");
   if (storageIndex < 0) return null;
   for (const arg of args.slice(storageIndex + 1)) {
+    if (arg === "--") return null;
+    if (arg.startsWith("-")) continue;
+    return arg;
+  }
+  return null;
+}
+
+export function shouldUseSelfHostedRuntimeCacheForArgs(args: string[]): boolean {
+  if (args.includes("--help") || args.includes("-h") || shouldPrintVersionEarly(args)) return false;
+  const command = requestedCommand(args);
+  if (!command) return false;
+  if (command === "cloud") return false;
+  const storageMode = readStorageMode();
+  const maileryMode = resolveMaileryMode().mode;
+  if (maileryMode === "cloud") return false;
+  const wantsSelfHostedRuntime = storageMode === "remote" || (storageMode !== "hybrid" && maileryMode === "self_hosted");
+  if (!wantsSelfHostedRuntime) return false;
+  if ((command === "inbox" && DIRECT_SELF_HOSTED_COMMANDS.has(requestedSubcommandAfter(args, "inbox") ?? ""))
+    || command === "links") {
+    return false;
+  }
+  if (command === "storage" || command === "self-hosted" || command === "self_hosted" || command === "selfhosted") {
+    const subcommand = requestedStorageSubcommand(args);
+    if (!subcommand || REMOTE_RUNTIME_STORAGE_MANAGEMENT_COMMANDS.has(subcommand)) return false;
+  }
+  if (command === "mcp" && isMcpConfigOnlyCommand(args)) return false;
+  return true;
+}
+
+function requestedSubcommandAfter(args: string[], commandName: string): string | null {
+  const commandIndex = args.findIndex((arg) => arg === commandName);
+  if (commandIndex < 0) return null;
+  for (const arg of args.slice(commandIndex + 1)) {
     if (arg === "--") return null;
     if (arg.startsWith("-")) continue;
     return arg;
@@ -225,6 +271,9 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "ask": return ["status"];
     case "aws": return ["aws"];
     case "storage": return ["storage"];
+    case "self-hosted":
+    case "self_hosted":
+    case "selfhosted": return ["storage"];
     case "status": return ["status"];
     case "project-panel": return ["status"];
     case "daemon":

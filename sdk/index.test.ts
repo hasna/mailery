@@ -69,6 +69,8 @@ describe("EmailsClient", () => {
     await client.listProviders({ limit: 2, offset: 4 });
     await client.listDomains({ provider_id: "provider 1", limit: 5, offset: 10 });
     await client.listDomains("legacy-provider");
+    await client.listDomainReadiness({ provider_id: "provider 1", limit: 5, offset: 10 });
+    await client.listDomainReadiness("legacy-provider");
     await client.listAddresses({ provider_id: "provider 1", limit: 7, offset: 8 });
     await client.listContacts({ suppressed: true, limit: 5, offset: 1 });
     await client.listGroups({ limit: 5, offset: 10 });
@@ -86,6 +88,8 @@ describe("EmailsClient", () => {
       "https://emails.example/api/providers?limit=2&offset=4",
       "https://emails.example/api/domains?provider_id=provider+1&limit=5&offset=10",
       "https://emails.example/api/domains?provider_id=legacy-provider",
+      "https://emails.example/api/domains/readiness?provider_id=provider+1&limit=5&offset=10",
+      "https://emails.example/api/domains/readiness?provider_id=legacy-provider",
       "https://emails.example/api/addresses?provider_id=provider+1&limit=7&offset=8",
       "https://emails.example/api/contacts?suppressed=true&limit=5&offset=1",
       "https://emails.example/api/groups?limit=5&offset=10",
@@ -98,6 +102,40 @@ describe("EmailsClient", () => {
       "https://emails.example/api/mailbox/inbox?source_id=provider+1&search=hello&limit=2&offset=6",
       "https://emails.example/api/mailbox/search?q=hello+world&source_id=provider+1&folder=unread&limit=2&offset=6",
       "https://emails.example/api/warming?status=active&limit=3&offset=4",
+    ]);
+  });
+
+  it("serializes domain readiness detail and mutation requests", async () => {
+    const seen: Array<{ url: string; method: string; body: string }> = [];
+
+    installFetch((url, init) => {
+      seen.push({
+        url,
+        method: init?.method ?? "GET",
+        body: String(init?.body ?? ""),
+      });
+      return new Response(JSON.stringify({
+        id: "domain-1",
+        domain: "example.com",
+        readiness: { send_ready: true, receive_ready: false, outbound_ready: false },
+      }), { headers: { "Content-Type": "application/json" } });
+    });
+
+    const client = new EmailsClient({ serverUrl: "https://emails.example" });
+    await client.getDomainReadiness("domain/id");
+    await client.updateDomainReadiness("domain/id", { outbound_status: "disabled", force: true });
+
+    expect(seen).toEqual([
+      {
+        url: "https://emails.example/api/domains/domain%2Fid/readiness",
+        method: "GET",
+        body: "",
+      },
+      {
+        url: "https://emails.example/api/domains/domain%2Fid/readiness",
+        method: "PATCH",
+        body: JSON.stringify({ outbound_status: "disabled", force: true }),
+      },
     ]);
   });
 

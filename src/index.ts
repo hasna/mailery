@@ -262,6 +262,45 @@ export { formatDnsCheck } from "./lib/dns-check-format.js";
 export type { DnsCheckResult } from "./lib/dns-check-format.js";
 export { formatDiagnostics } from "./lib/diagnostics-format.js";
 export type { DoctorCheck } from "./lib/diagnostics-format.js";
+export {
+  assessDomainLifecycleReadiness,
+  buildDomainLifecycleSummaries,
+  buildDomainLifecycleSummary,
+  createDomainReadinessService,
+  defaultDomainSourceOfTruth,
+  disableDomainOutboundReadiness,
+  enableDomainInboundReadiness,
+  enableDomainOutboundReadiness,
+  getDomainLifecycleSummary,
+  listDomainLifecycleSummaries,
+  resolveDomainLifecycleRecord,
+  updateDomainLifecycleReadiness,
+} from "./lib/domain-readiness-service.js";
+export type {
+  BuildDomainLifecycleSummaryOptions,
+  DomainDnsLifecycleStatus,
+  DomainLifecycleReadiness,
+  DomainLifecycleSummary,
+  DomainReadinessMutationInput,
+  DomainReadinessMutationResult,
+  DomainReadinessProviderSummary,
+  DomainReadinessService,
+  ListDomainLifecycleSummaryOptions,
+  ResolveDomainLifecycleOptions,
+} from "./lib/domain-readiness-service.js";
+export {
+  assessDomainReadiness,
+  formatDomainReadinessState,
+} from "./lib/domain-readiness.js";
+export type {
+  DomainReadiness,
+  DomainReadinessSignals,
+  DomainReadinessState,
+} from "./lib/domain-readiness.js";
+export {
+  domainInboundReadinessSignals,
+  listDomainLiveS3Sources,
+} from "./lib/domain-inbound-evidence.js";
 export { exportEmailsCsv, exportEmailsJson, exportEventsCsv, exportEventsJson } from "./lib/export.js";
 export {
   CANONICAL_OPEN_EMAILS_S3_BUCKET,

@@ -16,15 +16,107 @@ export interface Provider {
   updated_at: string;
 }
 
+export type DnsStatus = "pending" | "verified" | "failed";
+export type DomainType = "system" | "tenant" | "self_hosted" | "local_only";
+export type DomainSourceOfTruth = "local" | "postgres" | "cloud";
+export type DomainOwnershipStatus = "pending" | "verified" | "failed";
+export type DomainRouteStatus = "pending" | "ready" | "disabled" | "failed";
+export type DomainMonitoringStatus = "none" | "monitoring" | "clean" | "risky";
+export type DomainReadinessState =
+  | "ready_to_send_and_receive"
+  | "ready_to_send"
+  | "ready_to_receive"
+  | "needs_dns"
+  | "broken";
+
 export interface Domain {
   id: string;
   provider_id: string;
   domain: string;
-  dkim_status: string;
-  spf_status: string;
-  dmarc_status: string;
+  domain_type: DomainType;
+  source_of_truth: DomainSourceOfTruth;
+  ownership_status: DomainOwnershipStatus;
+  inbound_status: DomainRouteStatus;
+  outbound_status: DomainRouteStatus;
+  monitoring_status: DomainMonitoringStatus;
+  dkim_status: DnsStatus;
+  spf_status: DnsStatus;
+  dmarc_status: DnsStatus;
+  dns_records: Record<string, unknown>;
+  provider_metadata: Record<string, unknown>;
   verified_at: string | null;
+  last_dns_check_at: string | null;
+  last_inbound_check_at: string | null;
+  last_outbound_check_at: string | null;
+  last_monitored_at: string | null;
+  restricted_at: string | null;
+  suspended_at: string | null;
   created_at: string;
+  updated_at: string;
+}
+
+export interface DomainProvisioning {
+  provisioning_status: string;
+  purchase_provider: string | null;
+  dns_provider: string;
+  send_provider: string | null;
+  cf_zone_id: string | null;
+  registrar: string | null;
+  nameservers: string[];
+  mail_from_domain: string | null;
+  last_error: string | null;
+  next_check_at: string | null;
+}
+
+export interface DomainReadiness {
+  state: DomainReadinessState;
+  send_ready: boolean;
+  receive_ready: boolean;
+  inbound_evidence_ready: boolean;
+  ready_addresses: number;
+  inbound_evidence: {
+    mode?: "local" | "self_hosted" | "cloud";
+    source_of_truth?: DomainSourceOfTruth;
+    inbound_status?: DomainRouteStatus;
+    live_s3_sources: number;
+    inbound_buckets: number;
+  };
+  issues: string[];
+  fix_commands: string[];
+}
+
+export interface DomainLifecycleReadiness extends DomainReadiness {
+  inbound_ready: boolean;
+  outbound_ready: boolean;
+  monitored: boolean;
+  restricted: boolean;
+  suspended: boolean;
+}
+
+export interface DomainLifecycleSummary {
+  id: string;
+  domain: string;
+  mode: "local" | "self_hosted" | "cloud";
+  mode_label: "Local" | "Self-hosted" | "Mailery Cloud";
+  source_of_truth: DomainSourceOfTruth;
+  domain_type: DomainType;
+  provider: Pick<Provider, "id" | "name" | "type" | "region" | "active"> | null;
+  ownership_status: DomainOwnershipStatus;
+  inbound_status: DomainRouteStatus;
+  outbound_status: DomainRouteStatus;
+  monitoring_status: DomainMonitoringStatus;
+  readiness: DomainLifecycleReadiness;
+  dns: {
+    dkim: DnsStatus;
+    spf: DnsStatus;
+    dmarc: DnsStatus;
+    missing_records: string[];
+    warnings: string[];
+  };
+  provisioning: DomainProvisioning | null;
+  provider_metadata: Record<string, unknown>;
+  missing_requirements: string[];
+  next_actions: string[];
 }
 
 export interface EmailAddress {
@@ -71,6 +163,24 @@ export interface ListProviderParams extends PageParams {}
 
 export interface ListDomainParams extends PageParams {
   provider_id?: string;
+}
+
+export interface DomainReadinessMutationInput {
+  domain_type?: DomainType;
+  source_of_truth?: DomainSourceOfTruth;
+  ownership_status?: DomainOwnershipStatus;
+  inbound_status?: DomainRouteStatus;
+  outbound_status?: DomainRouteStatus;
+  monitoring_status?: DomainMonitoringStatus;
+  dns_records?: Record<string, unknown>;
+  provider_metadata?: Record<string, unknown>;
+  last_dns_check_at?: string | null;
+  last_inbound_check_at?: string | null;
+  last_outbound_check_at?: string | null;
+  last_monitored_at?: string | null;
+  restricted_at?: string | null;
+  suspended_at?: string | null;
+  force?: boolean;
 }
 
 export interface ListAddressParams extends PageParams {
@@ -464,6 +574,21 @@ export class EmailsClient {
   async listDomains(providerIdOrParams?: string | ListDomainParams): Promise<Domain[]> {
     const params = typeof providerIdOrParams === "string" ? { provider_id: providerIdOrParams } : providerIdOrParams;
     return this.request(`/api/domains${qs(params)}`);
+  }
+
+  async listDomainReadiness(providerId?: string): Promise<DomainLifecycleSummary[]>;
+  async listDomainReadiness(params?: ListDomainParams): Promise<DomainLifecycleSummary[]>;
+  async listDomainReadiness(providerIdOrParams?: string | ListDomainParams): Promise<DomainLifecycleSummary[]> {
+    const params = typeof providerIdOrParams === "string" ? { provider_id: providerIdOrParams } : providerIdOrParams;
+    return this.request(`/api/domains/readiness${qs(params)}`);
+  }
+
+  async getDomainReadiness(id: string): Promise<DomainLifecycleSummary> {
+    return this.request(`/api/domains/${encodeURIComponent(id)}/readiness`);
+  }
+
+  async updateDomainReadiness(id: string, body: DomainReadinessMutationInput): Promise<DomainLifecycleSummary> {
+    return this.request(`/api/domains/${encodeURIComponent(id)}/readiness`, { method: "PATCH", body: JSON.stringify(body) });
   }
 
   async addDomain(body: { provider_id: string; domain: string }): Promise<Domain> {

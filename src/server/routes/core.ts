@@ -10,6 +10,12 @@ import { getAdapter } from '../../providers/index.js';
 import { getLocalStats } from '../../lib/stats.js';
 import { listEnrichedAddresses } from '../../lib/address-ownership.js';
 import {
+  getDomainLifecycleSummary,
+  listDomainLifecycleSummaries,
+  updateDomainLifecycleReadiness,
+  type DomainReadinessMutationInput,
+} from '../../lib/domain-readiness-service.js';
+import {
   BrowserPlanCapacityError,
   BrowserPlanConflictError,
   BrowserPlanInputError,
@@ -20,6 +26,8 @@ import {
   validateBrowserPlanAddress,
 } from '../../lib/browserplan.js';
 import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, sanitizeProvider, checkRateLimit, tooManyRequests, queryInteger, optionalQueryInteger, queryPage } from './helpers.js';
+
+class DomainReadinessRequestError extends Error {}
 
 export async function handle(req: Request, url: URL, path: string, method: string): Promise<Response | null> {
 function queryBoolean(key: string): boolean {
@@ -34,6 +42,49 @@ function browserPlanError(e: unknown): Response {
   if (e instanceof BrowserPlanCapacityError) return json({ error: e.message }, 422);
   if (e instanceof BrowserPlanConflictError || e instanceof BrowserPlanMachineMismatchError) return json({ error: e.message }, 409);
   return internalError(e);
+}
+
+function enumField<T extends string>(body: Record<string, unknown>, key: string, allowed: readonly T[]): T | undefined {
+  const value = body[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !allowed.includes(value as T)) {
+    throw new DomainReadinessRequestError(`${key} must be one of: ${allowed.join(", ")}`);
+  }
+  return value as T;
+}
+
+function stringOrNullField(body: Record<string, unknown>, key: string): string | null | undefined {
+  const value = body[key];
+  if (value === undefined) return undefined;
+  if (value === null || typeof value === "string") return value;
+  throw new DomainReadinessRequestError(`${key} must be a string or null`);
+}
+
+function objectField(body: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = body[key];
+  if (value === undefined) return undefined;
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  throw new DomainReadinessRequestError(`${key} must be an object`);
+}
+
+function domainReadinessMutation(body: Record<string, unknown>): DomainReadinessMutationInput {
+  return {
+    domain_type: enumField(body, "domain_type", ["system", "tenant", "self_hosted", "local_only"] as const),
+    source_of_truth: enumField(body, "source_of_truth", ["local", "postgres", "cloud"] as const),
+    ownership_status: enumField(body, "ownership_status", ["pending", "verified", "failed"] as const),
+    inbound_status: enumField(body, "inbound_status", ["pending", "ready", "disabled", "failed"] as const),
+    outbound_status: enumField(body, "outbound_status", ["pending", "ready", "disabled", "failed"] as const),
+    monitoring_status: enumField(body, "monitoring_status", ["none", "monitoring", "clean", "risky"] as const),
+    dns_records: objectField(body, "dns_records"),
+    provider_metadata: objectField(body, "provider_metadata"),
+    last_dns_check_at: stringOrNullField(body, "last_dns_check_at"),
+    last_inbound_check_at: stringOrNullField(body, "last_inbound_check_at"),
+    last_outbound_check_at: stringOrNullField(body, "last_outbound_check_at"),
+    last_monitored_at: stringOrNullField(body, "last_monitored_at"),
+    restricted_at: stringOrNullField(body, "restricted_at"),
+    suspended_at: stringOrNullField(body, "suspended_at"),
+    force: body.force === true,
+  };
 }
 
 // GET /api/browserplan/addresses
@@ -154,6 +205,38 @@ if (path === "/api/domains" && method === "GET") {
     const page = queryPage(url, 100);
     return json(listDomains(resolvedId, getDatabase(), page));
   } catch (e) { return internalError(e); }
+}
+
+// GET /api/domains/readiness
+if (path === "/api/domains/readiness" && method === "GET") {
+  try {
+    const resolvedId = resolveOptionalId("providers", url.searchParams.get("provider_id"));
+    const page = queryPage(url, 100);
+    return json(listDomainLifecycleSummaries({ provider_id: resolvedId, ...page }));
+  } catch (e) { return internalError(e); }
+}
+
+// GET /api/domains/:id/readiness
+const domainReadinessMatch = path.match(/^\/api\/domains\/([^/]+)\/readiness$/);
+if (domainReadinessMatch && method === "GET") {
+  const id = resolveId("domains", domainReadinessMatch[1]!);
+  if (!id) return notFound();
+  try {
+    return json(getDomainLifecycleSummary(id));
+  } catch (e) { return internalError(e); }
+}
+
+// PATCH/POST /api/domains/:id/readiness
+if (domainReadinessMatch && (method === "PATCH" || method === "POST")) {
+  const id = resolveId("domains", domainReadinessMatch[1]!);
+  if (!id) return notFound();
+  try {
+    const body = await parseBody(req) as Record<string, unknown>;
+    return json(updateDomainLifecycleReadiness(id, domainReadinessMutation(body)).after);
+  } catch (e) {
+    if (e instanceof DomainReadinessRequestError) return badRequest(e.message);
+    return internalError(e);
+  }
 }
 
 // POST /api/domains

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createAddress } from "../../db/addresses.js";
 import { suppressContact, upsertContact } from "../../db/contacts.js";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
-import { createDomain } from "../../db/domains.js";
+import { createDomain, updateDnsStatus, updateDomainReadiness } from "../../db/domains.js";
 import { saveEmailAgentRun } from "../../db/email-agents.js";
 import { createEmail } from "../../db/emails.js";
 import { createEvent } from "../../db/events.js";
@@ -640,6 +640,43 @@ describe("emails serve REST parity smoke", () => {
     expect(page).toHaveLength(2);
     expect(page.every((domain) => domain.provider_id === provider.id)).toBe(true);
     expect(page.map((domain) => domain.domain)).not.toContain("other.example.com");
+  });
+
+  it("serves typed domain readiness summaries and mutations", async () => {
+    const previousMode = process.env["MAILERY_MODE"];
+    process.env["MAILERY_MODE"] = "local";
+    try {
+      const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
+      const domain = createDomain(provider.id, "readiness.example.com");
+      updateDnsStatus(domain.id, "verified", "verified", "pending");
+      updateDomainReadiness(domain.id, { inbound_status: "ready", outbound_status: "ready" });
+
+      const list = await json<Array<{ id: string; readiness: { send_ready: boolean; receive_ready: boolean; outbound_ready: boolean }; provider: { name: string } }>>(`/api/domains/readiness?provider_id=${provider.id}`);
+      expect(list).toHaveLength(1);
+      expect(list[0]).toMatchObject({
+        id: domain.id,
+        provider: { name: "sandbox" },
+        readiness: { send_ready: true, receive_ready: true, outbound_ready: true },
+      });
+
+      const detail = await json<{ id: string; dns: { missing_records: string[] } }>(`/api/domains/${domain.id}/readiness`);
+      expect(detail.id).toBe(domain.id);
+      expect(detail.dns.missing_records).toContain("DMARC");
+
+      const disabled = await json<{ outbound_status: string; readiness: { outbound_ready: boolean; restricted: boolean } }>(
+        `/api/domains/${domain.id}/readiness`,
+        postJson(`/api/domains/${domain.id}/readiness`, { outbound_status: "disabled" }),
+      );
+      expect(disabled.outbound_status).toBe("disabled");
+      expect(disabled.readiness.outbound_ready).toBe(false);
+      expect(disabled.readiness.restricted).toBe(true);
+
+      const invalid = await call(`/api/domains/${domain.id}/readiness`, postJson(`/api/domains/${domain.id}/readiness`, { outbound_status: "bogus" }));
+      expect(invalid.status).toBe(400);
+    } finally {
+      if (previousMode === undefined) delete process.env["MAILERY_MODE"];
+      else process.env["MAILERY_MODE"] = previousMode;
+    }
   });
 
   it("defaults REST collection endpoints to bounded pages", async () => {

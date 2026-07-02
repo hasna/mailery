@@ -184,7 +184,9 @@ function usableDomainWhere(opts: UsableDomainOptions | undefined, params: SQLQue
   const broken = `(d.dkim_status = 'failed' OR d.spf_status = 'failed' OR d.dmarc_status = 'failed' OR ${hasLastError})`;
   const notBroken = `(d.dkim_status != 'failed' AND d.spf_status != 'failed' AND d.dmarc_status != 'failed' AND NOT ${hasLastError})`;
   const sendReady = `(${notBroken} AND d.dkim_status = 'verified' AND d.spf_status = 'verified')`;
-  const receiveReady = `((${broken} AND ${readyAddresses} > 0) OR (${notBroken} AND (${readyAddresses} > 0 OR d.provisioning_status IN ('ready', 'inbound_ready'))))`;
+  const lifecycleReceiveReady = "(d.inbound_status = 'ready')";
+  const localReceiveReady = `((${broken} AND ${readyAddresses} > 0) OR (${notBroken} AND (${readyAddresses} > 0 OR d.provisioning_status IN ('ready', 'inbound_ready') OR ${lifecycleReceiveReady})))`;
+  const receiveReady = `(CASE WHEN d.source_of_truth IN ('postgres', 'cloud') THEN ${lifecycleReceiveReady} ELSE ${localReceiveReady} END)`;
 
   if (opts?.send && opts.receive) conditions.push(`(${sendReady} AND ${receiveReady})`);
   else if (opts?.send) conditions.push(sendReady);

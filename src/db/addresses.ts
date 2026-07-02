@@ -129,7 +129,9 @@ function addressReadinessWhere(opts: AddressReadinessOptions | undefined, params
   const broken = `(d.dkim_status = 'failed' OR d.spf_status = 'failed' OR d.dmarc_status = 'failed' OR ${hasLastError})`;
   const notBroken = `(d.dkim_status != 'failed' AND d.spf_status != 'failed' AND d.dmarc_status != 'failed' AND NOT ${hasLastError})`;
   const domainSendReady = `(${notBroken} AND d.dkim_status = 'verified' AND d.spf_status = 'verified')`;
-  const domainReceiveReady = `((${broken} AND ${readyAddresses} > 0) OR (${notBroken} AND (${readyAddresses} > 0 OR d.provisioning_status IN ('ready', 'inbound_ready'))))`;
+  const lifecycleReceiveReady = "(d.inbound_status = 'ready')";
+  const localDomainReceiveReady = `((${broken} AND ${readyAddresses} > 0) OR (${notBroken} AND (${readyAddresses} > 0 OR d.provisioning_status IN ('ready', 'inbound_ready') OR ${lifecycleReceiveReady})))`;
+  const domainReceiveReady = `(CASE WHEN d.source_of_truth IN ('postgres', 'cloud') THEN ${lifecycleReceiveReady} ELSE ${localDomainReceiveReady} END)`;
   const addressSendReady = `(COALESCE(a.status, 'active') != 'suspended' AND (a.verified = 1 OR ${domainSendReady}))`;
   const addressReceiveReady = `(a.provisioning_status = 'ready' OR ${domainReceiveReady})`;
 

@@ -15,6 +15,8 @@ import {
   listReadyAddressCountsByDomains,
 } from '../../db/provisioning.js';
 import { assessDomainReadiness } from '../../lib/domain-readiness.js';
+import { domainInboundReadinessSignals } from '../../lib/domain-inbound-evidence.js';
+import { resolveMaileryMode } from '../../lib/mode.js';
 import { formatError, resolveId, DomainNotFoundError, AddressNotFoundError, ProviderNotFoundError } from '../helpers.js';
 
 const MAX_MCP_OWNER_HISTORY_LIMIT = 100;
@@ -67,10 +69,14 @@ export function registerDomainTools(server: McpServer): void {
 	      const domainProvisioningFor = (domainId: string) =>
 	        domainProvisioning.get(domainId) ?? null;
       const providerNames = listProviderNamesByIds(baseDomains.map((domain) => domain.provider_id));
+      const mode = resolveMaileryMode();
 	      const domains = baseDomains.map((domain) => {
 	        const ready_addresses = readyAddressCount(domain.id);
 	        const provisioning = domainProvisioningFor(domain.id);
-        const readiness = assessDomainReadiness(domain, provisioning, { ready_addresses });
+        const readiness = assessDomainReadiness(domain, provisioning, {
+          ...domainInboundReadinessSignals(domain, mode),
+          ready_addresses,
+        });
         return {
           ...domain,
           provider_name: providerNames.get(domain.provider_id) ?? null,
@@ -275,6 +281,7 @@ export function registerDomainTools(server: McpServer): void {
 	      const domainByProviderAndName = new Map(
 	        domains.map((domain) => [`${domain.provider_id}:${domain.domain.toLowerCase()}`, domain]),
 	      );
+      const mode = resolveMaileryMode();
 	      const addresses = baseAddresses.map((address) => {
 	          const domainName = address.email.split("@")[1]?.toLowerCase() ?? "";
 	          const domain = domainByProviderAndName.get(`${address.provider_id}:${domainName}`) ?? null;
@@ -282,7 +289,10 @@ export function registerDomainTools(server: McpServer): void {
           const readyAddresses = domain ? readyAddressCount(domain.id) : 0;
           const domainProvisioningRow = domain ? domainProvisioningFor(domain.id) : null;
           const domainReadiness = domain
-            ? assessDomainReadiness(domain, domainProvisioningRow, { ready_addresses: readyAddresses })
+            ? assessDomainReadiness(domain, domainProvisioningRow, {
+              ...domainInboundReadinessSignals(domain, mode),
+              ready_addresses: readyAddresses,
+            })
             : null;
           const sendReady = address.status !== "suspended" && (address.verified || domainReadiness?.send_ready === true);
           const receiveReady = provisioning?.provisioning_status === "ready" || domainReadiness?.receive_ready === true;

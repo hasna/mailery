@@ -1,12 +1,13 @@
 import { getDatabase, getDataDir } from "../db/database.js";
 import type { Database } from "../db/database.js";
 import { listProviderSummaries } from "../db/providers.js";
-import { getDomain, listDomains } from "../db/domains.js";
+import { listDomains } from "../db/domains.js";
 import { listUsableSendingAddresses } from "../db/addresses.js";
 import { listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../db/provisioning.js";
 import { countValue } from "../db/scalars.js";
 import type { Domain } from "../types/index.js";
 import { assessDomainReadiness } from "./domain-readiness.js";
+import { domainInboundReadinessSignals } from "./domain-inbound-evidence.js";
 import { getInboundBuckets, loadConfig } from "./config.js";
 import { enrichAddresses, type EnrichedAddress } from "./address-ownership.js";
 import { resolveMaileryMode, type MaileryMode, type MaileryModeLabel, type MaileryModeSource } from "./mode.js";
@@ -172,47 +173,26 @@ function provisioningSummary(db: Database): EmailSystemStatus["provisioning"] {
   };
 }
 
-interface DomainSummaryRow {
-  total: unknown;
-  send_ready: unknown;
-  receive_ready: unknown;
-}
-
 function domainSummary(db: Database): { total: number; send_ready: number; receive_ready: number } {
-  const row = db
-    .query(
-      `WITH ready_counts AS (
-         SELECT domain_id, COUNT(*) AS ready_addresses
-         FROM addresses
-         WHERE domain_id IS NOT NULL AND provisioning_status = 'ready'
-         GROUP BY domain_id
-       )
-       SELECT
-         COUNT(*) AS total,
-         COALESCE(SUM(CASE
-           WHEN d.dkim_status = 'verified'
-            AND d.spf_status = 'verified'
-            AND COALESCE(d.dmarc_status, 'pending') != 'failed'
-            AND NULLIF(d.last_error, '') IS NULL
-           THEN 1 ELSE 0 END), 0) AS send_ready,
-         COALESCE(SUM(CASE
-           WHEN COALESCE(rc.ready_addresses, 0) > 0
-             OR (
-               d.provisioning_status IN ('ready', 'inbound_ready')
-               AND d.dkim_status != 'failed'
-               AND d.spf_status != 'failed'
-               AND d.dmarc_status != 'failed'
-               AND NULLIF(d.last_error, '') IS NULL
-             )
-           THEN 1 ELSE 0 END), 0) AS receive_ready
-       FROM domains d
-       LEFT JOIN ready_counts rc ON rc.domain_id = d.id`,
-    )
-    .get() as DomainSummaryRow | null;
+  const domains = listDomains(undefined, db);
+  const domainIds = domains.map((domain) => domain.id);
+  const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
+  const readyAddressesByDomain = listReadyAddressCountsByDomains(domainIds, db);
+  const mode = resolveMaileryMode();
+  let sendReady = 0;
+  let receiveReady = 0;
+  for (const domain of domains) {
+    const readiness = assessDomainReadiness(domain, domainProvisioning.get(domain.id) ?? null, {
+      ...domainInboundReadinessSignals(domain, mode),
+      ready_addresses: readyAddressesByDomain.get(domain.id) ?? 0,
+    });
+    if (readiness.send_ready) sendReady += 1;
+    if (readiness.receive_ready) receiveReady += 1;
+  }
   return {
-    total: countValue(row?.total),
-    send_ready: countValue(row?.send_ready),
-    receive_ready: countValue(row?.receive_ready),
+    total: domains.length,
+    send_ready: sendReady,
+    receive_ready: receiveReady,
   };
 }
 
@@ -248,8 +228,10 @@ function buildDomainReadiness(
   const domainIds = domains.map((domain) => domain.id);
   const domainProvisioning = listDomainProvisioningByIds(domainIds, db);
   const readyAddressesByDomain = listReadyAddressCountsByDomains(domainIds, db);
+  const mode = resolveMaileryMode();
   return domains.map((domain) => {
     const readiness = assessDomainReadiness(domain, domainProvisioning.get(domain.id) ?? null, {
+      ...domainInboundReadinessSignals(domain, mode),
       ready_addresses: readyAddressesByDomain.get(domain.id) ?? 0,
     });
     return {
@@ -271,41 +253,11 @@ function firstDomainFixCommand(
   providersById: Map<string, AgentProviderSummary>,
   db: Database,
 ): string | null {
-  const row = db
-    .query(
-      `WITH ready_counts AS (
-         SELECT domain_id, COUNT(*) AS ready_addresses
-         FROM addresses
-         WHERE domain_id IS NOT NULL AND provisioning_status = 'ready'
-         GROUP BY domain_id
-       )
-       SELECT d.id
-       FROM domains d
-       LEFT JOIN ready_counts rc ON rc.domain_id = d.id
-       WHERE
-         d.dkim_status = 'failed'
-         OR d.spf_status = 'failed'
-         OR d.dmarc_status = 'failed'
-         OR NULLIF(d.last_error, '') IS NOT NULL
-         OR NOT (d.dkim_status = 'verified' AND d.spf_status = 'verified')
-         OR NOT (
-           COALESCE(rc.ready_addresses, 0) > 0
-           OR (
-             d.provisioning_status IN ('ready', 'inbound_ready')
-             AND d.dkim_status != 'failed'
-             AND d.spf_status != 'failed'
-             AND d.dmarc_status != 'failed'
-             AND NULLIF(d.last_error, '') IS NULL
-           )
-         )
-       ORDER BY d.created_at DESC
-       LIMIT 1`,
-    )
-    .get() as { id: string } | null;
-  if (!row) return null;
-  const domain = getDomain(row.id, db);
-  if (!domain) return null;
-  return buildDomainReadiness([domain], providersById, db)[0]?.fix_commands[0] ?? null;
+  for (const domain of buildDomainReadiness(listDomains(undefined, db), providersById, db)) {
+    const command = domain.fix_commands[0];
+    if (command) return command;
+  }
+  return null;
 }
 
 export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemStatus {

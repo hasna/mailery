@@ -4,7 +4,9 @@ import { listDomains } from "../db/domains.js";
 import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../db/provisioning.js";
 import { countValue } from "../db/scalars.js";
 import { assessDomainReadiness } from "../lib/domain-readiness.js";
+import { domainInboundReadinessSignals } from "../lib/domain-inbound-evidence.js";
 import { loadConfig } from "../lib/config.js";
+import { resolveMaileryMode } from "../lib/mode.js";
 import { listMailboxSources, listMailboxStatus } from "../cli/tui/data.js";
 import type { PgAdapterAsync } from "../db/remote-storage.js";
 
@@ -45,10 +47,14 @@ export function domainsResourcePayload(db: Database = getDatabase()): Record<str
   const domains = visibleDomains.map((domain) => {
     const ready_addresses = readyAddressCounts.get(domain.id) ?? 0;
     const provisioning = domainProvisioning.get(domain.id) ?? null;
+    const mode = resolveMaileryMode();
     return {
       ...domain,
       provisioning,
-      readiness: assessDomainReadiness(domain, provisioning, { ready_addresses }),
+      readiness: assessDomainReadiness(domain, provisioning, {
+        ...domainInboundReadinessSignals(domain, mode),
+        ready_addresses,
+      }),
     };
   });
   return {

@@ -15,6 +15,7 @@ import { getDomainProvisioning, listDomainProvisioningByIds, listReadyAddressCou
 import { assessDomainReadiness, formatDomainReadinessState } from "../../lib/domain-readiness.js";
 import { normalizeRoute53RegistrationContact } from "../../lib/route53-contact.js";
 import { resolveMaileryMode, type MaileryModeResolution } from "../../lib/mode.js";
+import { domainInboundReadinessSignals } from "../../lib/domain-inbound-evidence.js";
 
 type ProviderSummary = Pick<Provider, "id" | "name" | "type" | "region" | "active">;
 
@@ -58,6 +59,18 @@ function providerSummary(provider: Provider | null): ProviderSummary | null {
     region: provider.region,
     active: provider.active,
   };
+}
+
+function assessLifecycleReadiness(
+  domain: Domain,
+  mode: MaileryModeResolution,
+  readyAddresses: number,
+  provisioning: ReturnType<typeof getDomainProvisioning>,
+) {
+  return assessDomainReadiness(domain, provisioning, {
+    ...domainInboundReadinessSignals(domain, mode),
+    ready_addresses: readyAddresses,
+  });
 }
 
 function defaultSourceOfTruth(mode: MaileryModeResolution["mode"]): DomainSourceOfTruth {
@@ -110,7 +123,7 @@ function buildDomainLifecycleSummary(domain: Domain, db: Database = getDatabase(
   const provider = getProvider(domain.provider_id, db);
   const provisioning = getDomainProvisioning(domain.id, db);
   const readyAddresses = listReadyAddressCountsByDomains([domain.id], db).get(domain.id) ?? 0;
-  const readiness = assessDomainReadiness(domain, provisioning, { ready_addresses: readyAddresses });
+  const readiness = assessLifecycleReadiness(domain, mode, readyAddresses, provisioning);
   const missingRecords: string[] = [];
   const warnings: string[] = [];
   const missingRequirements: string[] = [];
@@ -124,14 +137,14 @@ function buildDomainLifecycleSummary(domain: Domain, db: Database = getDatabase(
   }
   if (!provider) missingRequirements.push("provider is missing");
   if (domain.ownership_status !== "verified") missingRequirements.push("domain ownership is not verified");
-  if (domain.inbound_status !== "ready" && !readiness.receive_ready) missingRequirements.push("inbound route is not ready");
+  if (!readiness.receive_ready) missingRequirements.push("inbound route is not ready");
   if (domain.outbound_status !== "ready") missingRequirements.push("outbound sending is not enabled");
   if (domain.dkim_status !== "verified") missingRequirements.push("DKIM is not verified");
   if (domain.spf_status !== "verified") missingRequirements.push("SPF is not verified");
 
   if (missingRecords.length > 0) nextActions.push(`mailery domains dns ${domain.domain}`);
   if (domain.dkim_status !== "verified" || domain.spf_status !== "verified") nextActions.push(`mailery domains verify ${domain.domain}`);
-  if (domain.inbound_status !== "ready" && !readiness.receive_ready) nextActions.push(`mailery domains enable-inbound ${domain.domain} --force`);
+  if (!readiness.receive_ready) nextActions.push(readiness.fix_commands.find((command) => command.includes("domain adopt")) ?? `mailery domains enable-inbound ${domain.domain} --force`);
   if (domain.outbound_status !== "ready") nextActions.push(`mailery domains enable-outbound ${domain.domain}`);
   if (mode.warning) warnings.push(mode.warning);
 
@@ -149,7 +162,7 @@ function buildDomainLifecycleSummary(domain: Domain, db: Database = getDatabase(
     monitoring_status: domain.monitoring_status,
     readiness: {
       ...readiness,
-      inbound_ready: domain.inbound_status === "ready" || readiness.receive_ready,
+      inbound_ready: readiness.receive_ready,
       outbound_ready: domain.outbound_status === "ready" && readiness.send_ready,
       monitored: domain.monitoring_status === "monitoring" || domain.monitoring_status === "clean",
       restricted: !!domain.restricted_at || domain.outbound_status === "disabled",
@@ -348,8 +361,8 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       const db = getDatabase();
       const domain = resolveDomainRecord(domainOrId, opts, db);
       const summary = buildDomainLifecycleSummary(domain, db);
-      if (!opts.force && !summary.readiness.receive_ready) {
-        handleError(new Error(`Inbound is not verified for ${domain.domain}; run mailery domains check ${domain.domain} or pass --force after manual/provider setup.`));
+      if (!opts.force && !summary.readiness.receive_ready && !summary.readiness.inbound_evidence_ready) {
+        handleError(new Error(`Inbound cloud source is not configured for ${domain.domain}; run mailery domain adopt ${domain.domain} --provider ${domain.provider_id} or pass --force after manual/provider setup.`));
       }
       const updated = updateDomainReadiness(domain.id, {
         inbound_status: "ready",
@@ -746,7 +759,31 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
           // (multi-bucket: domains can live in different AWS accounts).
           const { addInboundBucket } = await import("../../lib/config.js");
           addInboundBucket(r.bucket, region, providerId);
+          const { registerS3Source } = await import("../../lib/s3-sync.js");
+          const source = registerS3Source({
+            bucket: r.bucket,
+            prefix: r.s3_prefix,
+            region,
+            providerId,
+            name: `${domain} SES/S3 inbound`,
+            status: "live",
+            liveSyncEnabled: true,
+          });
           setDomainProvisioning(rec.id, { provisioning_status: "ready", next_check_at: null, last_error: null }, db);
+          updateDomainReadiness(rec.id, {
+            provider_metadata: {
+              inbound: {
+                strategy: "ses-s3",
+                bucket: r.bucket,
+                prefix: r.s3_prefix,
+                region,
+                source_id: source.id,
+                rule_set: r.rule_set,
+                rule_name: r.rule_name,
+              },
+            },
+            last_inbound_check_at: now(),
+          }, db);
         }
 
         // 5. Catch-all: the protected global catch-all already covers every domain;
@@ -820,7 +857,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         const rows = domains.map((d) => {
           const provisioning = domainProvisioning.get(d.id) ?? null;
           const ready_addresses = readyAddressCounts.get(d.id) ?? 0;
-          const readiness = assessDomainReadiness(d, provisioning, { ready_addresses });
+          const readiness = assessLifecycleReadiness(d, resolveMaileryMode(), ready_addresses, provisioning);
           return {
             ...d,
             provider_name: providerNames.get(d.provider_id) ?? null,
@@ -909,7 +946,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         const rows = domains.map((domain) => {
           const provisioning = domainProvisioning.get(domain.id) ?? null;
           const ready_addresses = readyAddressCounts.get(domain.id) ?? 0;
-          const readiness = assessDomainReadiness(domain, provisioning, { ready_addresses });
+          const readiness = assessLifecycleReadiness(domain, resolveMaileryMode(), ready_addresses, provisioning);
           return {
             ...domain,
             provider_name: providerNames.get(domain.provider_id) ?? null,
@@ -917,7 +954,11 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
             readiness,
           };
         });
-        const visibleRows = rows;
+        const visibleRows = rows.filter((row) => {
+          if (opts.send && !row.readiness.send_ready) return false;
+          if (opts.receive && !row.readiness.receive_ready) return false;
+          return opts.send || opts.receive ? true : row.readiness.send_ready || row.readiness.receive_ready;
+        });
         const lines = visibleRows.length ? [chalk.bold("\nUsable domains:")] : [chalk.dim("No usable domains found.")];
         for (const row of visibleRows) {
           const modes = [

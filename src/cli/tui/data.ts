@@ -26,6 +26,8 @@ import { findAddressesByEmail, getPreferredActiveAddressEmail, listActiveAddress
 import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.js";
 import { getInboundBuckets, loadConfig, saveConfig } from "../../lib/config.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
+import { domainInboundReadinessSignals } from "../../lib/domain-inbound-evidence.js";
+import { resolveMaileryMode } from "../../lib/mode.js";
 import { listS3Sources } from "../../lib/s3-sync.js";
 import { createSentEmailLedger, setSentEmailThreading, storeSentEmailContent } from "../../lib/sent-ledger.js";
 import { buildThreadingHeaders, generateMessageId, parseReferences } from "../../lib/threading.js";
@@ -1406,6 +1408,7 @@ export function listDomainSummaries(optsOrDb?: ListDomainSummaryOptions | Databa
   const provisioningById = listDomainProvisioningByIds(domainIds, d);
   const readyAddressesByDomain = listReadyAddressCountsByDomains(domainIds, d);
   const countsByDomain = allDomainMailCounts(d, domains.map((domain) => domain.domain));
+  const mode = resolveMaileryMode();
   return domains
     .map((domain) => {
       const key = domain.domain.toLowerCase();
@@ -1421,7 +1424,10 @@ export function listDomainSummaries(optsOrDb?: ListDomainSummaryOptions | Databa
         sent: counts.sent,
         archived: counts.archived,
         total: counts.inbox + counts.sent + counts.archived,
-        readiness: assessDomainReadiness(domain, provisioning, { ready_addresses: readyAddressesByDomain.get(domain.id) ?? 0 }).state,
+        readiness: assessDomainReadiness(domain, provisioning, {
+          ...domainInboundReadinessSignals(domain, mode),
+          ready_addresses: readyAddressesByDomain.get(domain.id) ?? 0,
+        }).state,
       };
     })
     .sort((a, b) => a.domain.localeCompare(b.domain));

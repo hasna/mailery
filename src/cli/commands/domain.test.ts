@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { Command } from "commander";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createAddress, getAddress } from "../../db/addresses.js";
-import { createDomain, getDomain, listDomains, updateDnsStatus } from "../../db/domains.js";
+import { createDomain, getDomain, listDomains, updateDnsStatus, updateDomainReadiness } from "../../db/domains.js";
 import { createProvider } from "../../db/providers.js";
 import { setDomainProvisioning } from "../../db/provisioning.js";
 import { createWarmingSchedule } from "../../db/warming.js";
+import { registerS3Source } from "../../lib/s3-sync.js";
 import { registerDomainCommands } from "./domain.js";
 
 const mockR53CheckAvailability = mock(async (domain: string) => ({
@@ -279,6 +283,71 @@ describe("domains lifecycle commands", () => {
       inbound_status: "ready",
       outbound_status: "disabled",
     });
+  });
+
+  it("requires self-hosted domains to have SES/S3 source evidence before receive-ready status", async () => {
+    const previousHome = process.env["HOME"];
+    const previousMode = process.env["MAILERY_MODE"];
+    const tmpHome = mkdtempSync(join(tmpdir(), "mailery-domain-test-"));
+    process.env["HOME"] = tmpHome;
+    process.env["MAILERY_MODE"] = "self_hosted";
+    try {
+      const provider = createProvider({ name: "ses-main", type: "ses", region: "us-east-1" });
+      const domain = createDomain(provider.id, "selfhosted.example.com");
+      updateDnsStatus(domain.id, "verified", "verified", "pending");
+      updateDomainReadiness(domain.id, {
+        source_of_truth: "postgres",
+        ownership_status: "verified",
+      });
+      setDomainProvisioning(domain.id, { provisioning_status: "ready", send_provider: "ses" });
+
+      const withoutSource = await runDomainCommand(["domains", "status", "selfhosted.example.com"]);
+      expect(withoutSource.data).toMatchObject({
+        domain: "selfhosted.example.com",
+        readiness: {
+          inbound_ready: false,
+          receive_ready: false,
+          inbound_evidence_ready: false,
+        },
+      });
+
+      const forcedWithoutSource = await runDomainCommand(["domains", "enable-inbound", "selfhosted.example.com", "--force"]);
+      expect(forcedWithoutSource.data).toMatchObject({
+        domain: "selfhosted.example.com",
+        inbound_status: "ready",
+        readiness: {
+          inbound_ready: false,
+          receive_ready: false,
+          inbound_evidence_ready: false,
+        },
+      });
+
+      registerS3Source({
+        bucket: "self-hosted-inbound",
+        prefix: "inbound/selfhosted.example.com/",
+        region: "us-east-1",
+        providerId: provider.id,
+        status: "live",
+        liveSyncEnabled: true,
+      });
+      const enabled = await runDomainCommand(["domains", "enable-inbound", "selfhosted.example.com"]);
+
+      expect(enabled.data).toMatchObject({
+        domain: "selfhosted.example.com",
+        inbound_status: "ready",
+        readiness: {
+          inbound_ready: true,
+          receive_ready: true,
+          inbound_evidence_ready: true,
+        },
+      });
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      if (previousMode === undefined) delete process.env["MAILERY_MODE"];
+      else process.env["MAILERY_MODE"] = previousMode;
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
   });
 });
 

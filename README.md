@@ -24,6 +24,8 @@ truth with local SQLite as a runtime cache. Mailery Cloud is an opt-in
 hosted source of truth at `https://mailery.co`; the same public CLI can sign up,
 create an agent API key, create a billing link, create hosted mailboxes, read
 hosted messages, generate hosted digests, and pull cloud mail into local SQLite.
+The per-domain readiness contract for local, self-hosted, and cloud operation
+lives in [`docs/DOMAIN_READINESS.md`](docs/DOMAIN_READINESS.md).
 
 The SaaS control plane is private Hasna Tools infrastructure. End users and
 open-source contributors should not install or depend on private Hasna Tools
@@ -365,9 +367,11 @@ Alternatively, point an SNS HTTP subscription at `POST /webhook/ses-inbound` on
 ## Self-Hosted Runtime (PostgreSQL/S3/SES)
 
 The canonical local/self-hosted/cloud runtime contract lives in
-[`docs/SELF_HOSTED_RUNTIME.md`](docs/SELF_HOSTED_RUNTIME.md). That document is
-the source of truth for the active migration from local-authoritative mail to a
-self-hosted PostgreSQL/S3 runtime.
+[`docs/SELF_HOSTED_RUNTIME.md`](docs/SELF_HOSTED_RUNTIME.md). The per-domain
+aggregator and sending-readiness contract lives in
+[`docs/DOMAIN_READINESS.md`](docs/DOMAIN_READINESS.md). Together these documents
+are the source of truth for the active migration from local-authoritative mail to
+a self-hosted PostgreSQL/S3 runtime.
 
 Mailery is local-first. The public OSS default is local SQLite and files under
 `~/.hasna/emails/`, with no remote dependency. Self-hosted runtime is opt-in,

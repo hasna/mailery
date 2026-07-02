@@ -6,6 +6,12 @@ Mailery has three deployment modes:
 - `self_hosted`: user-owned PostgreSQL, S3, and SES are the source of truth.
 - `cloud`: Mailery Cloud API is the source of truth.
 
+The per-domain aggregator, inbound readiness, outbound readiness, and DNS
+authentication contract lives in [`DOMAIN_READINESS.md`](DOMAIN_READINESS.md).
+That contract is intentionally per domain: a domain can be inbound-ready without
+being outbound-ready, and DMARC is a sending-domain signal rather than a global
+Mailery app blocker.
+
 In `self_hosted` mode, PostgreSQL owns mailbox, message, label, provider, send,
 and state rows. S3 owns raw SES MIME objects and optional attachment objects.
 The local SQLite database is only a runtime cache so existing CLI, MCP, server,

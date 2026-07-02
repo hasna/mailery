@@ -98,6 +98,8 @@ describe("CLI router", () => {
       expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "clear", "--yes"])).toBe(false);
       expect(shouldUseSelfHostedRuntimeCacheForArgs(["inbox", "wait", "ops@example.com"])).toBe(true);
       expect(shouldUseSelfHostedRuntimeCacheForArgs(["storage", "status"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["self-hosted", "check"])).toBe(false);
+      expect(shouldUseSelfHostedRuntimeCacheForArgs(["self-hosted", "doctor"])).toBe(false);
       expect(shouldUseSelfHostedRuntimeCacheForArgs(["self-hosted", "migrate-local"])).toBe(false);
       expect(shouldUseSelfHostedRuntimeCacheForArgs(["cloud", "status"])).toBe(false);
       delete process.env["HASNA_EMAILS_DATABASE_URL"];

@@ -151,6 +151,10 @@ export interface SelfHostedReadinessCheck {
 export interface SelfHostedReadinessReport {
   runtime: SelfHostedRuntimeStatus;
   storage: ReturnType<typeof getStorageStatus>;
+  local: LocalMailMigrationSummary & {
+    authoritative: boolean;
+    cachePath: string | null;
+  };
   inbound: {
     buckets: Array<{ bucket: string; region: string; providerId?: string }>;
   };
@@ -175,6 +179,10 @@ export interface SelfHostedReadinessReport {
     blockers: string[];
     warnings: string[];
   };
+}
+
+export interface SelfHostedReadinessOptions {
+  getPg?: typeof getStoragePg;
 }
 
 let runtimeFlushTimer: ReturnType<typeof setInterval> | null = null;
@@ -491,9 +499,11 @@ export function describeSelfHostedRuntime(): Record<string, unknown> {
   };
 }
 
-export async function checkSelfHostedRuntimeReadiness(): Promise<SelfHostedReadinessReport> {
+export async function checkSelfHostedRuntimeReadiness(options: SelfHostedReadinessOptions = {}): Promise<SelfHostedReadinessReport> {
   const runtime = getSelfHostedRuntimeStatus();
   const storage = getStorageStatus();
+  const localSource = inspectLocalMailMigrationSource();
+  const localAuthoritative = runtime.sourceOfTruth === "local" && localSource.mailRows > 0;
   const inboundBuckets = getInboundBuckets();
   const attachments = getInboundAttachmentStorageConfig();
   const checks: SelfHostedReadinessCheck[] = [
@@ -508,6 +518,23 @@ export async function checkSelfHostedRuntimeReadiness(): Promise<SelfHostedReadi
         "export MAILERY_MODE=self_hosted",
         "export HASNA_EMAILS_STORAGE_MODE=remote",
       ],
+    }),
+    check("local_mailbox_source_of_truth", !localAuthoritative, "critical", localAuthoritative ? "local_mailbox_rows_are_authoritative" : runtime.sourceOfTruth === "postgres" ? "postgres_source_of_truth" : "no_local_mailbox_rows", {
+      details: {
+        sourcePath: localSource.sourcePath,
+        sourceExists: localSource.sourceExists,
+        sourceOpen: localSource.sourceOpen,
+        mailRows: localSource.mailRows,
+        tables: localSource.tables,
+        cachePath: runtime.cachePath,
+        localCache: runtime.localCache,
+      },
+      fix_commands: localAuthoritative ? [
+        "mailery self-hosted migrate-local --json",
+        "export MAILERY_MODE=self_hosted",
+        "export HASNA_EMAILS_STORAGE_MODE=remote",
+        "mailery self-hosted check --json",
+      ] : [],
     }),
     check("database_url", runtime.configured, "critical", runtime.configured ? "configured" : "missing", {
       details: {
@@ -550,7 +577,7 @@ export async function checkSelfHostedRuntimeReadiness(): Promise<SelfHostedReadi
   if (runtime.configured) {
     let pg: Awaited<ReturnType<typeof getStoragePg>> | null = null;
     try {
-      pg = await getStoragePg();
+      pg = await (options.getPg ?? getStoragePg)();
       await pg.all("SELECT 1 AS ok");
       remote.reachable = true;
       checks.push(check("database_access", true, "critical", "reachable"));
@@ -613,7 +640,15 @@ export async function checkSelfHostedRuntimeReadiness(): Promise<SelfHostedReadi
         ],
       }));
     } finally {
-      if (pg) await pg.close();
+      if (pg) {
+        try {
+          await pg.close();
+        } catch (error) {
+          checks.push(check("database_connection_close", false, "warning", "close_failed", {
+            details: { error: errorMessage(error) },
+          }));
+        }
+      }
     }
   } else {
     checks.push(check("database_access", false, "critical", "skipped_missing_database_url", {
@@ -662,6 +697,11 @@ export async function checkSelfHostedRuntimeReadiness(): Promise<SelfHostedReadi
   return {
     runtime,
     storage,
+    local: {
+      ...localSource,
+      authoritative: localAuthoritative,
+      cachePath: runtime.cachePath,
+    },
     inbound: { buckets: inboundBuckets },
     attachments,
     remote,

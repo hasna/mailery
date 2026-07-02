@@ -9,6 +9,7 @@ import { loadConfig } from "./config.js";
 import {
   SELF_HOSTED_RUNTIME_TABLES,
   SELF_HOSTED_S3_MATERIALIZATION_TABLES,
+  checkSelfHostedRuntimeReadiness,
   cleanupOwnedRuntimeCache,
   flushSelfHostedRuntimeCache,
   getSelfHostedRuntimeStatus,
@@ -75,6 +76,86 @@ describe("self-hosted runtime cache bridge", () => {
       maileryMode: "self_hosted",
     });
     await expect(prepareSelfHostedRuntimeCache()).rejects.toThrow("Self-hosted source-of-truth mode requires");
+  });
+
+  it("fails readiness when local mailbox rows are still the source of truth", async () => {
+    process.env["EMAILS_DB_PATH"] = ":memory:";
+    resetDatabase();
+    const db = getDatabase();
+    const provider = createProvider({ name: "local-source", type: "sandbox" }, db);
+    storeInboundEmail({
+      provider_id: provider.id,
+      message_id: "authoritative-local-message",
+      in_reply_to_email_id: null,
+      from_address: "sender@example.com",
+      to_addresses: ["agent@example.com"],
+      cc_addresses: [],
+      subject: "Authoritative local mail",
+      text_body: "This row proves local SQLite is still authoritative.",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 64,
+      received_at: "2026-07-01T12:00:00.000Z",
+    }, db);
+
+    const report = await checkSelfHostedRuntimeReadiness();
+    const localCheck = report.checks.find((entry) => entry.name === "local_mailbox_source_of_truth");
+
+    expect(report.local).toMatchObject({
+      authoritative: true,
+      sourcePath: ":memory:",
+      sourceExists: true,
+    });
+    expect(report.local.mailRows).toBeGreaterThan(0);
+    expect(report.summary.blockers).toContain("local_mailbox_source_of_truth");
+    expect(localCheck).toMatchObject({
+      ok: false,
+      severity: "critical",
+      status: "local_mailbox_rows_are_authoritative",
+      fix_commands: expect.arrayContaining(["mailery self-hosted migrate-local --json"]),
+    });
+  });
+
+  it("returns partial readiness when remote database access and close fail", async () => {
+    process.env["MAILERY_MODE"] = "self_hosted";
+    process.env["HASNA_EMAILS_DATABASE_URL"] = "postgres://runtime";
+
+    const report = await checkSelfHostedRuntimeReadiness({
+      getPg: async () => ({
+        all: async () => {
+          throw new Error("remaining connection slots are reserved");
+        },
+        run: async () => ({ changes: 0 }),
+        close: async () => {
+          throw new Error("pool close failed");
+        },
+      } as any),
+    });
+    const accessCheck = report.checks.find((entry) => entry.name === "database_access");
+    const closeCheck = report.checks.find((entry) => entry.name === "database_connection_close");
+
+    expect(report.runtime).toMatchObject({
+      configured: true,
+      sourceOfTruth: "postgres",
+      databaseEnv: "HASNA_EMAILS_DATABASE_URL",
+    });
+    expect(report.local.authoritative).toBe(false);
+    expect(report.remote.reachable).toBe(false);
+    expect(report.summary.blockers).toContain("database_access");
+    expect(report.summary.warnings).toContain("database_connection_close");
+    expect(accessCheck).toMatchObject({
+      ok: false,
+      severity: "critical",
+      status: "unreachable",
+    });
+    expect(accessCheck?.details?.error).toContain("remaining connection slots");
+    expect(closeCheck).toMatchObject({
+      ok: false,
+      severity: "warning",
+      status: "close_failed",
+    });
   });
 
   it("uses an owned temporary cache when no explicit EMAILS_DB_PATH is configured", async () => {

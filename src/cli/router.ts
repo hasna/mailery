@@ -141,7 +141,7 @@ export function requestedCommand(args: string[]): string | null {
   return null;
 }
 
-const REMOTE_RUNTIME_STORAGE_MANAGEMENT_COMMANDS = new Set(["status", "setup", "push", "pull", "sync", "migrate", "migrate-local", "migrate-to-self-hosted"]);
+const REMOTE_RUNTIME_STORAGE_MANAGEMENT_COMMANDS = new Set(["status", "setup", "check", "doctor", "push", "pull", "sync", "migrate", "migrate-local", "migrate-to-self-hosted"]);
 const DIRECT_SELF_HOSTED_COMMANDS = new Set([
   "list",
   "search",

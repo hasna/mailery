@@ -334,6 +334,51 @@ describe("CLI JSON contracts", () => {
     expect(existsSync(dbPath)).toBe(false);
   });
 
+  it("fails self-hosted readiness when local mailbox rows are still authoritative", () => {
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-local-authoritative-"));
+    tempDirs.push(dir);
+    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
+    withSeededCliDb(env, () => {
+      const provider = createProvider({ name: "local-sandbox", type: "sandbox" });
+      storeInboundEmail({
+        provider_id: provider.id,
+        message_id: "<local-authoritative@example.com>",
+        in_reply_to_email_id: null,
+        from_address: "sender@example.com",
+        to_addresses: ["agent@example.com"],
+        cc_addresses: [],
+        subject: "Authoritative local mailbox",
+        text_body: "This local row must be migrated before self-hosted cutover.",
+        html_body: null,
+        attachments: [],
+        attachment_paths: [],
+        headers: {},
+        raw_size: 128,
+        received_at: "2026-07-01T10:00:00.000Z",
+      });
+    });
+
+    const result = runCli(["self-hosted", "check", "--json"], env);
+    expect(result.exitCode).toBe(1);
+    expect(stderrText(result)).toBe("");
+    const parsed = JSON.parse(stdoutText(result)) as {
+      local: { authoritative: boolean; sourcePath: string; mailRows: number; cachePath: string | null };
+      summary: { blockers: string[] };
+      checks: Array<{ name: string; ok: boolean; status: string; fix_commands?: string[] }>;
+    };
+    const localCheck = parsed.checks.find((entry) => entry.name === "local_mailbox_source_of_truth");
+    expect(parsed.local.authoritative).toBe(true);
+    expect(parsed.local.sourcePath).toBe(String(env.EMAILS_DB_PATH));
+    expect(parsed.local.cachePath).toBe(String(env.EMAILS_DB_PATH));
+    expect(parsed.local.mailRows).toBeGreaterThan(0);
+    expect(parsed.summary.blockers).toContain("local_mailbox_source_of_truth");
+    expect(localCheck).toMatchObject({
+      ok: false,
+      status: "local_mailbox_rows_are_authoritative",
+      fix_commands: expect.arrayContaining(["mailery self-hosted migrate-local --json"]),
+    });
+  });
+
   it("refuses empty local-to-self-hosted migrations before creating a local DB", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
     tempDirs.push(dir);

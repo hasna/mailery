@@ -125,6 +125,8 @@ function formatReadinessReport(report: Awaited<ReturnType<typeof import("../../l
     `Runtime enabled: ${report.runtime.enabled ? "yes" : "no"}`,
     `Source of truth: ${report.runtime.sourceOfTruth}`,
     `Local cache: ${report.runtime.localCache}`,
+    `Local cache path: ${report.local.cachePath ?? report.local.sourcePath}`,
+    `Local mailbox rows: ${report.local.mailRows}${report.local.authoritative ? " (authoritative)" : ""}`,
     `Database configured: ${report.runtime.configured ? "yes" : "no"}`,
     `Inbound S3 buckets: ${report.inbound.buckets.length}`,
     `Attachment storage: ${report.attachments.attachment_storage}`,

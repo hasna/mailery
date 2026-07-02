@@ -306,15 +306,34 @@ export interface UpsertMailboxMessageStateInput {
 
 // Domain types
 export type DnsStatus = "pending" | "verified" | "failed";
+export type DomainType = "system" | "tenant" | "self_hosted" | "local_only";
+export type DomainSourceOfTruth = "local" | "postgres" | "cloud";
+export type DomainOwnershipStatus = "pending" | "verified" | "failed";
+export type DomainRouteStatus = "pending" | "ready" | "disabled" | "failed";
+export type DomainMonitoringStatus = "none" | "monitoring" | "clean" | "risky";
 
 export interface Domain {
   id: string;
   provider_id: string;
   domain: string;
+  domain_type: DomainType;
+  source_of_truth: DomainSourceOfTruth;
+  ownership_status: DomainOwnershipStatus;
+  inbound_status: DomainRouteStatus;
+  outbound_status: DomainRouteStatus;
+  monitoring_status: DomainMonitoringStatus;
   dkim_status: DnsStatus;
   spf_status: DnsStatus;
   dmarc_status: DnsStatus;
+  dns_records: Record<string, unknown>;
+  provider_metadata: Record<string, unknown>;
   verified_at: string | null;
+  last_dns_check_at: string | null;
+  last_inbound_check_at: string | null;
+  last_outbound_check_at: string | null;
+  last_monitored_at: string | null;
+  restricted_at: string | null;
+  suspended_at: string | null;
   created_at: string;
   updated_at: string;
 }

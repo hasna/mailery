@@ -1,18 +1,41 @@
 import type { Database } from "./database.js";
 import type { SQLQueryBindings } from "bun:sqlite";
-import type { Domain, DnsStatus } from "../types/index.js";
+import type {
+  Domain,
+  DnsStatus,
+  DomainMonitoringStatus,
+  DomainOwnershipStatus,
+  DomainRouteStatus,
+  DomainSourceOfTruth,
+  DomainType,
+} from "../types/index.js";
 import { DomainNotFoundError } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
+import { parseJsonObject } from "./json.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
 
 interface DomainRow {
   id: string;
   provider_id: string;
   domain: string;
+  domain_type: string;
+  source_of_truth: string;
+  ownership_status: string;
+  inbound_status: string;
+  outbound_status: string;
+  monitoring_status: string;
   dkim_status: string;
   spf_status: string;
   dmarc_status: string;
+  dns_records_json: string | null;
+  provider_metadata_json: string | null;
   verified_at: string | null;
+  last_dns_check_at: string | null;
+  last_inbound_check_at: string | null;
+  last_outbound_check_at: string | null;
+  last_monitored_at: string | null;
+  restricted_at: string | null;
+  suspended_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -20,9 +43,17 @@ interface DomainRow {
 function rowToDomain(row: DomainRow): Domain {
   return {
     ...row,
+    domain_type: row.domain_type as DomainType,
+    source_of_truth: row.source_of_truth as DomainSourceOfTruth,
+    ownership_status: row.ownership_status as DomainOwnershipStatus,
+    inbound_status: row.inbound_status as DomainRouteStatus,
+    outbound_status: row.outbound_status as DomainRouteStatus,
+    monitoring_status: row.monitoring_status as DomainMonitoringStatus,
     dkim_status: row.dkim_status as DnsStatus,
     spf_status: row.spf_status as DnsStatus,
     dmarc_status: row.dmarc_status as DnsStatus,
+    dns_records: parseJsonObject(row.dns_records_json),
+    provider_metadata: parseJsonObject(row.provider_metadata_json),
   };
 }
 
@@ -217,6 +248,56 @@ export function updateDomain(
   params.push(id);
   d.run(`UPDATE domains SET ${sets.join(", ")} WHERE id = ?`, params);
 
+  return getDomain(id, d)!;
+}
+
+export interface DomainReadinessUpdate {
+  domain_type?: DomainType;
+  source_of_truth?: DomainSourceOfTruth;
+  ownership_status?: DomainOwnershipStatus;
+  inbound_status?: DomainRouteStatus;
+  outbound_status?: DomainRouteStatus;
+  monitoring_status?: DomainMonitoringStatus;
+  dns_records?: Record<string, unknown>;
+  provider_metadata?: Record<string, unknown>;
+  last_dns_check_at?: string | null;
+  last_inbound_check_at?: string | null;
+  last_outbound_check_at?: string | null;
+  last_monitored_at?: string | null;
+  restricted_at?: string | null;
+  suspended_at?: string | null;
+}
+
+export function updateDomainReadiness(
+  id: string,
+  input: DomainReadinessUpdate,
+  db?: Database,
+): Domain {
+  const d = db || getDatabase();
+  const domain = getDomain(id, d);
+  if (!domain) throw new DomainNotFoundError(id);
+
+  const sets: string[] = ["updated_at = ?"];
+  const params: (string | null)[] = [now()];
+  const col = (name: string, value: string | null) => { sets.push(`${name} = ?`); params.push(value); };
+
+  if (input.domain_type !== undefined) col("domain_type", input.domain_type);
+  if (input.source_of_truth !== undefined) col("source_of_truth", input.source_of_truth);
+  if (input.ownership_status !== undefined) col("ownership_status", input.ownership_status);
+  if (input.inbound_status !== undefined) col("inbound_status", input.inbound_status);
+  if (input.outbound_status !== undefined) col("outbound_status", input.outbound_status);
+  if (input.monitoring_status !== undefined) col("monitoring_status", input.monitoring_status);
+  if (input.dns_records !== undefined) col("dns_records_json", JSON.stringify(input.dns_records));
+  if (input.provider_metadata !== undefined) col("provider_metadata_json", JSON.stringify(input.provider_metadata));
+  if (input.last_dns_check_at !== undefined) col("last_dns_check_at", input.last_dns_check_at);
+  if (input.last_inbound_check_at !== undefined) col("last_inbound_check_at", input.last_inbound_check_at);
+  if (input.last_outbound_check_at !== undefined) col("last_outbound_check_at", input.last_outbound_check_at);
+  if (input.last_monitored_at !== undefined) col("last_monitored_at", input.last_monitored_at);
+  if (input.restricted_at !== undefined) col("restricted_at", input.restricted_at);
+  if (input.suspended_at !== undefined) col("suspended_at", input.suspended_at);
+
+  params.push(id);
+  d.run(`UPDATE domains SET ${sets.join(", ")} WHERE id = ?`, params);
   return getDomain(id, d)!;
 }
 

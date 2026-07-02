@@ -13,6 +13,7 @@ import {
   listDomainsByProviderIds,
   listUsableDomains,
   updateDomain,
+  updateDomainReadiness,
   deleteDomain,
   updateDnsStatus,
 } from "./domains.js";
@@ -41,6 +42,14 @@ describe("createDomain", () => {
     expect(d.dkim_status).toBe("pending");
     expect(d.spf_status).toBe("pending");
     expect(d.dmarc_status).toBe("pending");
+    expect(d.domain_type).toBe("self_hosted");
+    expect(d.source_of_truth).toBe("local");
+    expect(d.ownership_status).toBe("pending");
+    expect(d.inbound_status).toBe("pending");
+    expect(d.outbound_status).toBe("pending");
+    expect(d.monitoring_status).toBe("none");
+    expect(d.dns_records).toEqual({});
+    expect(d.provider_metadata).toEqual({});
     expect(d.verified_at).toBeNull();
   });
 });
@@ -178,6 +187,43 @@ describe("updateDomain", () => {
 
   it("throws DomainNotFoundError for unknown id", () => {
     expect(() => updateDomain("nonexistent", { dkim_status: "verified" })).toThrow(DomainNotFoundError);
+  });
+});
+
+describe("updateDomainReadiness", () => {
+  it("updates lifecycle fields, snapshots, and verification timestamps", () => {
+    const d = createDomain(providerId, "example.com");
+    const updated = updateDomainReadiness(d.id, {
+      domain_type: "tenant",
+      source_of_truth: "cloud",
+      ownership_status: "verified",
+      inbound_status: "ready",
+      outbound_status: "ready",
+      monitoring_status: "monitoring",
+      dns_records: { dkim: ["selector._domainkey.example.com"] },
+      provider_metadata: { provider: "ses", identity: "example.com" },
+      last_dns_check_at: "2026-07-02T00:00:00.000Z",
+      last_inbound_check_at: "2026-07-02T00:01:00.000Z",
+      last_outbound_check_at: "2026-07-02T00:02:00.000Z",
+      last_monitored_at: "2026-07-02T00:03:00.000Z",
+    });
+
+    expect(updated.domain_type).toBe("tenant");
+    expect(updated.source_of_truth).toBe("cloud");
+    expect(updated.ownership_status).toBe("verified");
+    expect(updated.inbound_status).toBe("ready");
+    expect(updated.outbound_status).toBe("ready");
+    expect(updated.monitoring_status).toBe("monitoring");
+    expect(updated.dns_records).toEqual({ dkim: ["selector._domainkey.example.com"] });
+    expect(updated.provider_metadata).toEqual({ provider: "ses", identity: "example.com" });
+    expect(updated.last_dns_check_at).toBe("2026-07-02T00:00:00.000Z");
+    expect(updated.last_inbound_check_at).toBe("2026-07-02T00:01:00.000Z");
+    expect(updated.last_outbound_check_at).toBe("2026-07-02T00:02:00.000Z");
+    expect(updated.last_monitored_at).toBe("2026-07-02T00:03:00.000Z");
+  });
+
+  it("throws DomainNotFoundError for unknown id", () => {
+    expect(() => updateDomainReadiness("nonexistent", { inbound_status: "ready" })).toThrow(DomainNotFoundError);
   });
 });
 

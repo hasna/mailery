@@ -1891,6 +1891,28 @@ const MIGRATIONS = [
   ${MAIL_ARCHITECTURE_REPAIR_SQL}
   INSERT OR IGNORE INTO _migrations (id) VALUES (44);
   `,
+
+  // Migration 45: per-domain readiness lifecycle and provider/DNS snapshots.
+  `
+  ALTER TABLE domains ADD COLUMN domain_type TEXT NOT NULL DEFAULT 'self_hosted' CHECK(domain_type IN ('system','tenant','self_hosted','local_only'));
+  ALTER TABLE domains ADD COLUMN source_of_truth TEXT NOT NULL DEFAULT 'local' CHECK(source_of_truth IN ('local','postgres','cloud'));
+  ALTER TABLE domains ADD COLUMN ownership_status TEXT NOT NULL DEFAULT 'pending' CHECK(ownership_status IN ('pending','verified','failed'));
+  ALTER TABLE domains ADD COLUMN inbound_status TEXT NOT NULL DEFAULT 'pending' CHECK(inbound_status IN ('pending','ready','disabled','failed'));
+  ALTER TABLE domains ADD COLUMN outbound_status TEXT NOT NULL DEFAULT 'pending' CHECK(outbound_status IN ('pending','ready','disabled','failed'));
+  ALTER TABLE domains ADD COLUMN monitoring_status TEXT NOT NULL DEFAULT 'none' CHECK(monitoring_status IN ('none','monitoring','clean','risky'));
+  ALTER TABLE domains ADD COLUMN dns_records_json TEXT NOT NULL DEFAULT '{}';
+  ALTER TABLE domains ADD COLUMN provider_metadata_json TEXT NOT NULL DEFAULT '{}';
+  ALTER TABLE domains ADD COLUMN last_dns_check_at TEXT;
+  ALTER TABLE domains ADD COLUMN last_inbound_check_at TEXT;
+  ALTER TABLE domains ADD COLUMN last_outbound_check_at TEXT;
+  ALTER TABLE domains ADD COLUMN last_monitored_at TEXT;
+  ALTER TABLE domains ADD COLUMN restricted_at TEXT;
+  ALTER TABLE domains ADD COLUMN suspended_at TEXT;
+  CREATE INDEX IF NOT EXISTS idx_domains_type ON domains(domain_type);
+  CREATE INDEX IF NOT EXISTS idx_domains_source_truth ON domains(source_of_truth);
+  CREATE INDEX IF NOT EXISTS idx_domains_readiness ON domains(ownership_status, inbound_status, outbound_status);
+  INSERT OR IGNORE INTO _migrations (id) VALUES (45);
+  `,
 ];
 
 let _db: Database | null = null;
@@ -1962,6 +1984,22 @@ function ensureSchema(db: Database): void {
   ensureColumn("ALTER TABLE domains ADD COLUMN last_error TEXT");
   ensureColumn("ALTER TABLE domains ADD COLUMN next_check_at TEXT");
 
+  // Migration 45 idempotent guarantee: per-domain readiness lifecycle.
+  ensureColumn("ALTER TABLE domains ADD COLUMN domain_type TEXT NOT NULL DEFAULT 'self_hosted'");
+  ensureColumn("ALTER TABLE domains ADD COLUMN source_of_truth TEXT NOT NULL DEFAULT 'local'");
+  ensureColumn("ALTER TABLE domains ADD COLUMN ownership_status TEXT NOT NULL DEFAULT 'pending'");
+  ensureColumn("ALTER TABLE domains ADD COLUMN inbound_status TEXT NOT NULL DEFAULT 'pending'");
+  ensureColumn("ALTER TABLE domains ADD COLUMN outbound_status TEXT NOT NULL DEFAULT 'pending'");
+  ensureColumn("ALTER TABLE domains ADD COLUMN monitoring_status TEXT NOT NULL DEFAULT 'none'");
+  ensureColumn("ALTER TABLE domains ADD COLUMN dns_records_json TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn("ALTER TABLE domains ADD COLUMN provider_metadata_json TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn("ALTER TABLE domains ADD COLUMN last_dns_check_at TEXT");
+  ensureColumn("ALTER TABLE domains ADD COLUMN last_inbound_check_at TEXT");
+  ensureColumn("ALTER TABLE domains ADD COLUMN last_outbound_check_at TEXT");
+  ensureColumn("ALTER TABLE domains ADD COLUMN last_monitored_at TEXT");
+  ensureColumn("ALTER TABLE domains ADD COLUMN restricted_at TEXT");
+  ensureColumn("ALTER TABLE domains ADD COLUMN suspended_at TEXT");
+
   ensureColumn("ALTER TABLE addresses ADD COLUMN domain_id TEXT");
   ensureColumn("ALTER TABLE addresses ADD COLUMN receive_strategy TEXT");
   ensureColumn("ALTER TABLE addresses ADD COLUMN forward_to TEXT");
@@ -1985,6 +2023,9 @@ function ensureSchema(db: Database): void {
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_domains_provstatus ON domains(provisioning_status)");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_addresses_provstatus ON addresses(provisioning_status)");
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_addresses_domain ON addresses(domain_id)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_domains_type ON domains(domain_type)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_domains_source_truth ON domains(source_of_truth)");
+  ensureProvTable("CREATE INDEX IF NOT EXISTS idx_domains_readiness ON domains(ownership_status, inbound_status, outbound_status)");
 
   // Migration 20 idempotent guarantee: owners + address ownership.
   ensureProvTable(`CREATE TABLE IF NOT EXISTS owners (

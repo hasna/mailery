@@ -1734,6 +1734,28 @@ export const PG_MIGRATIONS: string[] = [
   INSERT INTO _migrations (id) VALUES (45) ON CONFLICT DO NOTHING;
   `,
 
+  // Migration 46: per-domain readiness lifecycle and provider/DNS snapshots.
+  `
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS domain_type TEXT NOT NULL DEFAULT 'self_hosted';
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS source_of_truth TEXT NOT NULL DEFAULT 'local';
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS ownership_status TEXT NOT NULL DEFAULT 'pending';
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS inbound_status TEXT NOT NULL DEFAULT 'pending';
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS outbound_status TEXT NOT NULL DEFAULT 'pending';
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS monitoring_status TEXT NOT NULL DEFAULT 'none';
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS dns_records_json TEXT NOT NULL DEFAULT '{}';
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS provider_metadata_json TEXT NOT NULL DEFAULT '{}';
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS last_dns_check_at TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS last_inbound_check_at TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS last_outbound_check_at TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS last_monitored_at TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS restricted_at TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS suspended_at TEXT;
+  CREATE INDEX IF NOT EXISTS idx_domains_type ON domains(domain_type);
+  CREATE INDEX IF NOT EXISTS idx_domains_source_truth ON domains(source_of_truth);
+  CREATE INDEX IF NOT EXISTS idx_domains_readiness ON domains(ownership_status, inbound_status, outbound_status);
+  INSERT INTO _migrations (id) VALUES (46) ON CONFLICT DO NOTHING;
+  `,
+
   // Feedback table
   `
   CREATE TABLE IF NOT EXISTS feedback (

@@ -117,6 +117,18 @@ export interface MaileryCloudMessage {
   isSpam: boolean;
   isTrash: boolean;
   isArchived: boolean;
+  // Starred flag (E4) — server emits both snake/camel casing on the list projection.
+  isStarred?: boolean;
+  is_starred?: boolean;
+  // Lightweight list-projection fields (bodyless list + delta feed). Present on
+  // GET /messages and GET /messages/changes items, omitted on full GET /messages/:id.
+  threadId?: string | null;
+  thread_id?: string | null;
+  snippet?: string;
+  hasAttachments?: boolean;
+  has_attachments?: boolean;
+  sortAt?: string;
+  sort_at?: string;
   isDeleted?: boolean;
   deleted?: boolean;
   tombstone?: boolean;
@@ -155,6 +167,91 @@ export type MaileryCloudMessageListItem = MaileryCloudMessage | MaileryCloudMess
 export interface MaileryCloudMessagePage {
   data: MaileryCloudMessageListItem[];
   nextCursor: string | null;
+}
+
+// A message label record as returned by the label mutation routes (E3) and the
+// list/read projections (`label_records`).
+export interface MaileryCloudLabelRecord {
+  id: string;
+  name: string;
+  color: string;
+  kind: "system" | "custom";
+}
+
+// Response shape of POST /messages/:id/labels and DELETE /messages/:id/labels/:label.
+export interface MaileryCloudLabelMutationResult {
+  ok: boolean;
+  labels: MaileryCloudLabelRecord[];
+  label_records?: MaileryCloudLabelRecord[];
+  label_names: string[];
+}
+
+// Request body of POST /messages/send (hosted mail). mailboxId is required and the
+// sender domain must be outbound-ready or the server fails closed before charging.
+export interface MaileryCloudSendInput {
+  mailboxId: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject?: string;
+  text?: string;
+  html?: string;
+  replyTo?: string[];
+}
+
+// POST /messages/send returns the created message (publicMessage shape) plus the
+// provider message id and the mail mode. Status 202.
+export interface MaileryCloudSendResult extends MaileryCloudMessageWithAttachments {
+  provider_message_id?: string | null;
+  providerMessageId?: string | null;
+  mode?: string;
+}
+
+// E6 bulk mutation. Either `ids` (explicit, bounded id list) OR a
+// `{ mailboxId, folder }` filter, plus an action. `cursor` resumes a filter drain.
+export type MaileryCloudBulkAction =
+  | "markRead"
+  | "markUnread"
+  | "important"
+  | "unimportant"
+  | "star"
+  | "unstar"
+  | "archive"
+  | "unarchive"
+  | "spam"
+  | "unspam"
+  | "trash"
+  | "untrash"
+  | "addLabel"
+  | "removeLabel"
+  | "delete";
+
+export interface MaileryCloudBulkInput {
+  action: MaileryCloudBulkAction | string;
+  ids?: string[];
+  mailboxId?: string;
+  folder?: string;
+  label?: string;
+  cursor?: string;
+}
+
+export interface MaileryCloudBulkResult {
+  ok: boolean;
+  action: string;
+  affected: number;
+  matched: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+// GET /messages/changes — JMAP changesSince delta feed (created-or-changed live
+// messages since a watermark, ordered by updated_at ASC). Deletions come from
+// listMessageTombstones. Only a mailbox scope is supported alongside updatedSince.
+export interface MaileryCloudMessageChangesQuery {
+  updatedSince?: string;
+  mailboxId?: string;
+  cursor?: string;
+  limit?: number;
 }
 
 export interface MaileryCloudMessageUploadInput {
@@ -333,6 +430,41 @@ function normalizeMessagePageResponse(value: { data: MaileryCloudMessageListItem
   return { data: value.data, nextCursor: value.next_cursor ?? value.nextCursor ?? null };
 }
 
+function normalizeBulkResponse(value: {
+  ok?: boolean;
+  action?: string;
+  affected?: number;
+  matched?: number;
+  hasMore?: boolean;
+  has_more?: boolean;
+  nextCursor?: string | null;
+  next_cursor?: string | null;
+}): MaileryCloudBulkResult {
+  return {
+    ok: value.ok ?? true,
+    action: String(value.action ?? ""),
+    affected: value.affected ?? 0,
+    matched: value.matched ?? 0,
+    hasMore: value.hasMore ?? value.has_more ?? false,
+    nextCursor: value.nextCursor ?? value.next_cursor ?? null,
+  };
+}
+
+function normalizeLabelMutationResponse(value: {
+  ok?: boolean;
+  labels?: MaileryCloudLabelRecord[];
+  label_records?: MaileryCloudLabelRecord[];
+  label_names?: string[];
+}): MaileryCloudLabelMutationResult {
+  const labels = value.labels ?? value.label_records ?? [];
+  return {
+    ok: value.ok ?? true,
+    labels,
+    label_records: value.label_records ?? labels,
+    label_names: value.label_names ?? labels.map((label) => label.name),
+  };
+}
+
 export class MaileryCloudClient {
   private apiUrl: string;
   private token?: string;
@@ -449,14 +581,19 @@ export class MaileryCloudClient {
     return this.request("/mailboxes", { method: "POST", body: input });
   }
 
-  messageGroups(): Promise<MaileryCloudGroupCounts> {
-    return this.request("/messages/groups");
+  messageGroups(opts: { mailboxId?: string } = {}): Promise<MaileryCloudGroupCounts> {
+    const query = opts.mailboxId ? `?mailboxId=${encodeURIComponent(opts.mailboxId)}` : "";
+    return this.request(`/messages/groups${query}`);
   }
 
-  listMessagesPage(opts: { group?: string; q?: string; limit?: number; cursor?: string } = {}): Promise<MaileryCloudMessagePage> {
+  listMessagesPage(opts: { group?: string; q?: string; limit?: number; cursor?: string; mailboxId?: string; direction?: string; threadId?: string } = {}): Promise<MaileryCloudMessagePage> {
     const params = new URLSearchParams();
+    // group covers folder views incl. sent (direction=outbound) and starred (E4/E5).
     if (opts.group) params.set("group", opts.group);
     if (opts.q) params.set("q", opts.q);
+    if (opts.mailboxId) params.set("mailboxId", opts.mailboxId);
+    if (opts.direction) params.set("direction", opts.direction);
+    if (opts.threadId) params.set("threadId", opts.threadId);
     if (opts.limit) params.set("limit", String(opts.limit));
     if (opts.cursor) params.set("cursor", opts.cursor);
     const query = params.toString();
@@ -464,8 +601,28 @@ export class MaileryCloudClient {
       .then(normalizeMessagePageResponse);
   }
 
-  listMessages(opts: { group?: string; q?: string; limit?: number; cursor?: string } = {}): Promise<MaileryCloudMessageListItem[]> {
+  listMessages(opts: { group?: string; q?: string; limit?: number; cursor?: string; mailboxId?: string; direction?: string; threadId?: string } = {}): Promise<MaileryCloudMessageListItem[]> {
     return this.listMessagesPage(opts).then((result) => result.data);
+  }
+
+  // E2: thread grouping. GET /messages?threadId=... returns every message in a
+  // thread (bodyless list projection), newest first. A blank threadId is a 400.
+  listThread(threadId: string, opts: { limit?: number; cursor?: string; mailboxId?: string } = {}): Promise<MaileryCloudMessagePage> {
+    return this.listMessagesPage({ ...opts, threadId });
+  }
+
+  // E1: JMAP changesSince delta feed. GET /messages/changes returns live messages
+  // created-or-changed since `updatedSince`, ordered by updated_at ASC, so a bounded
+  // cache can advance a watermark. Deletions come from listMessageTombstones.
+  listMessageChanges(opts: MaileryCloudMessageChangesQuery = {}): Promise<MaileryCloudMessagePage> {
+    const params = new URLSearchParams();
+    if (opts.updatedSince) params.set("updatedSince", opts.updatedSince);
+    if (opts.mailboxId) params.set("mailboxId", opts.mailboxId);
+    if (opts.cursor) params.set("cursor", opts.cursor);
+    if (opts.limit) params.set("limit", String(opts.limit));
+    const query = params.toString();
+    return this.request<{ data: MaileryCloudMessageListItem[]; next_cursor?: string | null; nextCursor?: string | null }>(`/messages/changes${query ? `?${query}` : ""}`)
+      .then(normalizeMessagePageResponse);
   }
 
   createMessage(input: MaileryCloudMessageUploadInput): Promise<MaileryCloudMessageWithAttachments> {
@@ -477,8 +634,38 @@ export class MaileryCloudClient {
       .then(normalizeMessageResponse);
   }
 
-  patchMessage(id: string, patch: Partial<Pick<MaileryCloudMessage, "isRead" | "isImportant" | "isArchived" | "isSpam" | "isTrash">>): Promise<MaileryCloudMessage> {
+  patchMessage(id: string, patch: Partial<Pick<MaileryCloudMessage, "isRead" | "isImportant" | "isArchived" | "isSpam" | "isTrash" | "isStarred">>): Promise<MaileryCloudMessage> {
     return this.request(`/messages/${encodeURIComponent(id)}`, { method: "PATCH", body: patch });
+  }
+
+  // E4: star/unstar via the flag patch route (bumps updated_at → observed by the delta feed).
+  setMessageStarred(id: string, isStarred: boolean): Promise<MaileryCloudMessage> {
+    return this.patchMessage(id, { isStarred });
+  }
+
+  // POST /api/v1/messages/send — hosted send from an outbound-ready tenant domain.
+  sendMessage(input: MaileryCloudSendInput): Promise<MaileryCloudSendResult> {
+    return this.request<MaileryCloudSendResult>("/messages/send", { method: "POST", body: input })
+      .then((result) => ({ ...result, attachments: result.attachments ?? [] }));
+  }
+
+  // E3: POST /api/v1/messages/:id/labels — add a custom/system label to a message.
+  addMessageLabel(id: string, label: string): Promise<MaileryCloudLabelMutationResult> {
+    return this.request<MaileryCloudLabelMutationResult>(`/messages/${encodeURIComponent(id)}/labels`, { method: "POST", body: { label } })
+      .then(normalizeLabelMutationResponse);
+  }
+
+  // E3: DELETE /api/v1/messages/:id/labels/:label — remove a label (by name). Idempotent.
+  removeMessageLabel(id: string, label: string): Promise<MaileryCloudLabelMutationResult> {
+    return this.request<MaileryCloudLabelMutationResult>(`/messages/${encodeURIComponent(id)}/labels/${encodeURIComponent(label)}`, { method: "DELETE" })
+      .then(normalizeLabelMutationResponse);
+  }
+
+  // E6: POST /api/v1/messages/bulk — bounded, counter-correct bulk mutation over an
+  // explicit id list OR a { mailboxId, folder } filter. Returns counts + a resume cursor.
+  bulkMessageAction(input: MaileryCloudBulkInput): Promise<MaileryCloudBulkResult> {
+    return this.request<Parameters<typeof normalizeBulkResponse>[0]>("/messages/bulk", { method: "POST", body: input })
+      .then(normalizeBulkResponse);
   }
 
   deleteMessage(id: string, input: { reason?: string } = {}): Promise<{ ok: boolean; tombstone: MaileryCloudMessageTombstone }> {

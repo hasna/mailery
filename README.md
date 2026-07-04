@@ -475,14 +475,16 @@ See `docs/SELF_HOSTED_RUNTIME.md` for the source-of-truth contract.
 
 Stored in `~/.hasna/emails/` (SQLite + attachments).
 
-## HTTP mode
+## Transport
 
-Shared Streamable HTTP transport for multi-agent sessions (stdio remains the default):
+The shared Streamable HTTP transport is the default (one process, many agents); pass
+`--stdio` for a per-client stdio server:
 
 ```bash
-mailery-mcp --http              # http://127.0.0.1:8861/mcp
-MCP_HTTP=1 mailery-mcp          # same
-mailery-mcp --http --port 8861  # explicit port
+mailery-mcp                     # http://127.0.0.1:8861/mcp (default)
+mailery-mcp --port 8861         # explicit port
+mailery-mcp --stdio             # stdio transport (one server per client)
+MCP_STDIO=1 mailery-mcp         # same
 ```
 
 - Health: `GET http://127.0.0.1:8861/health` -> `{"status":"ok","name":"mailery"}`

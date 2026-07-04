@@ -7,16 +7,18 @@ import pkg from "../../package.json" with { type: "json" };
 function printHelp(): void {
   console.log(`Usage: mailery-mcp [options]
 
-Runs the @hasna/mailery MCP server (stdio by default).
+Runs the @hasna/mailery MCP server. Transport: shared Streamable HTTP on 127.0.0.1
+by default (one process, many agents); pass --stdio for a stdio server (one per client).
 
 Options:
-      --http         Serve MCP over Streamable HTTP on 127.0.0.1
+      --stdio        Serve MCP over stdio (one server per client) instead of HTTP
+      --http         Serve MCP over Streamable HTTP on 127.0.0.1 (default)
   -p, --port <port>  HTTP port (default: MCP_HTTP_PORT or 8861)
   -V, --version      output the version number
   -h, --help         display help for command
 
 Environment:
-  MCP_HTTP=1         Enable HTTP mode
+  MCP_STDIO=1        Select the stdio transport
   MCP_HTTP_PORT      Override default HTTP port (8861)`);
 }
 

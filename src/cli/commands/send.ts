@@ -1,6 +1,8 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
+import { basename, extname } from "node:path";
+import { resolveMailDataSource, type MailSendAttachment } from "../../lib/mail-data-source.js";
 import { getEmail } from "../../db/emails.js";
 import { getLatestActiveProviderId, getProvider } from "../../db/providers.js";
 import { getTemplate, renderTemplate } from "../../db/templates.js";
@@ -11,6 +13,45 @@ import { getDatabase } from "../../db/database.js";
 import { log } from "../../lib/logger.js";
 import { createSentEmailLedger, setSentEmailThreading, storeSentEmailContent } from "../../lib/sent-ledger.js";
 import { handleError, resolveId } from "../utils.js";
+
+const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024; // 25MB (Resend/SES limit)
+const MAX_ATTACHMENT_COUNT = 10;
+const ATTACHMENT_MIME_TYPES: Record<string, string> = {
+  ".pdf": "application/pdf",
+  ".txt": "text/plain",
+  ".html": "text/html",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".gif": "image/gif",
+  ".zip": "application/zip",
+  ".csv": "text/csv",
+  ".json": "application/json",
+};
+
+// Read + base64-encode attachment files, enforcing the count/size caps. Shared by the
+// local provider path and the cloud seam path so both validate identically.
+function readSendAttachments(paths: string[] | undefined): MailSendAttachment[] {
+  if (!paths || paths.length === 0) return [];
+  if (paths.length > MAX_ATTACHMENT_COUNT) {
+    handleError(new Error(`Too many attachments: ${paths.length} (max ${MAX_ATTACHMENT_COUNT})`));
+  }
+  const attachments: MailSendAttachment[] = [];
+  for (const path of paths) {
+    const stat = statSync(path);
+    if (stat.size > MAX_ATTACHMENT_SIZE) {
+      handleError(new Error(`Attachment "${basename(path)}" is too large: ${(stat.size / 1024 / 1024).toFixed(1)}MB (max 25MB)`));
+    }
+    const content = readFileSync(path);
+    const ext = extname(path).toLowerCase();
+    attachments.push({
+      filename: basename(path),
+      content: content.toString("base64"),
+      content_type: ATTACHMENT_MIME_TYPES[ext] ?? "application/octet-stream",
+    });
+  }
+  return attachments;
+}
 
 export function registerSendCommands(program: Command, _output: (data: unknown, formatted: string) => void): void {
   program
@@ -112,6 +153,45 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
 
         if (!subject) handleError(new Error("Subject is required (use --subject or --template)"));
 
+        // ── cloud mode: send through the server API, not the local provider path ──────
+        // Local-only concerns (provider creds/warming/tracking/scheduling/threading
+        // tables, local ledger) do not apply — the server owns sending. Route the
+        // composed message through the seam so cloud send is server-authoritative.
+        const ds = resolveMailDataSource();
+        if (ds.mode !== "local") {
+          const attachments = readSendAttachments(opts.attachment);
+          if ((opts as Record<string, unknown>).dryRun) {
+            console.log(chalk.bold("\n[DRY RUN] Would send (cloud):"));
+            console.log(`  ${chalk.dim("From:")}    ${opts.from}`);
+            console.log(`  ${chalk.dim("To:")}      ${toAddresses.join(", ")}`);
+            if (opts.cc?.length) console.log(`  ${chalk.dim("CC:")}      ${opts.cc.join(", ")}`);
+            console.log(`  ${chalk.dim("Subject:")} ${subject}`);
+            if (htmlBody) console.log(`  ${chalk.dim("Body:")}    HTML (${htmlBody.length} chars)`);
+            else if (textBody) console.log(`  ${chalk.dim("Body:")}    ${textBody.slice(0, 100)}${textBody.length > 100 ? "..." : ""}`);
+            if (attachments.length) console.log(`  ${chalk.dim("Attachments:")} ${attachments.length} file(s)`);
+            console.log(chalk.yellow("\n  [NOT SENT] Use without --dry-run to send.\n"));
+            return;
+          }
+          const result = await ds.send({
+            from: opts.from,
+            to: toAddresses.join(", "),
+            cc: opts.cc && opts.cc.length > 0 ? opts.cc.join(", ") : undefined,
+            bcc: opts.bcc && opts.bcc.length > 0 ? opts.bcc.join(", ") : undefined,
+            subject,
+            body: textBody ?? "",
+            html: htmlBody,
+            markdown: false,
+            replyTo: opts.replyTo,
+            replyToId: (opts as Record<string, unknown>).inReplyTo as string | undefined,
+            attachments: attachments.length > 0 ? attachments : undefined,
+            scheduledAt: opts.schedule,
+          });
+          incrementSendCounts(allRecipients, db);
+          console.log(chalk.green(`✓ Email sent to ${toAddresses.join(", ")}`));
+          if (result.messageId) console.log(chalk.dim(`  Message ID: ${result.messageId}`));
+          return;
+        }
+
         let providerId: string;
         if (opts.provider) {
           providerId = resolveId("providers", opts.provider);
@@ -149,42 +229,8 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
           }
         }
 
-        // Read attachments
-        const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024; // 25MB (Resend/SES limit)
-        const MAX_ATTACHMENT_COUNT = 10;
-        const attachments = [];
-        if (opts.attachment) {
-          if (opts.attachment.length > MAX_ATTACHMENT_COUNT) {
-            handleError(new Error(`Too many attachments: ${opts.attachment.length} (max ${MAX_ATTACHMENT_COUNT})`));
-          }
-          const { readFileSync, statSync } = await import("node:fs");
-          const { basename, extname } = await import("node:path");
-          for (const path of opts.attachment) {
-            const stat = statSync(path);
-            if (stat.size > MAX_ATTACHMENT_SIZE) {
-              handleError(new Error(`Attachment "${basename(path)}" is too large: ${(stat.size / 1024 / 1024).toFixed(1)}MB (max 25MB)`));
-            }
-            const content = readFileSync(path);
-            const ext = extname(path).toLowerCase();
-            const mimeTypes: Record<string, string> = {
-              ".pdf": "application/pdf",
-              ".txt": "text/plain",
-              ".html": "text/html",
-              ".jpg": "image/jpeg",
-              ".jpeg": "image/jpeg",
-              ".png": "image/png",
-              ".gif": "image/gif",
-              ".zip": "application/zip",
-              ".csv": "text/csv",
-              ".json": "application/json",
-            };
-            attachments.push({
-              filename: basename(path),
-              content: content.toString("base64"),
-              content_type: mimeTypes[ext] ?? "application/octet-stream",
-            });
-          }
-        }
+        // Read attachments (shared reader; validates count/size)
+        const attachments = readSendAttachments(opts.attachment);
 
         // Handle scheduling
         if (opts.schedule) {

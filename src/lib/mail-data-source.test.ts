@@ -405,6 +405,12 @@ describe("ApiMailDataSource writes bypass + invalidate the cache", () => {
     expect(bulk[0]!.body).toMatchObject({ action: "delete", folder: "inbox" });
     expect(bulk[1]!.body).toMatchObject({ action: "delete", folder: "inbox", cursor: "c2" });
   });
+
+  it("clear refuses (never widens to a tenant delete) when the requested scope is unresolvable", async () => {
+    const api = createApi({ mailboxes: [] }); // provider filter cannot resolve to a mailbox
+    await expect(api.dataSource.clear({ providerId: "does-not-exist" })).rejects.toThrow(/does not match a cloud mailbox/i);
+    expect(api.calls.some((c) => c.path === "/api/v1/messages/bulk")).toBe(false);
+  });
 });
 
 describe("ApiMailDataSource delta sync", () => {

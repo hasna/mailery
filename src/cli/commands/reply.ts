@@ -122,7 +122,9 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
     .action(async (id: string, opts: { body: string; html?: boolean; provider?: string; all?: boolean; from?: string }) => {
       try {
         // Cloud mode: read the parent through the seam and reply via the server send API.
-        // Server-side threading is by the send endpoint; local thread tables do not apply.
+        // NOTE: the server /messages/send endpoint carries no in-reply-to/references, so
+        // the reply is delivered as a new message and is not thread-linked server-side.
+        // We report the parent's real thread id (when present) rather than fabricating one.
         const ds = resolveMailDataSource();
         if (ds.mode !== "local") {
           const msg = await ds.getMessage(id);
@@ -131,25 +133,32 @@ export function registerReplyCommand(program: Command, output: (data: unknown, f
           const defaults = replyDefaults(msg);
           const from = opts.from ?? defaults.from;
           if (!from) return handleError(new Error("Could not determine From address; pass --from"));
-          let toList = defaults.to;
-          if (opts.all) {
-            const exclude = new Set([from.toLowerCase(), defaults.to.toLowerCase()]);
-            const extra = msg.to.split(",").map((a) => a.trim()).filter((a) => a && !exclude.has(a.toLowerCase()));
-            toList = [defaults.to, ...extra].filter(Boolean).join(", ");
+          // Base recipients from the reply target; --all folds in the other recipients,
+          // excluding ourselves and de-duping (addresses, not the joined string).
+          const candidates = opts.all ? [defaults.to, ...msg.to.split(",")] : [defaults.to];
+          const seen = new Set<string>();
+          const toArr: string[] = [];
+          for (const raw of candidates.flatMap((value) => value.split(","))) {
+            const addr = raw.trim();
+            if (!addr) continue;
+            const key = addr.toLowerCase();
+            if (key === from.toLowerCase() || seen.has(key)) continue;
+            seen.add(key);
+            toArr.push(addr);
           }
-          const toArr = toList.split(",").map((a) => a.trim()).filter(Boolean);
           const result = await ds.send({
             from,
-            to: toList,
+            to: toArr.join(", "),
             subject: defaults.subject,
             body: opts.html ? "" : opts.body,
             html: opts.html ? opts.body : undefined,
             markdown: false,
             replyToId: id,
           });
-          const threadId = msg.thread_id ?? result.id;
+          const threadId = msg.thread_id ?? null;
+          const suffix = threadId ? ` (thread ${threadId.slice(0, 8)})` : "";
           output({ id: result.id, thread_id: threadId, to: toArr, subject: defaults.subject },
-            chalk.green(`✓ replied to ${toArr.join(", ")} — "${defaults.subject}" (thread ${threadId.slice(0, 8)})`));
+            chalk.green(`✓ replied to ${toArr.join(", ")} — "${defaults.subject}"${suffix}`));
           return;
         }
         const db = getDatabase();

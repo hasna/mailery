@@ -932,6 +932,12 @@ export class ApiMailDataSource implements MailDataSource {
     // requested mailbox/folder filter (default: the inbox folder), following the resume
     // cursor until the server reports no more. Scoped — never an unbounded tenant wipe.
     const source = filter?.source ?? (filter?.providerId ? { providerId: filter.providerId } : undefined);
+    // A requested-but-unresolvable scope must REFUSE rather than silently widen to a
+    // folder-only (tenant-wide) delete — mirrors the read guard (listMailbox returns
+    // nothing for an unresolvable source instead of the whole tenant).
+    if (hasCloudSourceScope(source) && !(await this.resolveCloudMailboxId(source))) {
+      throw new Error("Cannot clear: the requested provider/source does not match a cloud mailbox. Omit the filter to clear the inbox folder, or pass a valid mailbox.");
+    }
     const mailbox: Mailbox = filter?.mailbox ?? "inbox";
     let cleared = 0;
     let cursor: string | undefined;

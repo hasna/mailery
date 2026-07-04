@@ -168,7 +168,9 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
             console.log(`  ${chalk.dim("Subject:")} ${subject}`);
             if (htmlBody) console.log(`  ${chalk.dim("Body:")}    HTML (${htmlBody.length} chars)`);
             else if (textBody) console.log(`  ${chalk.dim("Body:")}    ${textBody.slice(0, 100)}${textBody.length > 100 ? "..." : ""}`);
-            if (attachments.length) console.log(`  ${chalk.dim("Attachments:")} ${attachments.length} file(s)`);
+            // Be honest: cloud send fails closed on these, so a real send would NOT succeed.
+            if (attachments.length) console.log(chalk.yellow(`  Attachments: ${attachments.length} file(s) — NOT supported by cloud send (a real send would fail)`));
+            if (opts.schedule) console.log(chalk.yellow(`  Schedule:    ${opts.schedule} — scheduling is not available in cloud mode (a real send would fail)`));
             console.log(chalk.yellow("\n  [NOT SENT] Use without --dry-run to send.\n"));
             return;
           }

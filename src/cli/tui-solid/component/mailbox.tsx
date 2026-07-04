@@ -122,7 +122,12 @@ export function MailboxRoute() {
           />
           <Button label="Search" onPress={() => mailery.actions.openDialog("search")} />
           <Button label="Digest" onPress={() => mailery.actions.openDialog("digest")} />
-          <Button label="Pull" onPress={() => void pullNow()} />
+          {/* Pull is LOCAL S3→SQLite ingestion. In cloud mode the server ingests and the
+              client syncs via the automatic changesSince delta, so the manual Pull button is
+              meaningless — render it only in local mode. */}
+          <Show when={mailery.mode === "local"}>
+            <Button label="Pull" onPress={() => void pullNow()} />
+          </Show>
         </box>
         <text fg={theme.textMuted}>Page {mailery.state.page + 1}</text>
       </box>

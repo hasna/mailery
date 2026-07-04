@@ -113,12 +113,17 @@ function createCommands(): Accessor<MaileryCommand[]> {
         toast.show({ title: "Refreshed", message: "Local mailbox state reloaded.", tone: "success" });
       },
     },
-    {
-      id: "pull.now",
-      title: "Pull Now",
-      category: "Mail",
-      run: pullNow,
-    },
+    // Pull Now is LOCAL S3→SQLite ingestion. In cloud mode the server ingests and the
+    // client syncs via the automatic changesSince delta, so there is no manual pull —
+    // omit the command entirely so no cloud affordance (palette or shortcut) reaches it.
+    ...(mailery.mode === "local"
+      ? [{
+          id: "pull.now",
+          title: "Pull Now",
+          category: "Mail",
+          run: pullNow,
+        } satisfies MaileryCommand]
+      : []),
     ...MAILBOXES.map((mailbox): MaileryCommand => ({
       id: `mailbox.${mailbox}`,
       title: mailboxLabel(mailbox as Mailbox),

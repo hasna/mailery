@@ -602,6 +602,10 @@ function createMaileryStore(initialMailbox?: Mailbox) {
   return {
     state,
     actions,
+    // Resolved data-source mode ("local" | "cloud"). Same signal pullNow() gates on
+    // (ds.mode), so UI affordances stay in lockstep with the seam: cloud ingestion is
+    // the server's job, so the manual Pull affordance is local-only.
+    mode: ds.mode,
     selectedAddress: currentAddress,
     selectedMessage: currentMessage,
     selectedBody: currentBody,

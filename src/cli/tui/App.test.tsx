@@ -16,6 +16,7 @@ import { createProvider } from "../../db/providers.js";
 import { setSetting } from "./data.js";
 import { App } from "./App.js";
 import { resolveAddressChoice } from "../tui-solid/context/mailery-state.js";
+import { resetMailDataSource } from "../../lib/mail-data-source.js";
 
 let autoPullCalls = 0;
 mock.module("./autopull.js", () => ({
@@ -48,6 +49,9 @@ beforeEach(() => {
   savedHome = process.env["HOME"];
   tmpHome = mkdtempSync(join(tmpdir(), "mailery-solid-tui-"));
   process.env["HOME"] = tmpHome;
+  delete process.env["MAILERY_MODE"];
+  delete process.env["HASNA_EMAILS_MODE"];
+  resetMailDataSource();
   resetDatabase();
   providerId = createProvider({ name: "sandbox", type: "sandbox", active: true }).id;
   const address = createAddress({ provider_id: providerId, email: "ops@example.com" });
@@ -61,6 +65,9 @@ afterEach(() => {
   setup?.renderer.destroy();
   setup = null;
   closeDatabase();
+  delete process.env["MAILERY_MODE"];
+  delete process.env["HASNA_EMAILS_MODE"];
+  resetMailDataSource();
   delete process.env["EMAILS_DB_PATH"];
   delete process.env["EMAILS_TUI_DISABLE_THEME_PROBE"];
   delete process.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"];
@@ -439,5 +446,46 @@ describe("Mailery Solid TUI", () => {
     expect(toastLine).toBeGreaterThanOrEqual(0);
     expect(toastLine).toBeLessThan(8);
     expect(lines[toastLine]!.indexOf("Pull complete")).toBeGreaterThan(58);
+  });
+
+  // The manual Pull affordance triggers LOCAL S3→SQLite ingestion (autoPull). In cloud
+  // mode the server ingests and the client syncs via the automatic changesSince delta, so
+  // Pull is meaningless there — it must render only in local mode (toolbar button AND the
+  // "Pull Now" command palette entry). The toolbar row is isolated by the "Digest" line so
+  // the empty-state "Pull mail…" copy can't be mistaken for the button.
+  const toolbarLine = () => frame().split("\n").find((line) => line.includes("Digest")) ?? "";
+
+  it("shows the Pull toolbar action and command in local mode", async () => {
+    seedMessage("local pull");
+    await renderApp();
+
+    const toolbar = toolbarLine();
+    expect(toolbar).toContain("Digest");
+    expect(toolbar).toContain("Pull");
+
+    // The command palette exposes "Pull Now" (filter to it deterministically).
+    await key("p", { ctrl: true });
+    expect(frame()).toContain("Shortcuts");
+    await typeText("Pull");
+    expect(frame()).toContain("Pull Now");
+  });
+
+  it("hides the Pull toolbar action and command in cloud mode", async () => {
+    process.env["MAILERY_MODE"] = "cloud";
+    resetMailDataSource();
+    await renderApp();
+
+    // Cloud keeps the other toolbar actions but drops the manual Pull button.
+    const toolbar = toolbarLine();
+    expect(toolbar).toContain("Digest");
+    expect(toolbar).toContain("Newest first");
+    expect(toolbar).not.toContain("Pull");
+
+    // The command palette must not expose "Pull Now" in cloud mode.
+    await key("p", { ctrl: true });
+    expect(frame()).toContain("Shortcuts");
+    await typeText("Pull");
+    expect(frame()).not.toContain("Pull Now");
+    expect(frame()).toContain("No matches");
   });
 });

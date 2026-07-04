@@ -736,8 +736,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     });
 
   // ─── READ-STATE / ARCHIVE / STAR / LABELS ─────────────────────────────────
-  // In self-hosted mode these commands write directly to PostgreSQL; local mode
-  // keeps using the SQLite helpers.
+  // These commands write to the local SQLite store via the inbound helpers.
 
   function requireLocal(id: string): string {
     const db = getDatabase();

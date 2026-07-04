@@ -351,6 +351,60 @@ describe("ApiMailDataSource writes bypass + invalidate the cache", () => {
     expect(send).toMatchObject({ method: "POST", path: "/api/v1/messages/send" });
     expect(send.body).toMatchObject({ mailboxId: "mbx_1", to: ["dest@ext.com", "other@ext.com"], subject: "Hi", text: "Body" });
   });
+
+  it("send maps the reply-to header and an explicit html body", async () => {
+    const api = createApi({
+      mailboxes: [{ id: "mbx_1", email: "agent@acme.com" }],
+      sendResponse: { id: "m", provider_message_id: "p", attachments: [] },
+    });
+    await api.dataSource.send({ from: "agent@acme.com", to: "dest@ext.com", subject: "Hi", body: "text", html: "<b>hi</b>", replyTo: "reply@acme.com", markdown: false });
+    expect(api.calls.at(-1)!.body).toMatchObject({ mailboxId: "mbx_1", text: "text", html: "<b>hi</b>", replyTo: ["reply@acme.com"] });
+  });
+
+  it("send fails closed on attachments (the server send endpoint carries none)", async () => {
+    const api = createApi({ mailboxes: [{ id: "mbx_1", email: "agent@acme.com" }] });
+    await expect(api.dataSource.send({
+      from: "agent@acme.com", to: "dest@ext.com", subject: "Hi", body: "Body",
+      attachments: [{ filename: "f.pdf", content: "AA==", content_type: "application/pdf" }],
+    })).rejects.toThrow(/attachments/i);
+    expect(api.calls.some((c) => c.path === "/api/v1/messages/send")).toBe(false);
+  });
+
+  it("send fails closed on scheduling (no server-side schedule)", async () => {
+    const api = createApi({ mailboxes: [{ id: "mbx_1", email: "agent@acme.com" }] });
+    await expect(api.dataSource.send({
+      from: "agent@acme.com", to: "dest@ext.com", subject: "Hi", body: "Body", scheduledAt: "2030-01-01T00:00:00.000Z",
+    })).rejects.toThrow(/schedul/i);
+    expect(api.calls.some((c) => c.path === "/api/v1/messages/send")).toBe(false);
+  });
+
+  it("clear drains a bulk delete over the inbox folder and sums affected", async () => {
+    const calls: RecordedCall[] = [];
+    let bulkPage = 0;
+    const fetchImpl = (async (url: string | URL | Request, req?: RequestInit) => {
+      const u = new URL(String(url));
+      const method = (req?.method ?? "GET").toUpperCase();
+      const body = req?.body ? JSON.parse(String(req.body)) as unknown : undefined;
+      calls.push({ method, path: u.pathname, query: {}, body });
+      if (u.pathname === "/api/v1/messages/bulk" && method === "POST") {
+        bulkPage += 1;
+        return bulkPage === 1
+          ? jsonResponse({ ok: true, action: "delete", affected: 2, matched: 2, has_more: true, next_cursor: "c2" })
+          : jsonResponse({ ok: true, action: "delete", affected: 1, matched: 1, has_more: false, next_cursor: null });
+      }
+      return jsonResponse({ error: { code: "not_found" } }, 404);
+    }) as typeof fetch;
+    const client = new MaileryCloudClient({ apiUrl: "https://mailery.example", token: "t", fetchImpl });
+    const ds = new ApiMailDataSource({ client, cache: new MailCache() });
+
+    const result = await ds.clear();
+
+    expect(result).toEqual({ cleared: 3 });
+    const bulk = calls.filter((c) => c.path === "/api/v1/messages/bulk");
+    expect(bulk).toHaveLength(2);
+    expect(bulk[0]!.body).toMatchObject({ action: "delete", folder: "inbox" });
+    expect(bulk[1]!.body).toMatchObject({ action: "delete", folder: "inbox", cursor: "c2" });
+  });
 });
 
 describe("ApiMailDataSource delta sync", () => {
@@ -549,6 +603,18 @@ describe("SqliteMailDataSource (local, in-memory sqlite)", () => {
     expect(changes.messages.some((m) => m.subject === "recent")).toBe(true);
     expect(changes.deletedIds).toEqual([]);
     expect(changes.watermark).not.toBeNull();
+  });
+
+  it("clear wipes the local inbound store and reports the count", async () => {
+    const ds = new SqliteMailDataSource();
+    seed("a");
+    seed("b");
+    expect((await ds.listMailbox("inbox")).length).toBe(2);
+
+    const result = await ds.clear();
+
+    expect(result).toEqual({ cleared: 2 });
+    expect((await ds.listMailbox("inbox")).length).toBe(0);
   });
 
   it("finds a verification code from candidates", async () => {

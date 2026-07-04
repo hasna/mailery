@@ -32,6 +32,7 @@ import { getMaileryMode, type MaileryMode } from "./mode.js";
 import {
   type AttachmentPath,
   addInboundLabelSummary,
+  clearInboundEmails,
   deleteInboundEmail,
   getInboundAttachmentPaths,
   getInboundEmailSummary,
@@ -128,6 +129,14 @@ export interface MailBulkResult {
   nextCursor: string | null;
 }
 
+/** A file attachment for a send. Cloud send does not carry these yet (see send()). */
+export interface MailSendAttachment {
+  filename: string;
+  /** base64-encoded content. */
+  content: string;
+  content_type: string;
+}
+
 export interface MailSendInput {
   from?: string;
   /** Comma-separated recipient list. */
@@ -136,6 +145,11 @@ export interface MailSendInput {
   bcc?: string;
   subject: string;
   body: string;
+  /**
+   * Explicit HTML body. When set it is used verbatim as the HTML part (e.g. the CLI's
+   * `--html`); otherwise `body` is markdown-rendered unless `markdown === false`.
+   */
+  html?: string;
   markdown?: boolean;
   /** local: outbound provider id. */
   providerId?: string;
@@ -143,11 +157,34 @@ export interface MailSendInput {
   mailboxId?: string;
   /** Message id to reply to (threading). */
   replyToId?: string;
+  /** Reply-To header address(es), comma-separated. */
+  replyTo?: string;
+  /** File attachments. Cloud send rejects these until the server send endpoint carries them. */
+  attachments?: MailSendAttachment[];
+  /** ISO-8601 schedule time. Cloud send rejects this (no server-side scheduling). */
+  scheduledAt?: string;
 }
 
 export interface MailSendResult {
   id: string;
   messageId: string;
+}
+
+/**
+ * Scope for a clear (bulk delete). local wipes the inbound store (optionally by
+ * provider); cloud drains a bulk delete over the mailbox/folder filter.
+ */
+export interface MailClearFilter {
+  /** local: provider filter; cloud: resolves to a mailbox-id scope. */
+  providerId?: string;
+  /** cloud: folder scope (defaults to inbox). local: ignored — the store is wiped. */
+  mailbox?: Mailbox;
+  /** cloud: mailbox/source scope. */
+  source?: MailboxSource;
+}
+
+export interface MailClearResult {
+  cleared: number;
 }
 
 export interface MailDataSource {
@@ -177,6 +214,7 @@ export interface MailDataSource {
   deleteMessage(id: string): Promise<void>;
   bulk(input: MailBulkInput): Promise<MailBulkResult>;
   send(input: MailSendInput): Promise<MailSendResult>;
+  clear(filter?: MailClearFilter): Promise<MailClearResult>;
 }
 
 // ── local mode ───────────────────────────────────────────────────────────────
@@ -335,6 +373,12 @@ export class SqliteMailDataSource implements MailDataSource {
     };
     return localSendComposed(compose);
   }
+
+  async clear(filter?: MailClearFilter): Promise<MailClearResult> {
+    // Local wipe — unchanged behavior: delete the inbound store (optionally scoped to a
+    // provider). The mailbox/source scope is a cloud-only refinement and is a no-op here.
+    return { cleared: clearInboundEmails(filter?.providerId) };
+  }
 }
 
 // ── cloud mode ───────────────────────────────────────────────────────────────
@@ -466,6 +510,10 @@ function hasCloudSourceScope(source?: MailboxSource): boolean {
 // has more, the watermark is NOT advanced and a resume cursor is returned so the next
 // call continues from exactly where this one stopped (no gap, no lost newest rows).
 const CLOUD_MAX_CHANGE_PAGES = 25;
+
+// Safety guard on bulk-delete pages drained by a single clear() so a server that always
+// reports `hasMore` cannot spin forever. Large enough to clear a real mailbox.
+const CLOUD_MAX_CLEAR_PAGES = 1000;
 
 // The changes projection omits updated_at, so the watermark is a client-clock instant.
 // Advancing it slightly in the past guards against modest forward clock skew: the
@@ -846,26 +894,54 @@ export class ApiMailDataSource implements MailDataSource {
   }
 
   async send(input: MailSendInput): Promise<MailSendResult> {
+    // The server /messages/send endpoint carries neither attachments nor a schedule, so
+    // fail closed with a clear message rather than silently dropping them.
+    if (input.attachments && input.attachments.length > 0) {
+      throw new Error("Cloud send does not support attachments yet. Send without --attachment, or use local mode.");
+    }
+    if (input.scheduledAt) {
+      throw new Error("Scheduling is not available in cloud mode. Send without --schedule, or use local mode.");
+    }
     const mailboxId = input.mailboxId ?? await this.resolveCloudMailboxId({ address: input.from });
     if (!mailboxId) throw new Error("cloud send requires a mailboxId (or a `from` matching a cloud mailbox)");
     const toList = input.to.split(",").map((value) => value.trim()).filter(Boolean);
     const ccList = input.cc?.split(",").map((value) => value.trim()).filter(Boolean);
     const bccList = input.bcc?.split(",").map((value) => value.trim()).filter(Boolean);
-    // Match the local compose path: treat the body as markdown by default and send an
-    // HTML part alongside the raw text (opt out with markdown: false).
+    const replyToList = input.replyTo?.split(",").map((value) => value.trim()).filter(Boolean);
+    // Match the local compose path: an explicit HTML body wins; otherwise treat the body
+    // as markdown by default and send an HTML part alongside the raw text (opt out with
+    // markdown: false).
     const useMarkdown = input.markdown !== false && input.body.trim().length > 0;
-    const html = useMarkdown ? renderMarkdown(input.body) : undefined;
+    const html = input.html ?? (useMarkdown ? renderMarkdown(input.body) : undefined);
     const result = await this.client.sendMessage({
       mailboxId,
       to: toList,
       cc: ccList && ccList.length > 0 ? ccList : undefined,
       bcc: bccList && bccList.length > 0 ? bccList : undefined,
+      replyTo: replyToList && replyToList.length > 0 ? replyToList : undefined,
       subject: input.subject,
       text: input.body,
       html,
     });
     this.cache.invalidateWrite();
     return { id: result.id, messageId: firstDefined(result.provider_message_id, result.providerMessageId, result.id) };
+  }
+
+  async clear(filter?: MailClearFilter): Promise<MailClearResult> {
+    // Cloud has no local store to wipe: drain a server-side bulk delete over the
+    // requested mailbox/folder filter (default: the inbox folder), following the resume
+    // cursor until the server reports no more. Scoped — never an unbounded tenant wipe.
+    const source = filter?.source ?? (filter?.providerId ? { providerId: filter.providerId } : undefined);
+    const mailbox: Mailbox = filter?.mailbox ?? "inbox";
+    let cleared = 0;
+    let cursor: string | undefined;
+    for (let page = 0; page < CLOUD_MAX_CLEAR_PAGES; page += 1) {
+      const result = await this.bulk({ action: "delete", mailbox, source, cursor });
+      cleared += result.affected;
+      if (!result.hasMore || !result.nextCursor) break;
+      cursor = result.nextCursor;
+    }
+    return { cleared };
   }
 }
 

@@ -7,6 +7,16 @@
 FROM --platform=linux/arm64 oven/bun:1.3 AS base
 WORKDIR /app
 
+# RDS TLS: bake the Amazon RDS global CA bundle so verify-full DSNs
+# (pg-connection-string treats sslmode=require as verify-full) validate the
+# shared RDS cert chain. NODE_EXTRA_CA_CERTS adds it to Node's trust store.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && curl -fsSL https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+      -o /etc/ssl/certs/rds-global-bundle.pem \
+ && rm -rf /var/lib/apt/lists/*
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/rds-global-bundle.pem
+
 # Install dependencies first for layer caching. bun.lock is not tracked in this
 # repo, so resolve from package.json (production deps only).
 COPY package.json ./

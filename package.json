@@ -27,6 +27,10 @@
     "./cloud": {
       "types": "./dist/cloud.d.ts",
       "import": "./dist/cloud.js"
+    },
+    "./selfhost": {
+      "types": "./dist/selfhost.d.ts",
+      "import": "./dist/selfhost.js"
     }
   },
   "files": [
@@ -44,7 +48,7 @@
     "build:tui-runtime": "bun run scripts/build-tui-runtime.ts",
     "build:mcp": "bun build src/mcp/index.ts --outdir dist/mcp --target bun --packages external --splitting",
     "build:server": "bun build src/server/index.ts --outdir dist/server --target bun --packages external --splitting",
-    "build:lib": "bun build src/index.ts src/storage.ts src/cloud.ts --outdir dist --target bun --packages external --splitting",
+    "build:lib": "bun build src/index.ts src/storage.ts src/cloud.ts src/selfhost.ts --outdir dist --target bun --packages external --splitting",
     "build:types": "tsc --emitDeclarationOnly --outDir dist",
     "test": "bun test",
     "no-cloud:source": "bun test src/no-cloud-boundary.test.ts",
@@ -77,7 +81,7 @@
     "@aws-sdk/client-sts": "^3.1072.0",
     "@aws-sdk/credential-provider-ini": "^3.972.55",
     "@hasna/contacts": "0.6.19",
-    "@hasna/contracts": "^0.2.2",
+    "@hasna/contracts": "0.4.1",
     "@hasna/domains": "0.0.26",
     "@hasna/events": "^0.1.8",
     "@modelcontextprotocol/sdk": "^1.29.0",

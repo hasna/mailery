@@ -4,9 +4,13 @@
   "name": "mailery",
   "class": "service",
   "contractVersion": "v1",
-  "kitVersion": "0.4.1",
+  "kitVersion": "0.4.2",
   "description": "Mailery email management: CLI + MCP + HTTP serve + SDK. Local mode uses SQLite at ~/.hasna/emails/emails.db. The self_hosted cloud service (HASNA_MAILERY_STORAGE_MODE=cloud) is PURE REMOTE per Amendment A1: /health, /ready, /version probes plus an API-key-authenticated /v1 surface (domains, addresses, messages) reading/writing the shared cloud Postgres directly. Does not touch the live mailery.co SaaS database.",
-  "bins": ["mailery", "mailery-mcp", "mailery-serve"],
+  "bins": [
+    "mailery",
+    "mailery-mcp",
+    "mailery-serve"
+  ],
   "storage": {
     "mode": "cloud",
     "envPrefix": "HASNA_MAILERY_",
@@ -17,12 +21,19 @@
   "metadata": {
     "databaseUrlOwnerSecretRef": "hasna/oss/mailery/database-url-owner",
     "apiKeyApp": "mailery",
-    "apiScopes": ["mailery:read", "mailery:write"],
+    "apiScopes": [
+      "mailery:read",
+      "mailery:write"
+    ],
     "signingSecretRef": "hasna/oss/mailery/api-key-signing-secret",
     "healthPath": "/health",
     "readyPath": "/ready",
     "versionPath": "/version",
     "openapiPath": "/openapi.json",
-    "migrateCommand": ["mailery", "db", "migrate"]
+    "migrateCommand": [
+      "mailery",
+      "db",
+      "migrate"
+    ]
   }
 }

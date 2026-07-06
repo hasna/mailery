@@ -1,23 +1,26 @@
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { healthPayload } from "@hasna/mcp-harness";
+import { handleMcpHttpRequest as harnessHandleMcpHttpRequest } from "@hasna/mcp-harness/bun";
 import { DEFAULT_MCP_HTTP_PORT, isHttpMode, isStdioMode, MCP_NAME, resolveHttpPort } from "./options.js";
 
 export { DEFAULT_MCP_HTTP_PORT, isHttpMode, isStdioMode, MCP_NAME, resolveHttpPort };
 
+// mailery MCP HTTP transport — hand-wired onto `@hasna/mcp-harness` (the
+// hand-rolled `WebStandardStreamableHTTPServerTransport` wiring + health
+// payload shape are now shared). Public API (`handleMcpHttpRequest`,
+// `startHttpServer`, the exported constants) is unchanged so `server/index.ts`
+// and the existing tests keep working untouched, and `./server.js` stays a
+// dynamic import so `--help`/`--version` and the health check never pull in
+// the full tool graph.
 export async function handleMcpHttpRequest(req: Request): Promise<Response> {
   const url = new URL(req.url);
 
   if (url.pathname === "/health" && req.method === "GET") {
-    return Response.json({ status: "ok", name: MCP_NAME });
+    return Response.json(healthPayload(MCP_NAME));
   }
 
   if (url.pathname === "/mcp") {
-    const transport = new WebStandardStreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    });
     const { buildServer } = await import("./server.js");
-    const server = buildServer();
-    await server.connect(transport);
-    return transport.handleRequest(req);
+    return harnessHandleMcpHttpRequest(req, buildServer);
   }
 
   return new Response("Not Found", { status: 404 });

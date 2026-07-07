@@ -38,6 +38,14 @@ export function startHttpServer(options: StartHttpServerOptions = {}): ReturnTyp
   const log = options.log ?? console.error;
 
   const server = Bun.serve({
+    // The self-hosted data source pages the cloud /v1 API client-side (no
+    // server-side filter/count), so `inbox status`/`search_inbound` tool calls
+    // can take tens of seconds against a large mailbox. Bun's default
+    // idleTimeout is 10s, which silently closes the streamable-HTTP connection
+    // mid-call ("socket connection closed unexpectedly"). Raise it to Bun's max
+    // (255s) so slow cloud-backed tool calls and the long-lived MCP event
+    // stream survive.
+    idleTimeout: 255,
     port,
     hostname,
     fetch: handleMcpHttpRequest,

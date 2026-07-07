@@ -6,9 +6,12 @@ import { dirname, join, resolve } from "node:path";
 import { sqlEmailAddress, sqlEmailDomain } from "./email-address-sql.js";
 import { cloudStoreFor, isCloudMode } from "./cloud-store.js";
 
-// Resources that are served by the cloud HTTP API in self_hosted mode. Only
-// these route id-resolution to the cloud; everything else stays local.
-const CLOUD_BACKED_RESOURCES = new Set(["domains", "addresses", "messages"]);
+// Resources whose repository is fully routed to the cloud HTTP API in
+// self_hosted mode. Only these route id-resolution to the cloud so it stays
+// consistent with the repo layer; everything else stays local. (addresses and
+// messages exist as cloud resources but their repos are not yet cloud-routed,
+// so they must NOT be resolved against the cloud here.)
+const CLOUD_BACKED_RESOURCES = new Set(["domains"]);
 
 function isInMemoryDb(path: string): boolean {
   return path === ":memory:" || path.startsWith("file::memory:");

@@ -98,6 +98,14 @@ export const knownCommandNames = new Set([
   "browserplan",
   "cloud",
   "db",
+  // Event-integration commands registered dynamically from @hasna/events
+  // (see registerOptionalEventsCommands). They must be recognized here so that
+  // multi-word invocations like `events list` / `channels list` / `webhooks list`
+  // are dispatched to their real handlers instead of being rerouted to the
+  // natural-language `agent` command (which requires an AI credential).
+  "events",
+  "channels",
+  "webhooks",
 ]);
 
 export function routeRootPromptArgs(args: string[]): string[] {
@@ -197,6 +205,12 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "browserplan": return ["browserplan"];
     case "cloud": return ["cloud"];
     case "db": return ["db"];
+    // The event-integration commands are registered separately by
+    // registerOptionalEventsCommands (from @hasna/events), so they need none of
+    // Mailery's own command modules loaded.
+    case "events":
+    case "channels":
+    case "webhooks": return [];
     default: return allCommandModules;
   }
 }

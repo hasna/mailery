@@ -24,8 +24,23 @@ const ALLOWED_KEYS = new Set(["HASNA_MAILERY_API_URL", "HASNA_MAILERY_API_KEY"])
 export function loadStagedCloudEnv(): void {
   try {
     if (process.env["HASNA_MAILERY_API_URL"] && process.env["HASNA_MAILERY_API_KEY"]) return;
-    const mode = (process.env["MAILERY_MODE"] ?? process.env["HASNA_EMAILS_MODE"] ?? "").trim().toLowerCase();
-    if (mode === "local") return;
+    // Explicit local mode via ANY recognized mode signal is the reversible
+    // rollback: it must suppress the staged-file autoload so the CLI/MCP stay on
+    // the local SQLite store. This mirrors the local-mode detection in
+    // resolveCloudConfig() (db/cloud-store.ts), which honors the STANDARD-named
+    // HASNA_MAILERY_STORAGE_MODE plus the MAILERY_MODE/HASNA_EMAILS_* aliases.
+    const modeCandidates = [
+      process.env["HASNA_MAILERY_STORAGE_MODE"],
+      process.env["MAILERY_STORAGE_MODE"],
+      process.env["HASNA_MAILERY_MODE"],
+      process.env["MAILERY_MODE"],
+      process.env["HASNA_EMAILS_STORAGE_MODE"],
+      process.env["EMAILS_STORAGE_MODE"],
+      process.env["HASNA_EMAILS_MODE"],
+    ];
+    for (const candidate of modeCandidates) {
+      if ((candidate ?? "").trim().toLowerCase() === "local") return;
+    }
 
     const file = process.env["HASNA_MAILERY_ENV_FILE"] || join(homedir(), ".hasna", "cloud", "mailery.env");
     if (!existsSync(file)) return;

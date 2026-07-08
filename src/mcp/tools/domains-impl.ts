@@ -2,7 +2,8 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { countUsableDomains, createDomain, listDomains, listUsableDomains, listDomainsByProviderAndNames, deleteDomain, findDomainsByName, getDomain, getDomainByName, updateDnsStatus } from '../../db/domains.js';
-import { countAddressesForReadiness, createAddress, listAddressEmails, listAddressesForReadiness, deleteAddress, getAddress } from '../../db/addresses.js';
+import { countAddressesForReadiness, createAddress, listAddressEmails, listAddressesForReadiness, deleteAddress, getAddress, getAddressByEmail } from '../../db/addresses.js';
+import { isCloudMode } from '../../db/cloud-store.js';
 import { suspendAddress, activateAddress, setAddressQuota } from '../../db/address-lifecycle.js';
 import { createAlias, createCatchAll, removeAlias, getAlias, listAliases, resolveAlias } from '../../db/aliases.js';
 import { createSendKey, listSendKeySummaries, revokeSendKey, getSendKey, canOwnerSendFrom } from '../../db/send-keys.js';
@@ -106,6 +107,16 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ provider_id, domain }) => {
     try {
+      // Cloud (self_hosted) mode: create the domain directly on the cloud HTTP
+      // API. Providers are local-only, so `provider_id` is carried through as a
+      // label rather than resolved against the local providers table or passed
+      // to a provider adapter. Mirrors the CLI `domain add` cloud passthrough.
+      if (isCloudMode()) {
+        const existing = getDomainByName(provider_id, domain);
+        const d = existing ?? createDomain(provider_id, domain);
+        return { content: [{ type: "text", text: JSON.stringify(d, null, 2) }] };
+      }
+
       const resolvedId = resolveId("providers", provider_id);
       const provider = getProvider(resolvedId);
       if (!provider) throw new ProviderNotFoundError(resolvedId);
@@ -467,6 +478,16 @@ export function registerDomainTools(server: McpServer): void {
   },
   async ({ provider_id, email, display_name }) => {
     try {
+      // Cloud (self_hosted) mode: create the address directly on the cloud HTTP
+      // API. Providers are local-only, so `provider_id` is carried through as a
+      // label rather than resolved against the local providers table or passed
+      // to a provider adapter. Mirrors the CLI `address add` cloud passthrough.
+      if (isCloudMode()) {
+        const existing = getAddressByEmail(provider_id, email);
+        const addr = existing ?? createAddress({ provider_id, email, display_name });
+        return { content: [{ type: "text", text: JSON.stringify(addr, null, 2) }] };
+      }
+
       const resolvedId = resolveId("providers", provider_id);
       const provider = getProvider(resolvedId);
       if (!provider) throw new ProviderNotFoundError(resolvedId);

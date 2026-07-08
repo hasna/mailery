@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, afterAll, mock } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,6 +40,17 @@ function defaultParsedMail() {
     headers: new Map(),
   };
 }
+
+// Capture the REAL simpleParser via the deep subpath so it bypasses the
+// process-global `mock.module("mailparser", ...)` registered below (bun applies
+// module mocks eagerly, so importing "mailparser" here would already yield the
+// mock). We restore it in afterAll — otherwise this fixed-date parser leaks
+// into later test files (e.g. server/cloud/ingest-worker.test.ts) run in the
+// same process and corrupts their received_at assertions.
+// @ts-expect-error — deep subpath has no type declarations
+const realSimpleParser = (await import("mailparser/lib/simple-parser.js")).default as (
+  buf: unknown,
+) => Promise<unknown>;
 
 const simpleParserMock = mock(async (_buf: unknown) => ({
   subject: "Test Subject",
@@ -96,6 +107,14 @@ afterEach(() => {
   if (originalHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = originalHome;
   if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
+});
+
+// Restore the real mailparser so the module mock does not leak into other test
+// files run in the same process. Other importers hold a live binding to
+// `simpleParserMock` (the object exported by the module mock), so redirecting
+// its implementation to the real parser is what actually un-leaks it.
+afterAll(() => {
+  simpleParserMock.mockImplementation(realSimpleParser);
 });
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

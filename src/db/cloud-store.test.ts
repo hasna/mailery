@@ -37,6 +37,16 @@ describe("mailery cloud-store resolver (client flip)", () => {
     expect(resolveCloudConfig()).toBeNull();
   });
 
+  test("url + key with NO mode env => inferred cloud (fleet client-flip)", () => {
+    process.env.HASNA_MAILERY_API_URL = "https://mailery.hasna.xyz";
+    process.env.HASNA_MAILERY_API_KEY = "hasna_test_key";
+    resetCloudConfigCache();
+    const cfg = resolveCloudConfig();
+    expect(cfg!.baseUrl).toBe("https://mailery.hasna.xyz/v1");
+    expect(isCloudMode()).toBe(true);
+    expect(cloudStoreFor("domains")!.baseUrl).toBe("https://mailery.hasna.xyz/v1");
+  });
+
   test("mode=self_hosted + url + key => cloud-http with /v1 base", () => {
     process.env.HASNA_MAILERY_STORAGE_MODE = "self_hosted";
     process.env.HASNA_MAILERY_API_URL = "https://mailery.hasna.xyz";

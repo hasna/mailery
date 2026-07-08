@@ -24,6 +24,8 @@ export interface AddressRecord {
   domain: string | null;
   display_name: string | null;
   status: string;
+  verified: boolean;
+  daily_quota: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -258,30 +260,50 @@ export class MaileryCloudStore {
     email: string;
     display_name?: string | null;
     status?: string;
+    verified?: boolean;
+    daily_quota?: number | null;
   }): Promise<AddressRecord> {
     const id = randomUUID();
     const email = input.email.trim().toLowerCase();
     const domain = email.includes("@") ? email.slice(email.indexOf("@") + 1) : null;
     return this.client.one<AddressRecord>(
-      `INSERT INTO addresses (id, email, domain, display_name, status)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO addresses (id, email, domain, display_name, status, verified, daily_quota)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [id, email, domain, input.display_name ?? null, input.status ?? "active"],
+      [id, email, domain, input.display_name ?? null, input.status ?? "active", input.verified ?? false, input.daily_quota ?? null],
     );
   }
 
   async updateAddress(
     id: string,
-    patch: { display_name?: string | null; status?: string },
+    // `dailyQuotaSet` distinguishes "not provided" (keep existing) from an
+    // explicit clear (`daily_quota: null`, the CLI's `quota <id> none`). COALESCE
+    // alone cannot clear a column to NULL, so quota uses a CASE gated on the flag.
+    patch: {
+      display_name?: string | null;
+      status?: string;
+      verified?: boolean;
+      dailyQuotaSet?: boolean;
+      daily_quota?: number | null;
+    },
   ): Promise<AddressRecord | null> {
     return this.client.get<AddressRecord>(
       `UPDATE addresses SET
          display_name = COALESCE($2, display_name),
          status       = COALESCE($3, status),
+         verified     = COALESCE($4, verified),
+         daily_quota  = CASE WHEN $5 THEN $6 ELSE daily_quota END,
          updated_at   = now()
        WHERE id = $1
        RETURNING *`,
-      [id, patch.display_name ?? null, patch.status ?? null],
+      [
+        id,
+        patch.display_name ?? null,
+        patch.status ?? null,
+        patch.verified ?? null,
+        patch.dailyQuotaSet ?? false,
+        patch.dailyQuotaSet ? patch.daily_quota ?? null : null,
+      ],
     );
   }
 

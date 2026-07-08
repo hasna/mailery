@@ -17,7 +17,6 @@ import { join } from "node:path";
 import { registerAddressCommands } from "./address.js";
 import { resetCloudConfigCache } from "../../db/cloud-store.js";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
-import { createAddress } from "../../db/addresses.js";
 import { createProvider } from "../../db/providers.js";
 
 const API_KEY = "hasna_mailery_test_key_addresses_1234";
@@ -133,13 +132,20 @@ describe("address CLI — cloud (self_hosted) routing", () => {
   });
 
   it("does NOT return local addresses when flipped to cloud", async () => {
-    // Seed the local SQLite singleton (same handle the CLI would read); in cloud
-    // mode the CLI must ignore it and show only what the cloud API returns (here:
-    // nothing, because __reset cleared the mock).
+    // Seed the local SQLite island DIRECTLY (raw insert) — the repo helpers
+    // (createAddress) correctly route to the cloud in cloud mode, so they cannot
+    // be used to plant a local-only row. In cloud mode the CLI must ignore this
+    // local row and show only what the cloud API returns (here: nothing, because
+    // __reset cleared the mock).
     resetDatabase();
     const local = getDatabase();
     const provider = createProvider({ name: "sandbox", type: "sandbox" }, local);
-    createAddress({ provider_id: provider.id, email: "local-only@example.com" }, local);
+    const nowIso = new Date().toISOString();
+    local.run(
+      `INSERT INTO addresses (id, provider_id, email, display_name, verified, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 0, ?, ?)`,
+      [crypto.randomUUID(), provider.id, "local-only@example.com", null, nowIso, nowIso],
+    );
 
     const { data, out } = await runAddressCommand(["addresses"]);
     const addresses = (data as Array<{ email: string }>) ?? [];

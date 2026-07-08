@@ -8,10 +8,12 @@ import { cloudStoreFor, isCloudMode } from "./cloud-store.js";
 
 // Resources whose repository is fully routed to the cloud HTTP API in
 // self_hosted mode. Only these route id-resolution to the cloud so it stays
-// consistent with the repo layer; everything else stays local. (addresses and
-// messages exist as cloud resources but their repos are not yet cloud-routed,
-// so they must NOT be resolved against the cloud here.)
-const CLOUD_BACKED_RESOURCES = new Set(["domains"]);
+// consistent with the repo layer; everything else stays local. `domains` and
+// `addresses` repos (src/db/domains.ts, src/db/addresses.ts + address-lifecycle)
+// route ALL reads/writes to the cloud store, so their id-resolution MUST also
+// resolve against the cloud dataset — otherwise a flipped machine resolves ids
+// against its empty local island (the split-brain bug this set exists to close).
+const CLOUD_BACKED_RESOURCES = new Set(["domains", "addresses"]);
 
 function isInMemoryDb(path: string): boolean {
   return path === ":memory:" || path.startsWith("file::memory:");

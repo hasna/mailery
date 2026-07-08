@@ -90,8 +90,39 @@ const INBOUND_SCHEMA = defineMigration(
   `,
 );
 
+/**
+ * Address verification support.
+ *
+ * The client `addresses` resource carries a `verified` flag (the send-readiness
+ * gate + `mailery address verify` / markVerified flow). The original cloud
+ * `addresses` table (0001) omitted it, so a client flipped to the cloud store
+ * could not persist verification. This additive column closes that gap so the
+ * full address CRUD — including verify — round-trips through /v1/addresses.
+ */
+const ADDRESS_VERIFIED_SCHEMA = defineMigration(
+  "0003_mailery_addresses_verified",
+  `
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS verified BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
+);
+
+/**
+ * Per-address daily send quota.
+ *
+ * `mailery address quota <id> <perDay>` (setAddressQuota) caps sends per UTC day
+ * for an address. A flipped client routes this write to /v1/addresses; without a
+ * cloud column the quota would silently only persist on the local island
+ * (split-brain). Nullable: NULL means "no quota" (the CLI's `quota <id> none`).
+ */
+const ADDRESS_QUOTA_SCHEMA = defineMigration(
+  "0004_mailery_addresses_daily_quota",
+  `
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS daily_quota INTEGER;
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function maileryCloudMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
-  return [...authMigrations, CORE_SCHEMA, INBOUND_SCHEMA];
+  return [...authMigrations, CORE_SCHEMA, INBOUND_SCHEMA, ADDRESS_VERIFIED_SCHEMA, ADDRESS_QUOTA_SCHEMA];
 }

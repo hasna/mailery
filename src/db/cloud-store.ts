@@ -116,14 +116,23 @@ function computeConfig(
 ): CloudConfig | null {
   const mode = normalizeMode(modeRaw);
 
-  // Local or unset mode: never route to the API client.
-  if (mode !== "cloud") return null;
+  // Explicit `local` mode always uses the local SQLite store, even when API
+  // URL/key happen to be present in the environment.
+  if (mode === "local") return null;
 
-  // Mode is cloud/self_hosted. The API client is engaged ONLY when both the API
-  // URL and key are present (the task's contract). When NEITHER is set, this is
-  // not an API-client flip (e.g. the legacy self_hosted/DSN config the machine
-  // wrapper still exports) — fall through to the app's existing local/legacy
-  // path rather than erroring.
+  // Engage the cloud API client when the mode is explicitly cloud/self_hosted,
+  // OR when BOTH the API URL and key are set. The latter is the fleet
+  // client-flip contract: `HASNA_<APP>_API_URL` + `HASNA_<APP>_API_KEY` imply
+  // cloud even with no `*_STORAGE_MODE`/`*_MODE` set — parity with
+  // `@hasna/contracts` >= 0.5.1 `resolveClientTransport`, and matching what the
+  // flip writes (URL + key, no storage-mode var).
+  const cloudRequested = mode === "cloud" || Boolean(apiUrl && apiKey);
+  if (!cloudRequested) return null;
+
+  // Cloud requested but NEITHER URL nor key is set: not an API-client flip
+  // (e.g. mode=cloud alongside a legacy config the machine wrapper still
+  // exports) — fall through to the app's existing local/legacy path rather
+  // than erroring.
   if (!apiUrl && !apiKey) return null;
 
   // Partial API config -> fail closed (no silent drift onto the wrong dataset).

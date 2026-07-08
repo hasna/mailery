@@ -1,9 +1,54 @@
 import type { Database } from "./database.js";
 import type { SQLQueryBindings } from "bun:sqlite";
-import type { AddressRow, CreateAddressInput, EmailAddress } from "../types/index.js";
+import type { AddressRow, AddressStatus, CreateAddressInput, EmailAddress } from "../types/index.js";
 import { AddressNotFoundError } from "../types/index.js";
 import { getDatabase, now, uuid } from "./database.js";
 import { safeOffset, safeOptionalLimit } from "./pagination.js";
+import { cloudStoreFor, isCloudMode, type CloudResourceStore } from "./cloud-store.js";
+
+// ============================================================================
+// Cloud (self_hosted) routing
+// ============================================================================
+//
+// When the client-flip resolves to cloud (mode=self_hosted + HASNA_MAILERY_API_URL
+// + HASNA_MAILERY_API_KEY), the `addresses` resource is served by the app's cloud
+// HTTP API (<API_URL>/v1/addresses) instead of the local SQLite store — the same
+// cred-based gate the `domains` resource already uses. The `db` argument is
+// intentionally ignored for the routing decision: the CLI passes an explicit local
+// `getDatabase()` handle to every repo call, so keying on it would defeat cloud
+// routing. Tests never set the cloud env, so isCloudMode() is false there and the
+// local SQLite path is always used.
+const ADDRESS_RESOURCE = "addresses";
+
+function cloudAddresses(_db?: Database): CloudResourceStore | null {
+  if (!isCloudMode()) return null;
+  return cloudStoreFor(ADDRESS_RESOURCE);
+}
+
+/** Map a cloud API address entity to the local EmailAddress shape (defaults filled).
+ *  The self-hosted /v1/addresses record carries {id, email, domain, display_name,
+ *  status, created_at, updated_at}; provider/owner/quota are not modelled in the
+ *  cloud, so they default to null (enrichment then resolves to "-" in the CLI). */
+function apiToAddress(e: Record<string, unknown>): EmailAddress {
+  const str = (v: unknown): string | null => (v == null ? null : String(v));
+  const updatedAt = str(e["updated_at"]) ?? new Date().toISOString();
+  const createdAt = str(e["created_at"]) ?? updatedAt;
+  const status: AddressStatus = str(e["status"]) === "suspended" ? "suspended" : "active";
+  const quota = e["daily_quota"];
+  return {
+    id: String(e["id"]),
+    provider_id: str(e["provider_id"] ?? e["provider"]) ?? "",
+    email: String(e["email"] ?? ""),
+    display_name: str(e["display_name"]),
+    verified: Boolean(e["verified"]),
+    owner_id: str(e["owner_id"]),
+    administrator_id: str(e["administrator_id"]),
+    status,
+    daily_quota: quota == null ? null : Number(quota),
+    created_at: createdAt,
+    updated_at: updatedAt,
+  };
+}
 
 function rowToAddress(row: AddressRow): EmailAddress {
   return {
@@ -64,6 +109,20 @@ export interface AddressReadinessOptions extends ListAddressOptions {
 }
 
 export function listAddresses(provider_id?: string, db?: Database, opts?: ListAddressOptions): EmailAddress[] {
+  const cloud = cloudAddresses(db);
+  if (cloud) {
+    const query: Record<string, string | number | undefined> = {};
+    const lim = safeOptionalLimit(opts?.limit);
+    if (lim !== null) query["limit"] = lim;
+    const off = safeOffset(opts?.offset);
+    if (off) query["offset"] = off;
+    let addresses = cloud.list(query).map(apiToAddress);
+    if (provider_id) addresses = addresses.filter((a) => a.provider_id === provider_id);
+    addresses.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    if (lim !== null) addresses = addresses.slice(off, off + lim);
+    return addresses;
+  }
+
   const d = db || getDatabase();
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);

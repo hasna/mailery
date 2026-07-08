@@ -1,6 +1,6 @@
 {
   "name": "@hasna/mailery",
-  "version": "0.6.112",
+  "version": "0.6.113",
   "description": "Mailery email management CLI + MCP server + dashboard for Resend, AWS SES, and Cloudflare inbound workflows",
   "type": "module",
   "repository": {
@@ -84,7 +84,7 @@
     "@hasna/contracts": "0.4.2",
     "@hasna/domains": "0.0.26",
     "@hasna/events": "^0.1.8",
-    "@hasna/mcp-harness": "file:../open-mcp",
+    "@hasna/mcp-harness": "0.1.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentui/core": "0.4.1",
     "@opentui/keymap": "0.4.1",

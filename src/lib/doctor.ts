@@ -1,6 +1,8 @@
 import { getDatabase } from "../db/database.js";
 import { isCloudMode, cloudStoreFor } from "../db/cloud-store.js";
 import { listProviders } from "../db/providers.js";
+import { listContacts } from "../db/contacts.js";
+import { listTemplates } from "../db/templates.js";
 import { countValue } from "../db/scalars.js";
 import { checkAllProviders } from "./health.js";
 import { loadConfig } from "./config.js";
@@ -155,24 +157,34 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
     });
   }
 
-  // 7. Contacts
-  const contactCounts = d.query(
-    `SELECT
-       COUNT(*) AS total,
-       COALESCE(SUM(CASE WHEN suppressed = 1 THEN 1 ELSE 0 END), 0) AS suppressed
-     FROM contacts`,
-  ).get() as { total: unknown; suppressed: unknown };
-  const contacts = countValue(contactCounts.total);
-  const suppressed = countValue(contactCounts.suppressed);
+  // 7. Contacts — read the active store so a flipped client reports CLOUD
+  // counts, not the (stale/empty) local island the raw SQL used to read.
+  let contacts: number;
+  let suppressed: number;
+  if (isCloudMode()) {
+    const all = listContacts({ limit: 500 });
+    contacts = all.length;
+    suppressed = all.filter((c) => c.suppressed).length;
+  } else {
+    const contactCounts = d.query(
+      `SELECT
+         COUNT(*) AS total,
+         COALESCE(SUM(CASE WHEN suppressed = 1 THEN 1 ELSE 0 END), 0) AS suppressed
+       FROM contacts`,
+    ).get() as { total: unknown; suppressed: unknown };
+    contacts = countValue(contactCounts.total);
+    suppressed = countValue(contactCounts.suppressed);
+  }
   checks.push({
     name: "Contacts",
     status: suppressed > 0 ? "warn" : "pass",
     message: `${contacts} contacts (${suppressed} suppressed)`,
   });
 
-  // 8. Templates
-  const templateCounts = d.query("SELECT COUNT(*) AS total FROM templates").get() as { total: unknown };
-  const templates = countValue(templateCounts.total);
+  // 8. Templates — same store-aware count.
+  const templates = isCloudMode()
+    ? listTemplates(undefined, { limit: 500 }).length
+    : countValue((d.query("SELECT COUNT(*) AS total FROM templates").get() as { total: unknown }).total);
   checks.push({ name: "Templates", status: "pass", message: `${templates} template(s)` });
 
   return checks;

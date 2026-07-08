@@ -157,7 +157,7 @@ export function resolveEmailId(id: string, db?: Database): string | null {
     if (!trimmed) return null;
     if (trimmed.length >= 36) return cloud.get(trimmed) ? trimmed : null;
     const matches = cloud
-      .list({ limit: 1000 })
+      .list({ limit: 1000, direction: "outbound" })
       .map((row) => cstr(row["id"]))
       .filter((mid) => mid.startsWith(trimmed));
     return matches.length === 1 ? matches[0]! : null;
@@ -170,6 +170,11 @@ export function listEmails(filter: EmailFilter = {}, db?: Database): Email[] {
   const cloud = cloudResource(MESSAGE_RESOURCE);
   if (cloud) {
     const { query, limit, offset } = cloudListQuery(filter);
+    // Push the outbound (sent-ledger) selection to the server so the page holds
+    // sent mail — not a date-ordered slice dominated by inbound (which buried
+    // the sent rows and made `log`/`email list` show nothing on a busy inbox).
+    // A pre-counts serve ignores the param; the isOutbound filter still applies.
+    query["direction"] = "outbound";
     let rows = cloud.list(query).filter(isOutbound).map(apiMessageToEmail);
     if (filter.provider_id) rows = rows.filter((e) => e.provider_id === filter.provider_id);
     if (filter.status) {
@@ -242,6 +247,7 @@ export function searchEmails(query: string, opts?: { since?: string; limit?: num
   const cloud = cloudResource(MESSAGE_RESOURCE);
   if (cloud) {
     const { query: q, limit, offset } = cloudListQuery(opts);
+    q["direction"] = "outbound";
     const needle = query.toLowerCase();
     let rows = cloud.list(q).filter(isOutbound).map(apiMessageToEmail);
     rows = rows.filter((e) =>

@@ -11,7 +11,12 @@
 import pg from "pg";
 import type { Pool, PoolConfig } from "pg";
 import { resolveStorageMode, resolveDatabaseUrl } from "./mode.js";
-import { resolveTlsConfig, type TlsResolveOptions } from "./tls.js";
+import {
+  connectionStringWithoutTlsParameters,
+  resolveTlsConfig,
+  sslNegotiationFromConnectionString,
+  type TlsResolveOptions,
+} from "./tls.js";
 import { createQueryClient, type PoolQueryClient } from "./query.js";
 
 export interface CreatePgPoolOptions extends TlsResolveOptions {
@@ -33,9 +38,12 @@ export function createPgPool(options: CreatePgPoolOptions): Pool {
     ...(options.caCertPath !== undefined ? { caCertPath: options.caCertPath } : {}),
     ...(options.env !== undefined ? { env: options.env } : {}),
   });
+  const connectionString = connectionStringWithoutTlsParameters(options.connectionString);
+  const sslnegotiation = sslNegotiationFromConnectionString(options.connectionString);
 
-  const config: PoolConfig = { connectionString: options.connectionString };
+  const config: PoolConfig & { sslnegotiation?: "postgres" | "direct" } = { connectionString };
   if (ssl !== undefined) config.ssl = ssl;
+  if (sslnegotiation !== undefined) config.sslnegotiation = sslnegotiation;
   if (options.max !== undefined) config.max = options.max;
   if (options.idleTimeoutMillis !== undefined) config.idleTimeoutMillis = options.idleTimeoutMillis;
   if (options.connectionTimeoutMillis !== undefined) config.connectionTimeoutMillis = options.connectionTimeoutMillis;

@@ -25,7 +25,8 @@ mode there is no Postgres pool at all; SQLite is authoritative.
 
 ## TLS
 
-`tls.ts` follows libpq `sslmode` semantics exactly:
+`tls.ts` accepts libpq-style `sslmode` names with a stricter, fail-closed
+verification policy:
 
 - `require` — encrypt and verify the server certificate against the configured
   CA bundle or the runtime trust store; verification is never disabled
@@ -44,7 +45,9 @@ changing the trust roots.
 Outside the product container, point `EMAILS_DATABASE_CA_FILE`,
 `PGSSLROOTCERT`, or `NODE_EXTRA_CA_CERTS` at a vetted CA bundle. An explicit
 `caCertPath` supplied to the storage API takes precedence over environment
-settings.
+settings. `sslrootcert` in `EMAILS_DATABASE_URL` is also supported and takes
+precedence over environment settings. Client-certificate URL parameters are
+rejected because silently dropping or partially applying them would be unsafe.
 
 ## Runtime dependency
 

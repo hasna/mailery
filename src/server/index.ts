@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import pkg from "../../package.json" with { type: "json" };
 import { resolveEmailsMode } from "../lib/mode.js";
+import { resolveServerBindOptions } from "./bind-options.js";
 
 const args = process.argv.slice(2);
 if (args.includes("--version") || args.includes("-V")) {
@@ -39,12 +40,10 @@ if (args[0] === "ingest-worker") {
   await runIngestWorker();
 } else if (mode === "self_hosted") {
   const { startSelfHostedServer } = await import("./self-hosted/serve.js");
-  const port = process.env["PORT"] ? parseInt(process.env["PORT"], 10) : 8080;
-  const host = process.env["HOST"] ?? "0.0.0.0";
+  const { port, host } = resolveServerBindOptions(args, process.env, mode);
   await startSelfHostedServer(pkg.version, port, host);
 } else {
   const { startServer } = await import("./serve.js");
-  const port = process.env["PORT"] ? parseInt(process.env["PORT"], 10) : 3900;
-  const host = process.env["HOST"] ?? "127.0.0.1";
+  const { port, host } = resolveServerBindOptions(args, process.env, mode);
   await startServer(port, host);
 }

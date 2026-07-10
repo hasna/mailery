@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { routeModulesFor } from "./api-routes.js";
 
@@ -57,6 +58,50 @@ describe("server startup contract", () => {
     expect(result.exitCode).not.toBe(0);
     expect(combined).toContain("MAILERY_MODE");
     expect(combined).toContain("removed hosted/legacy runtime");
+  });
+
+  it("binds to --host and --port ahead of conflicting HOST and PORT values", async () => {
+    const reservation = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => new Response("reserved"),
+    });
+    const requestedPort = reservation.port;
+    reservation.stop(true);
+
+    const home = mkdtempSync(join(tmpdir(), "emails-serve-flags-"));
+    const child = Bun.spawn({
+      cmd: ["bun", "src/server/index.ts", "--host", "127.0.0.1", "--port", String(requestedPort)],
+      cwd: join(import.meta.dir, "..", ".."),
+      env: {
+        PATH: process.env["PATH"] ?? "",
+        HOME: home,
+        EMAILS_MODE: "local",
+        EMAILS_DB_PATH: ":memory:",
+        HOST: "invalid-host.invalid",
+        PORT: "0",
+        AWS_EC2_METADATA_DISABLED: "true",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    try {
+      let response: Response | undefined;
+      for (let attempt = 0; attempt < 40; attempt++) {
+        try {
+          response = await fetch(`http://127.0.0.1:${requestedPort}/`);
+          break;
+        } catch {
+          await Bun.sleep(50);
+        }
+      }
+      expect(response?.status).toBe(200);
+    } finally {
+      child.kill();
+      await child.exited;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("keeps route modules lazy behind the API dispatcher", () => {

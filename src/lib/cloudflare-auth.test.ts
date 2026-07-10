@@ -17,8 +17,17 @@ describe("resolveCloudflareAuth — priority", () => {
   });
 
   it("uses config global key + email when no token", () => {
-    const auth = resolveCloudflareAuth({ configApiKey: "gk", configEmail: "a@b.com" });
+    const auth = resolveCloudflareAuth({ configApiKey: "gk", configEmail: "a@b.com", env: {} });
     expect(auth).toEqual({ kind: "global", apiKey: "gk", email: "a@b.com" });
+  });
+
+  it("prefers an injected environment token over config global credentials", () => {
+    const auth = resolveCloudflareAuth({
+      configApiKey: "gk",
+      configEmail: "a@b.com",
+      env: { CLOUDFLARE_API_TOKEN: "env-token" },
+    });
+    expect(auth).toEqual({ kind: "token", token: "env-token" });
   });
 
   it("uses CLOUDFLARE_API_KEY + CLOUDFLARE_EMAIL env", () => {

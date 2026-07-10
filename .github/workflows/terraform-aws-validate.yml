@@ -42,6 +42,11 @@ jobs:
           terraform_version: 1.15.8
           terraform_wrapper: false
 
+      - name: Verify Darwin and Linux provider checksums
+        run: |
+          terraform providers lock -platform=darwin_arm64 -platform=linux_amd64
+          git diff --exit-code -- .terraform.lock.hcl
+
       - name: Initialize without backend or AWS credentials
         run: terraform init -backend=false -lockfile=readonly
 

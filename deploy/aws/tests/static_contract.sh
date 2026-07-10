@@ -76,6 +76,11 @@ rg -F -q '".github/workflows/**"' "$workflow" || {
   exit 1
 }
 
+rg -F -q 'terraform providers lock -platform=darwin_arm64 -platform=linux_amd64' "$workflow" || {
+  echo "Terraform CI must verify both development and hosted-runner provider checksums" >&2
+  exit 1
+}
+
 if rg -n 'id-token:[[:space:]]*write|configure-aws-credentials|amazon-ecr-login|role-to-assume|aws configure' "$workflow_dir" --glob '*.y*ml'; then
   echo "workflows must not request AWS credentials or OIDC" >&2
   exit 1

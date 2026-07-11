@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,7 +21,6 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
-  delete process.env["GROQ_API_KEY"];
   if (previousHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = previousHome;
   if (tempHome) rmSync(tempHome, { recursive: true, force: true });
@@ -85,37 +84,18 @@ describe("email digest", () => {
     expect(loaded.id).toBe(digest.id);
   });
 
-  it("generates a Groq-backed digest through injected AI SDK dependencies", async () => {
+  it("fresh generation remains deterministic and local", async () => {
     const email = seedInbound("Board meeting", "2026-06-18T10:00:00.000Z", ["important"]);
-    const generateText = mock(async (opts: Record<string, unknown>) => {
-      expect(String(opts.system)).toContain("read-only email digest agent");
-      expect(String(opts.prompt)).toContain("Board meeting");
-      expect(opts.output).toBeUndefined();
-      return {
-        text: JSON.stringify({
-          summary: "Board meeting mail needs attention.",
-          highlights: ["Board meeting from Digest Sender"],
-          action_items: ["Review the board meeting message."],
-          important_email_ids: [email.id, "not-a-real-id"],
-        }),
-      };
-    });
 
     const digest = await generateEmailDigest({
       period: "today",
-      provider: "groq",
-      model: "llama-3.3-70b-versatile",
       now: new Date("2026-06-18T12:00:00.000Z"),
       db: getDatabase(),
-    }, {
-      model: { provider: "test" },
-      generateText,
-      Output: { object: ({ schema }: { schema: unknown }) => ({ schema }) },
     });
 
-    expect(digest.provider).toBe("groq");
-    expect(digest.summary).toBe("Board meeting mail needs attention.");
+    expect(digest.provider).toBe("local");
+    expect(digest.model).toBe("local-emails-digest");
+    expect(digest.summary).toContain("1 inbound message");
     expect(digest.important_email_ids).toEqual([email.id]);
-    expect(generateText).toHaveBeenCalledTimes(1);
   });
 });

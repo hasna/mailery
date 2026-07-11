@@ -17,6 +17,7 @@ mock.module("../tui/autopull.js", () => ({ autoPull: mockAutoPull }));
 
 const { registerInboxCommands } = await import("./inbox.js");
 const { Command } = await import("commander");
+const { getConfigValue } = await import("../../lib/config.js");
 
 const TMP_HOME = join("/tmp", `emails-inbox-test-${process.pid}`);
 const origHome = process.env["HOME"];
@@ -564,7 +565,7 @@ describe("inbox search — local filter", () => {
 });
 
 describe("inbox source lifecycle", () => {
-  it("lists and retires S3 sources without deleting local mail", async () => {
+	  it("lists and retires S3 sources without deleting local mail", async () => {
     const { db, providerId } = setupDb();
     const email = storeInboundEmail({
       provider_id: providerId,
@@ -583,8 +584,9 @@ describe("inbox source lifecycle", () => {
       received_at: "2026-06-04T11:29:09.000Z",
     }, db);
 
-    await runInboxCommand(["inbox", "source", "add-s3", "--bucket", "mail-bucket", "--prefix", "inbound/example.com/", "--provider", providerId]);
-    const before = await runInboxCommand(["inbox", "source", "list"]);
+	    await runInboxCommand(["inbox", "source", "add-s3", "--bucket", "mail-bucket", "--prefix", "inbound/example.com/", "--provider", providerId]);
+	    expect(getConfigValue("inbound_s3_buckets")).toEqual([{ bucket: "mail-bucket", region: "us-east-1", providerId }]);
+	    const before = await runInboxCommand(["inbox", "source", "list"]);
     expect((before.data as Array<{ type: string; status: string }>).map((source) => `${source.type}:${source.status}`).sort()).toEqual([
       "s3:live",
     ]);
@@ -594,10 +596,24 @@ describe("inbox source lifecycle", () => {
     const after = await runInboxCommand(["inbox", "source", "list"]);
     const s3 = (after.data as Array<{ type: string; status: string; live_sync_enabled: boolean }>).find((source) => source.type === "s3")!;
 
-    expect(s3).toMatchObject({ status: "retired", live_sync_enabled: false });
-    expect(getInboundEmail(email.id, db)?.subject).toBe("Source lifecycle local");
+	    expect(s3).toMatchObject({ status: "retired", live_sync_enabled: false });
+	    expect(getInboundEmail(email.id, db)?.subject).toBe("Source lifecycle local");
+	  });
+
+  it("does not add disabled S3 sources to the refresh bucket list", async () => {
+    const { providerId } = setupDb();
+
+    await runInboxCommand([
+      "inbox", "source", "add-s3",
+      "--bucket", "disabled-bucket",
+      "--prefix", "inbound/example.com/",
+      "--provider", providerId,
+      "--no-live-sync",
+    ]);
+
+    expect(getConfigValue("inbound_s3_buckets")).toBeUndefined();
   });
-});
+	});
 
 describe("inbox code", () => {
   it("prints the newest matching verification code only", async () => {

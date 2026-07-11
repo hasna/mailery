@@ -6,10 +6,8 @@ import { log } from "../../lib/logger.js";
 import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage } from "../utils.js";
 
 type SupportedProviderType = "resend" | "ses" | "sandbox";
-const GMAIL_RETIRED_MESSAGE = "Gmail is no longer an active Emails provider. Use SES, Resend, or Cloudflare inbound routing.";
 
 function parseProviderType(value: string): SupportedProviderType {
-  if (value === "gmail") handleError(new Error(GMAIL_RETIRED_MESSAGE));
   if (value === "resend" || value === "ses" || value === "sandbox") return value;
   handleError(new Error("Provider type must be 'resend', 'ses', or 'sandbox'"));
   return "sandbox";
@@ -86,8 +84,7 @@ export function registerProviderCommands(program: Command, output: (data: unknow
         const lines: string[] = [chalk.bold("\nProviders:")];
         for (const p of providers) {
           const status = p.active ? chalk.green("active") : chalk.yellow("inactive");
-          const legacy = p.type === "gmail" ? chalk.dim(" legacy/import-only") : "";
-          lines.push(`  ${chalk.cyan(p.id.slice(0, 8))}  ${p.name}  [${p.type}]  ${status}${legacy}`);
+          lines.push(`  ${chalk.cyan(p.id.slice(0, 8))}  ${p.name}  [${p.type}]  ${status}`);
         }
         lines.push("");
         lines.push(formatListHint({
@@ -144,7 +141,6 @@ export function registerProviderCommands(program: Command, output: (data: unknow
         if (!resolvedId) handleError(new Error(`Provider not found or ambiguous: ${id}`));
         const existing = getProvider(resolvedId);
         if (!existing) handleError(new Error(`Provider not found: ${id}`));
-        if (existing!.type === "gmail") handleError(new Error(GMAIL_RETIRED_MESSAGE));
 
         const original = { ...existing! };
         const updates: Record<string, string | undefined> = {};
@@ -206,7 +202,6 @@ export function registerProviderCommands(program: Command, output: (data: unknow
     .action(async () => {
       try {
         const providers = listProviders();
-        const supported = providers.filter((p) => p.type !== "gmail");
         if (providers.length === 0) {
           console.log(chalk.dim("No providers configured."));
           console.log(chalk.bold("\nQuick setup:"));
@@ -216,9 +211,8 @@ export function registerProviderCommands(program: Command, output: (data: unknow
           return;
         }
 
-        console.log(chalk.bold(`\nChecking ${supported.length} supported provider(s)...\n`));
-        const legacyGmail = providers.filter((p) => p.type === "gmail");
-        for (const p of supported) {
+        console.log(chalk.bold(`\nChecking ${providers.length} provider(s)...\n`));
+        for (const p of providers) {
           const icon = p.active ? "" : chalk.dim("[inactive] ");
           process.stdout.write(`  ${icon}${chalk.cyan(p.name)} (${p.type}) ... `);
           if (p.type === "ses") {
@@ -248,9 +242,6 @@ export function registerProviderCommands(program: Command, output: (data: unknow
           } else {
             console.log(chalk.dim("sandbox (no auth needed)"));
           }
-        }
-        if (legacyGmail.length > 0) {
-          console.log(chalk.dim(`\nSkipped ${legacyGmail.length} legacy Gmail provider(s); Gmail is import-only now.`));
         }
         console.log();
       } catch (e) {

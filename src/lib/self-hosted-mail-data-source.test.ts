@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
   SelfHostedMailDataSource,
   type SelfHostedFetch,
@@ -9,6 +9,30 @@ import { resetMailDataSource, resolveMailDataSource } from "./mail-data-source.j
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+const LEGACY_ENV_KEYS = [
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+  "HASNA_MAILERY_ENV_FILE",
+] as const;
+
+function clearModeEnv(): void {
+  delete process.env["EMAILS_MODE"];
+  delete process.env["HASNA_EMAILS_MODE"];
+  delete process.env["EMAILS_SELF_HOSTED_URL"];
+  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
+  for (const key of LEGACY_ENV_KEYS) delete process.env[key];
+}
 
 // A self-hosted /v1 message row (snake_case, as the API returns).
 function v1(id: string, over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -109,13 +133,14 @@ function make(rows: Array<Record<string, unknown>>): { ds: SelfHostedMailDataSou
   return { ds, serve };
 }
 
+beforeEach(() => {
+  clearModeEnv();
+});
+
 afterEach(() => {
   resetMailDataSource();
   resetSelfHostedConfigCache();
-  delete process.env["EMAILS_MODE"];
-  delete process.env["HASNA_EMAILS_MODE"];
-  delete process.env["EMAILS_SELF_HOSTED_URL"];
-  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
+  clearModeEnv();
 });
 
 describe("SelfHostedMailDataSource — /v1 resource mapping", () => {

@@ -4,12 +4,11 @@ import { parseResendInbound, parseMailgunInbound, parseMimeEmail } from '../../l
 import { createSequence, getSequence, listSequences, deleteSequence, addStep, listSteps, enroll, unenroll, listEnrollments, type EnrollmentStatus } from '../../db/sequences.js';
 import { createWarmingSchedule, getWarmingSchedule, listWarmingSchedules, updateWarmingStatus, deleteWarmingSchedule } from '../../db/warming.js';
 import { getTodayLimit, getTodaySentCount } from '../../lib/warming.js';
-import { getTriage, listTriagedSummaries, getTriageStats } from '../../db/triage.js';
 import { updateEmailStatus } from '../../db/emails.js';
 import { upsertEvent } from '../../db/events.js';
 import { getDatabase } from '../../db/database.js';
 import { getLatestEmailDigest, normalizeEmailDigestPeriod } from '../../db/email-digests.js';
-import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, checkRateLimit, tooManyRequests, parseInteger, queryInteger, optionalQueryInteger, queryPage } from './helpers.js';
+import { json, notFound, badRequest, internalError, resolveId, resolveIdStrict, resolveOptionalId, parseBody, checkRateLimit, tooManyRequests, queryInteger, queryPage } from './helpers.js';
 import {
   MAILBOXES,
   listMailbox,
@@ -349,55 +348,6 @@ if (path === "/api/digest" && method === "GET") {
   } catch (e) { return internalError(e); }
 }
 
-// POST /api/digest — generate a fresh Groq/Cerebras digest, or local with { local: true }
-if (path === "/api/digest" && method === "POST") {
-  const ip = req.headers.get("x-forwarded-for") ?? "local";
-  if (!checkRateLimit(ip, "digest", 3)) return tooManyRequests();
-  try {
-    const body = await parseBody(req) as Record<string, unknown>;
-    const period = normalizeEmailDigestPeriod(String(body.period ?? "today"));
-    const local = body.local === true || body.offline === true;
-    const { generateEmailDigest, loadEmailDigest } = await import('../../lib/email-digest.js');
-    const digest = local
-      ? await generateEmailDigest({ period, offline: true, limit: Number(body.limit) || undefined })
-      : await loadEmailDigest({
-          period,
-          fresh: true,
-          allowLocalFallback: body.fallback_local === true,
-          limit: Number(body.limit) || undefined,
-          provider: body.provider === "cerebras" || body.provider === "groq" ? body.provider : undefined,
-          model: typeof body.model === "string" ? body.model : undefined,
-        });
-    return json(digest);
-  } catch (e) { return internalError(e); }
-}
-
-// POST /api/agents/organize — categorize/label existing inbound mail
-if (path === "/api/agents/organize" && method === "POST") {
-  const ip = req.headers.get("x-forwarded-for") ?? "local";
-  if (!checkRateLimit(ip, "organize", 3)) return tooManyRequests();
-  try {
-    const body = await parseBody(req) as Record<string, unknown>;
-    const { normalizeEmailAgentKey } = await import('../../db/email-agents.js');
-    const { runEmailOrganization } = await import('../../lib/email-agents.js');
-    const agentList = typeof body.agents === "string"
-      ? body.agents.split(",").map((agent) => normalizeEmailAgentKey(agent))
-      : undefined;
-    const result = await runEmailOrganization({
-      limit: Math.max(1, Math.min(Number(body.limit) || 100, 2000)),
-      all: body.all === true,
-      agents: agentList,
-      force: true,
-      applyLabels: body.skip_labels === true ? false : true,
-      useNetworkTools: body.skip_network === true ? false : undefined,
-      applyActions: body.apply_actions === true,
-      provider: body.provider === "cerebras" || body.provider === "groq" ? body.provider : undefined,
-      model: typeof body.model === "string" ? body.model : undefined,
-    });
-    return json(result);
-  } catch (e) { return internalError(e); }
-}
-
 // ─── SEQUENCES ───────────────────────────────────────────────────────
 
 // GET /api/sequences
@@ -576,86 +526,6 @@ if (warmingDomainMatch && method === "DELETE") {
 }
 
 // ─── TRACKING ────────────────────────────────────────────────────────
-
-// ─── TRIAGE (AI) ──────────────────────────────────────────────────────
-
-// GET /api/triage/stats
-if (path === "/api/triage/stats" && method === "GET") {
-  try {
-    return json(getTriageStats());
-  } catch (e) { return internalError(e); }
-}
-
-// POST /api/triage/batch
-if (path === "/api/triage/batch" && method === "POST") {
-  try {
-    const body = await req.json() as { type?: string; limit?: number; model?: string; skip_draft?: boolean };
-    const type = (body.type === "sent" ? "sent" : "inbound") as "sent" | "inbound";
-    const limit = parseInteger(body.limit, 10, { min: 1, max: 100 });
-    const { triageBatch } = await import('../../lib/triage.js');
-    const result = await triageBatch(type, limit, { model: body.model, skip_draft: body.skip_draft });
-    return json(result);
-  } catch (e) { return internalError(e); }
-}
-
-// POST /api/triage/:id/draft
-const triageDraftMatch = path.match(/^\/api\/triage\/([^/]+)\/draft$/);
-if (triageDraftMatch && method === "POST") {
-  try {
-    const body = await req.json() as { type?: string; model?: string };
-    const type = (body.type === "inbound" ? "inbound" : "sent") as "sent" | "inbound";
-    const { generateDraftForEmail } = await import('../../lib/triage.js');
-    const draft = await generateDraftForEmail(triageDraftMatch[1]!, type, { model: body.model });
-    return json({ draft });
-  } catch (e) { return internalError(e); }
-}
-
-// /api/triage/:id — GET, POST, DELETE
-const triageIdMatch = path.match(/^\/api\/triage\/([^/]+)$/);
-if (triageIdMatch && triageIdMatch[1] !== "batch" && triageIdMatch[1] !== "stats") {
-  const triageTargetId = triageIdMatch[1]!;
-
-  if (method === "GET") {
-    try {
-      const { getTriageById } = await import("../../db/triage.js");
-      const typeParam = url.searchParams.get("type") || "sent";
-      let result = getTriageById(triageTargetId);
-      if (!result) result = getTriage(triageTargetId, typeParam as "sent" | "inbound");
-      if (!result) return notFound("No triage result found");
-      return json(result);
-    } catch (e) { return internalError(e); }
-  }
-
-  if (method === "POST") {
-    try {
-      const body = await req.json() as { type?: string; model?: string; skip_draft?: boolean };
-      const type = (body.type === "inbound" ? "inbound" : "sent") as "sent" | "inbound";
-      const { triageEmail } = await import('../../lib/triage.js');
-      const result = await triageEmail(triageTargetId, type, { model: body.model, skip_draft: body.skip_draft });
-      return json(result);
-    } catch (e) { return internalError(e); }
-  }
-
-  if (method === "DELETE") {
-    try {
-      const { deleteTriage } = await import("../../db/triage.js");
-      const deleted = deleteTriage(triageTargetId);
-      return json({ deleted });
-    } catch (e) { return internalError(e); }
-  }
-}
-
-// GET /api/triage — list triaged emails
-if (path === "/api/triage" && method === "GET") {
-  try {
-    const label = url.searchParams.get("label") || undefined;
-    const priority = optionalQueryInteger(url, "priority", { min: 1 });
-    const sentiment = url.searchParams.get("sentiment") || undefined;
-    const limit = queryInteger(url, "limit", 20, { min: 1, max: 100 });
-    const offset = optionalQueryInteger(url, "offset", { min: 0 });
-    return json(listTriagedSummaries({ label: label as any, priority, sentiment: sentiment as any, limit, offset }));
-  } catch (e) { return internalError(e); }
-}
 
 // GET /track/open/:emailId — record open event, return 1x1 transparent GIF
 const trackOpenMatch = path.match(/^\/track\/open\/([^/]+)$/);

@@ -4,7 +4,6 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandModulesFor, routeRootPromptArgs, shouldPrintVersionEarly, type CommandModule } from "./router.js";
-import { createEmailsEventsClient, getEmailsEventsDataDir } from "../lib/emails-events.js";
 
 function getPackageVersion(): string {
   try {
@@ -43,12 +42,9 @@ async function loadCommandModule(module: CommandModule): Promise<RegisterFn> {
     case "reply": return (await import("./commands/reply.js")).registerReplyCommand;
     case "forwarding": return (await import("./commands/forwarding.js")).registerForwardingCommands;
     case "ui": return (await import("./commands/ui.js")).registerUiCommand;
-    case "triage": return (await import("./commands/triage.js")).registerTriageCommands;
     case "aws": return (await import("./commands/aws.js")).registerAwsCommands;
     case "status": return (await import("./commands/status.js")).registerStatusCommands;
-    case "project-panel": return (await import("./commands/status.js")).registerStatusCommands;
     case "daemon": return (await import("./commands/daemon.js")).registerDaemonCommands;
-    case "browserplan": return (await import("./commands/browserplan.js")).registerBrowserPlanCommands;
     case "db": return (await import("./commands/db.js")).registerDbCommands;
     case "self-hosted": return (await import("./commands/self-hosted.js")).registerSelfHostedCommands;
   }
@@ -59,28 +55,6 @@ async function registerCommandsForArgs(program: Command, output: OutputFn, args:
   const registrars = await Promise.all(commandModulesFor(args).map(loadCommandModule));
   for (const register of registrars) {
     register(program, output);
-  }
-}
-
-async function registerOptionalEventsCommands(program: Command): Promise<void> {
-  try {
-    const importer = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<{
-      registerChannelCommands?: (program: Command, opts: { source: string; dataDir?: string; createClient?: () => unknown; channelsCommandName?: string }) => void;
-      registerEventsCommands?: (program: Command, opts: { source: string; dataDir?: string; createClient?: () => unknown }) => void;
-    }>;
-    const events = await importer("@hasna/events/commander");
-    const eventsOptions = {
-      source: "emails",
-      dataDir: getEmailsEventsDataDir(),
-      createClient: createEmailsEventsClient,
-    };
-    events.registerEventsCommands?.(program, eventsOptions);
-    if (!program.commands.some((command) => command.name() === "webhooks")) {
-      events.registerChannelCommands?.(program, { ...eventsOptions, channelsCommandName: "webhooks" });
-    }
-  } catch {
-    // The events integration is optional; keep the Emails CLI usable when the
-    // companion package is not installed in a global/npm environment.
   }
 }
 
@@ -133,7 +107,6 @@ async function main(): Promise<void> {
   }
 
   await registerCommandsForArgs(program, output, cliArgs);
-  await registerOptionalEventsCommands(program);
 
   if (jsonRequested && !cliArgs.includes("--help") && !cliArgs.includes("-h")) {
     configureJsonCommanderErrors(program);

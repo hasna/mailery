@@ -76,18 +76,6 @@ describe("agent context", () => {
     expect(providerQueries.join("\n")).not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_secret|oauth_refresh_token|oauth_access_token)\b/);
   });
 
-  it("reports legacy Gmail providers separately from active local/self_hosted capabilities", () => {
-    const gmail = createProvider({ name: "old-gmail", type: "gmail" });
-    updateProvider(gmail.id, { active: false });
-
-    const status = getEmailSystemStatus();
-
-    expect(status.mode.current).toBe("local");
-    expect(status.providers.total).toBe(0);
-    expect(status.providers.active).toBe(0);
-    expect(status.providers.legacy_gmail).toBe(1);
-  });
-
   it("summarizes large address tables without hydrating every address as a usable sender", () => {
     const provider = createProvider({ name: "sandbox", type: "sandbox" });
     const usable = markVerified(createAddress({ provider_id: provider.id, email: "usable@example.com" }).id);

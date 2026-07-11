@@ -22,10 +22,9 @@ function sqliteColumns(db: Database, table: string): string[] {
 }
 
 describe("mail architecture data model", () => {
-  it("models one mailbox with active SES/S3 and legacy Gmail sources", () => {
+  it("models one mailbox with active SES/S3 and legacy imported sources", () => {
     const db = getDatabase();
     const ses = createProvider({ name: "SES inbound", type: "ses", region: "us-east-1", access_key: "local-access" }, db);
-    const gmail = createProvider({ name: "Imported Gmail", type: "gmail", oauth_client_id: "client-id" }, db);
     const mailbox = createMailbox({ address: "Ops@Example.com", display_name: "Ops" }, db);
 
     const activeSource = createMailboxSource({
@@ -39,9 +38,8 @@ describe("mail architecture data model", () => {
     }, db);
     const legacySource = createMailboxSource({
       mailbox_id: mailbox.id,
-      provider_id: gmail.id,
-      type: "gmail",
-      name: "Legacy Gmail import",
+      type: "legacy_inbound",
+      name: "Legacy import",
       external_mailbox: "ops@example.com",
       status: "legacy",
     }, db);
@@ -51,7 +49,7 @@ describe("mail architecture data model", () => {
     expect(mailbox.address).toBe("ops@example.com");
     expect(sources.map((source) => [source.id, source.type, source.status])).toEqual([
       [activeSource.id, "ses_s3", "active"],
-      [legacySource.id, "gmail", "legacy"],
+      [legacySource.id, "legacy_inbound", "legacy"],
     ]);
     expect(activeSource.provider_snapshot).toMatchObject({ id: ses.id, name: "SES inbound", type: "ses" });
     expect(JSON.stringify(activeSource.provider_snapshot)).not.toContain("local-access");
@@ -144,7 +142,6 @@ describe("mail architecture data model", () => {
         CREATE TABLE emails (id TEXT PRIMARY KEY, provider_id TEXT);
         CREATE TABLE events (id TEXT PRIMARY KEY, provider_id TEXT);
         CREATE TABLE sandbox_emails (id TEXT PRIMARY KEY, provider_id TEXT);
-        CREATE TABLE gmail_sync_state (provider_id TEXT PRIMARY KEY);
         INSERT INTO providers (id, name, type, region, active, created_at, updated_at)
         VALUES ('provider-ses', 'Backfill SES', 'ses', 'us-east-1', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
         INSERT INTO inbound_emails (
@@ -264,7 +261,6 @@ describe("mail architecture data model", () => {
         CREATE TABLE emails (id TEXT PRIMARY KEY, provider_id TEXT);
         CREATE TABLE events (id TEXT PRIMARY KEY, provider_id TEXT);
         CREATE TABLE sandbox_emails (id TEXT PRIMARY KEY, provider_id TEXT);
-        CREATE TABLE gmail_sync_state (provider_id TEXT PRIMARY KEY);
         INSERT INTO inbound_emails (
           id, provider_id, message_id, from_address, to_addresses, cc_addresses,
           subject, text_body, attachments_json, headers_json, received_at, created_at
@@ -296,7 +292,7 @@ describe("mail architecture data model", () => {
     }
   });
 
-  it("backfills historical Gmail provider mail as legacy source history", () => {
+  it("backfills historical unsupported provider mail as legacy source history", () => {
     const db = new Database(":memory:");
     try {
       db.exec(`
@@ -345,29 +341,28 @@ describe("mail architecture data model", () => {
         CREATE TABLE emails (id TEXT PRIMARY KEY, provider_id TEXT);
         CREATE TABLE events (id TEXT PRIMARY KEY, provider_id TEXT);
         CREATE TABLE sandbox_emails (id TEXT PRIMARY KEY, provider_id TEXT);
-        CREATE TABLE gmail_sync_state (provider_id TEXT PRIMARY KEY);
         INSERT INTO providers (id, name, type, active, created_at, updated_at)
-        VALUES ('provider-gmail', 'Imported Gmail', 'gmail', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+        VALUES ('provider-legacy', 'Imported legacy', 'imap', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
         INSERT INTO inbound_emails (
           id, provider_id, message_id, from_address, to_addresses, cc_addresses,
           subject, text_body, attachments_json, headers_json, received_at, created_at
         )
         VALUES (
-          'gmail-existing', 'provider-gmail', 'gmail-msg-1', 'sender@example.com',
-          '["andrei@hasna.com"]', '[]', 'Imported Gmail', 'body', '[]', '{}',
+          'legacy-existing', 'provider-legacy', 'legacy-msg-1', 'sender@example.com',
+          '["andrei@hasna.com"]', '[]', 'Imported legacy', 'body', '[]', '{}',
           '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
         );
         INSERT INTO inbound_recipients (inbound_email_id, address, domain)
-        VALUES ('gmail-existing', 'andrei@hasna.com', 'hasna.com');
+        VALUES ('legacy-existing', 'andrei@hasna.com', 'hasna.com');
       `);
 
       ensureMailArchitecture(db);
 
       const source = db
-        .query("SELECT type, status FROM mailbox_sources WHERE provider_id = 'provider-gmail'")
+        .query("SELECT type, status FROM mailbox_sources WHERE provider_id = 'provider-legacy'")
         .get() as { type: string; status: string } | null;
 
-      expect(source).toEqual({ type: "gmail", status: "legacy" });
+      expect(source).toEqual({ type: "legacy_inbound", status: "legacy" });
     } finally {
       db.close();
     }
@@ -394,7 +389,7 @@ describe("mail architecture data model", () => {
     const repaired = db
       .query("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_mail_architecture_inbound_insert'")
       .get() as { sql: string } | null;
-    expect(repaired?.sql).toContain("provider.type = 'gmail'");
+    expect(repaired?.sql).toContain("provider.id IS NULL");
     expect(repaired?.sql).not.toBe(stale?.sql);
   });
 
@@ -485,7 +480,7 @@ describe("mail architecture data model", () => {
     const mailbox = createMailbox({ address: "dedupe@example.com" }, db);
     const inbox = getMailboxFolderByRole(mailbox.id, "inbox", db)!;
     const firstSource = createMailboxSource({ mailbox_id: mailbox.id, type: "manual", name: "Manual A" }, db);
-    const secondSource = createMailboxSource({ mailbox_id: mailbox.id, type: "gmail", name: "Gmail B", status: "legacy" }, db);
+    const secondSource = createMailboxSource({ mailbox_id: mailbox.id, type: "legacy_inbound", name: "Legacy B", status: "legacy" }, db);
     const firstMessage = createMailMessage({ subject: "First", received_at: "2026-03-01T00:00:00.000Z" }, db);
     const duplicateMessage = createMailMessage({ subject: "Duplicate", received_at: "2026-03-02T00:00:00.000Z" }, db);
     const otherSourceMessage = createMailMessage({ subject: "Other source", received_at: "2026-03-03T00:00:00.000Z" }, db);
@@ -575,7 +570,6 @@ describe("mail architecture data model", () => {
         CREATE TABLE emails (id TEXT PRIMARY KEY, provider_id TEXT);
         CREATE TABLE events (id TEXT PRIMARY KEY, provider_id TEXT);
         CREATE TABLE sandbox_emails (id TEXT PRIMARY KEY, provider_id TEXT);
-        CREATE TABLE gmail_sync_state (provider_id TEXT PRIMARY KEY);
         INSERT INTO inbound_emails (
           id, provider_id, message_id, from_address, to_addresses, cc_addresses,
           subject, text_body, attachments_json, headers_json, raw_size,

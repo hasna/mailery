@@ -197,6 +197,14 @@ function incrementContactCounts(
   }
   if (counts.size === 0) return;
 
+  const selfHosted = selfHostedResource(CONTACT_RESOURCE);
+  if (selfHosted) {
+    // In self-hosted mode the service is authoritative for message sends and
+    // derived contact counters. The client must not mirror send-count writes
+    // into the local SQLite island.
+    return;
+  }
+
   const d = db || getDatabase();
   const timestamp = now();
   const entries = Array.from(counts.entries());
@@ -269,6 +277,9 @@ export function incrementComplaintCounts(emails: Iterable<string>, db?: Database
 }
 
 export function isContactSuppressed(email: string, db?: Database): boolean {
+  const selfHosted = selfHostedResource(CONTACT_RESOURCE);
+  if (selfHosted) return findSelfHostedContactByEmail(selfHosted, email)?.suppressed === true;
+
   const d = db || getDatabase();
   const row = d.query("SELECT suppressed FROM contacts WHERE email = ?").get(email) as { suppressed: number } | null;
   return row?.suppressed === 1;
@@ -278,6 +289,15 @@ export function getSuppressedEmailSet(emails: Iterable<string>, db?: Database): 
   const uniqueEmails = Array.from(new Set(emails));
   const suppressed = new Set<string>();
   if (uniqueEmails.length === 0) return suppressed;
+
+  const selfHosted = selfHostedResource(CONTACT_RESOURCE);
+  if (selfHosted) {
+    for (const email of uniqueEmails) {
+      const contact = findSelfHostedContactByEmail(selfHosted, email);
+      if (contact?.suppressed) suppressed.add(contact.email);
+    }
+    return suppressed;
+  }
 
   const d = db || getDatabase();
   for (let i = 0; i < uniqueEmails.length; i += CONTACT_READ_CHUNK_SIZE) {

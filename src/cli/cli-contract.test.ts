@@ -219,68 +219,59 @@ describe("CLI JSON contracts", () => {
     expect(parsed.error.fix_commands).toContain("emails provider list --json");
   });
 
-  it("routes natural-language root prompts to the read-only agent", () => {
+  it("keeps natural-language root prompts as command errors instead of routing to AI", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
     tempDirs.push(dir);
     const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
-    delete env.CEREBRAS_API_KEY;
 
     const result = runCli(["--json", "extract", "links", "from", "latest", "email"], env);
     const stderr = new TextDecoder().decode(result.stderr);
 
     expect(result.exitCode).toBe(1);
     const parsed = JSON.parse(stderr) as { error: { message: string; code: string } };
-    expect(parsed.error.code).toBe("auth_error");
-    expect(parsed.error.message).toContain("CEREBRAS_API_KEY");
+    expect(parsed.error.code).toBe("unknown_command");
+    expect(parsed.error.message).toContain("unknown command");
+    expect(parsed.error.message).not.toContain("API_KEY");
   });
 
-  it("routes natural-language links prompts to the read-only agent", () => {
+  it("does not expose the removed ask command", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
     tempDirs.push(dir);
     const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
-    delete env.CEREBRAS_API_KEY;
 
-    const result = runCli(["--json", "links", "from", "latest", "email"], env);
+    const result = runCli(["--json", "ask", "latest"], env);
     const stderr = new TextDecoder().decode(result.stderr);
 
     expect(result.exitCode).toBe(1);
     const parsed = JSON.parse(stderr) as { error: { message: string; code: string } };
-    expect(parsed.error.code).toBe("auth_error");
-    expect(parsed.error.message).toContain("CEREBRAS_API_KEY");
+    expect(parsed.error.code).toBe("unknown_command");
+    expect(parsed.error.message).toContain("unknown command");
   });
 
-  it("honors saved Groq provider config for agent prompts", () => {
+  it("does not advertise cloud AI provider config keys", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
     tempDirs.push(dir);
     const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
-    delete env.CEREBRAS_API_KEY;
-    delete env.GROQ_API_KEY;
 
-    const config = runCli(["config", "set", "ai_provider", "groq"], env);
-    expect(config.exitCode).toBe(0);
+    const result = runCli(["config", "keys", "--verbose"], env);
+    const stdout = stdoutText(result);
 
-    const result = runCli(["--json", "agent", "extract", "links"], env);
-    const stderr = new TextDecoder().decode(result.stderr);
-
-    expect(result.exitCode).toBe(1);
-    const parsed = JSON.parse(stderr) as { error: { message: string; code: string } };
-    expect(parsed.error.code).toBe("auth_error");
-    expect(parsed.error.message).toContain("GROQ_API_KEY");
-    expect(parsed.error.message).not.toContain("CEREBRAS_API_KEY");
+    expect(result.exitCode).toBe(0);
+    expect(stdout).not.toContain("ai_provider");
+    expect(stdout).not.toContain("api_key for `emails agent`");
+    expect(stdout).not.toContain("brave_search_api_key");
   });
 
   it("keeps one-word unknown commands as command errors", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
     tempDirs.push(dir);
     const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
-    delete env.CEREBRAS_API_KEY;
-
     const result = runCli(["definitely-not-a-command"], env);
     const stderr = new TextDecoder().decode(result.stderr);
 
     expect(result.exitCode).not.toBe(0);
     expect(stderr).toContain("unknown command");
-    expect(stderr).not.toContain("CEREBRAS_API_KEY");
+    expect(stderr).not.toContain("API_KEY");
   });
 
   it("rejects the removed cloud command with a JSON unknown-command error", () => {
@@ -296,24 +287,17 @@ describe("CLI JSON contracts", () => {
     expect(parsed.error.message).toContain("unknown command");
   });
 
-  it("prints managed email agent defaults as stable redacted JSON", () => {
+  it("prints local agent context as stable redacted JSON", () => {
     const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
     tempDirs.push(dir);
     const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
-    env.GROQ_API_KEY = "gsk_cli_contract_secret";
 
-    const result = runCli(["--json", "agent", "defaults"], env);
-    const stdout = stdoutText(result);
+    const result = runCli(["--json", "agent", "context"], env);
     const parsed = expectCliJsonOk<{
-      defaultProvider: string;
-      defaultGroqModel: string;
-      credentials: string;
+      status: { mode: { current: string } };
     }>(result);
 
-    expect(parsed.defaultProvider).toBe("groq");
-    expect(parsed.defaultGroqModel).toBe("llama-3.3-70b-versatile");
-    expect(parsed.credentials).toBe("***");
-    expect(stdout).not.toContain("gsk_cli_contract_secret");
+    expect(parsed.status.mode.current).toBe("local");
   });
 
   it("prints valid JSON for inbox list, read, links, and attachments", () => {
@@ -564,46 +548,6 @@ describe("CLI JSON contracts", () => {
 
     const count = expectCliJsonOk<{ count: number }>(runCli(["--json", "sandbox", "count"], env));
     expect(count).toEqual({ count: 1 });
-  });
-
-  it("prints a project panel contract from local Emails state", () => {
-    const dir = mkdtempSync(join(tmpdir(), "emails-cli-contract-"));
-    tempDirs.push(dir);
-    const env = isolatedEnv(join(dir, "emails.db"), join(dir, "home"));
-    const seeded = withSeededCliDb(env, () => {
-      const provider = createProvider({ name: "sandbox", type: "sandbox" });
-      const inbound = storeInboundEmail({
-        provider_id: provider.id,
-        message_id: "project-panel-message",
-        in_reply_to_email_id: null,
-        from_address: "ionut@example.com",
-        to_addresses: ["andrei@example.com"],
-        cc_addresses: [],
-        subject: "Project panel email",
-        text_body: "Body should stay out of the panel.",
-        html_body: null,
-        attachments: [],
-        attachment_paths: [],
-        headers: {},
-        raw_size: 64,
-        received_at: "2026-06-29T00:00:00.000Z",
-      });
-      return { inboundId: inbound.id };
-    });
-
-    const panel = expectCliJsonOk<{
-      schema: string;
-      projectId: string;
-      provider: { kind: string };
-      metrics: Array<{ id: string; value: unknown }>;
-      items: Array<{ id: string }>;
-    }>(runCli(["project-panel", "--project", "Swiss Bank Account", "--json", "--contract"], env));
-
-    expect(panel.schema).toBe("hasna.project_panel.v1");
-    expect(panel.projectId).toBe("swiss-bank-account");
-    expect(panel.provider.kind).toBe("custom");
-    expect(panel.metrics.find((metric) => metric.id === "inbox_unread")?.value).toBe(1);
-    expect(panel.items.some((item) => item.id === seeded.inboundId)).toBe(true);
   });
 
 });

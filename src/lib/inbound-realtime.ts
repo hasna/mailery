@@ -6,7 +6,7 @@
  * A watch daemon long-polls the queue; any notification triggers a dedup-safe
  * `syncS3Inbox` of the bucket/prefix, so the new object is pulled into SQLite
  * immediately. The same notification is also accepted over an HTTP webhook on
- * `emails serve` (see server/routes/agent-api / inbound webhook).
+ * `emails serve` (see the inbound webhook route).
  *
  * The parser and poller here are pure / dependency-injected so they are fully
  * testable without AWS.

@@ -12,7 +12,6 @@ const heavyToolImports = [
   "pg",
   "../../lib/s3-sync.js",
   "../../lib/aws-inbound.js",
-  "../../lib/triage.js",
   "../../lib/send.js",
   "../../lib/sync.js",
   "../../lib/delivery-doctor.js",

@@ -8,7 +8,7 @@
  * runs against an in-process fake Emails Self-hosted API (Bun.serve) that records requests.
  */
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, resetDatabase } from "../../db/database.js";
@@ -27,7 +27,26 @@ afterEach(() => {
 
 function baseLocalEnv(dbPath: string, homePath: string): NodeJS.ProcessEnv {
   mkdirSync(homePath, { recursive: true });
-  const { EMAILS_MODE: _m, HASNA_EMAILS_MODE: _h, EMAILS_SELF_HOSTED_URL: _u, EMAILS_SELF_HOSTED_API_KEY: _k, ...rest } = process.env;
+  const {
+    EMAILS_MODE: _m,
+    HASNA_EMAILS_MODE: _h,
+    EMAILS_SELF_HOSTED_URL: _u,
+    EMAILS_SELF_HOSTED_API_KEY: _k,
+    MAILERY_MODE: _lm,
+    HASNA_MAILERY_MODE: _hlm,
+    MAILERY_STORAGE_MODE: _lsm,
+    HASNA_MAILERY_STORAGE_MODE: _hlsm,
+    EMAILS_STORAGE_MODE: _esm,
+    HASNA_EMAILS_STORAGE_MODE: _hesm,
+    MAILERY_API_URL: _lau,
+    MAILERY_API_KEY: _lak,
+    MAILERY_CLOUD_API_URL: _lcau,
+    MAILERY_CLOUD_TOKEN: _lct,
+    HASNA_MAILERY_API_URL: _hlau,
+    HASNA_MAILERY_API_KEY: _hlak,
+    HASNA_MAILERY_ENV_FILE: _hlef,
+    ...rest
+  } = process.env;
   return { ...rest, EMAILS_DB_PATH: dbPath, HOME: homePath, NO_COLOR: "1", EMAILS_MODE: "local", HASNA_EMAILS_MODE: "local" };
 }
 
@@ -58,11 +77,13 @@ function seedSandboxProvider(dbPath: string, homePath: string): void {
 
 function startFakeSelfHosted() {
   const sent: Array<Record<string, unknown>> = [];
+  const requests: string[] = [];
   const server = Bun.serve({
     port: 0,
     fetch(req) {
       const url = new URL(req.url);
       const path = url.pathname;
+      requests.push(`${req.method} ${path}`);
       const j = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
       if (path === "/v1/messages/send" && req.method === "POST") {
         return req.json().then((body) => {
@@ -73,7 +94,7 @@ function startFakeSelfHosted() {
       return j({ data: [] });
     },
   });
-  return { server, base: `http://127.0.0.1:${server.port}`, sent };
+  return { server, base: `http://127.0.0.1:${server.port}`, sent, requests };
 }
 
 describe("emails send — self_hosted mode routes through the server API", () => {
@@ -83,11 +104,12 @@ describe("emails send — self_hosted mode routes through the server API", () =>
     const homePath = join(dir, "home");
     mkdirSync(homePath, { recursive: true });
 
-    const { server, base, sent } = startFakeSelfHosted();
+    const { server, base, sent, requests } = startFakeSelfHosted();
     cleanups.push(() => server.stop(true));
+    const dbPath = join(dir, "must-not-exist.db");
 
     const env: NodeJS.ProcessEnv = {
-      ...baseLocalEnv(join(dir, "emails.db"), homePath),
+      ...baseLocalEnv(dbPath, homePath),
       EMAILS_MODE: "self_hosted",
       EMAILS_SELF_HOSTED_URL: base,
       EMAILS_SELF_HOSTED_API_KEY: "test-token",
@@ -99,6 +121,10 @@ describe("emails send — self_hosted mode routes through the server API", () =>
     expect(res.out).toContain("Email sent");
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ from: "agent@acme.com", to: ["dest@ext.com"], subject: "Hi", text: "Body text" });
+    expect(requests).toContain("GET /v1/contacts");
+    expect(requests).toContain("POST /v1/messages/send");
+    expect(existsSync(dbPath)).toBe(false);
+    expect(existsSync(join(homePath, ".hasna", "emails", "emails.db"))).toBe(false);
   }, 30_000);
 });
 

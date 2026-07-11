@@ -35,12 +35,11 @@ afterEach(() => {
 });
 
 describe("provider check command", () => {
-  it("skips legacy Gmail providers", async () => {
-    createProvider({ name: "Gmail Import", type: "gmail" });
-
+  it("reports when no providers are configured", async () => {
     const result = await runProviderCommand(["provider", "check"]);
 
-    expect(result.out).toContain("Skipped 1 legacy Gmail provider(s); Gmail is import-only now.");
+    expect(result.out).toContain("No providers configured.");
+    expect(result.out).toContain("emails provider add --type ses");
   });
 });
 

@@ -9,8 +9,6 @@ import { loadConfig, getConfigValue, setConfigValue } from '../../lib/config.js'
 import { normalizeRoute53RegistrationContact } from '../../lib/route53-contact.js';
 import { formatError, resolveId, ProviderNotFoundError } from '../helpers.js';
 
-interface EmailAgent { id: string; name: string; session_id?: string; last_seen_at: string; project_id?: string; }
-const emailAgents = new Map<string, EmailAgent>();
 const MAX_MCP_S3_SYNC_LIMIT = 10000;
 const MAX_MCP_PROVISION_WAIT_SECONDS = 300;
 const MAX_MCP_PROVISION_INTERVAL_SECONDS = 60;
@@ -348,43 +346,6 @@ export function registerInfrastructureTools(server: McpServer): void {
     }
   },
   );
-
-  // ─── Agent Tools ──────────────────────────────────────────────────────────────
-
-  server.tool("register_agent", "Register an agent session. Returns agent_id. Auto-triggers a heartbeat.", {
-  name: z.string(),
-  session_id: z.string().optional(),
-  }, async (params) => {
-  const existing = [...emailAgents.values()].find(a => a.name === params.name);
-  if (existing) { existing.last_seen_at = new Date().toISOString(); if (params.session_id) existing.session_id = params.session_id; return { content: [{ type: "text" as const, text: JSON.stringify(existing) }] }; }
-  const id = Math.random().toString(36).slice(2, 10);
-  const ag: EmailAgent = { id, name: params.name, session_id: params.session_id, last_seen_at: new Date().toISOString() };
-  emailAgents.set(id, ag);
-  return { content: [{ type: "text" as const, text: JSON.stringify(ag) }] };
-  });
-
-  server.tool("heartbeat", "Update last_seen_at to signal agent is active.", {
-  agent_id: z.string(),
-  }, async (params) => {
-  const ag = emailAgents.get(params.agent_id);
-  if (!ag) return { content: [{ type: "text" as const, text: `Agent not found: ${params.agent_id}` }], isError: true };
-  ag.last_seen_at = new Date().toISOString();
-  return { content: [{ type: "text" as const, text: JSON.stringify({ agent_id: ag.id, last_seen_at: ag.last_seen_at }) }] };
-  });
-
-  server.tool("set_focus", "Set active project context for this agent session.", {
-  agent_id: z.string(),
-  project_id: z.string().optional(),
-  }, async (params) => {
-  const ag = emailAgents.get(params.agent_id);
-  if (!ag) return { content: [{ type: "text" as const, text: `Agent not found: ${params.agent_id}` }], isError: true };
-  ag.project_id = params.project_id;
-  return { content: [{ type: "text" as const, text: JSON.stringify({ agent_id: ag.id, project_id: ag.project_id ?? null }) }] };
-  });
-
-  server.tool("list_agents", "List all registered agents.", {}, async () => {
-  return { content: [{ type: "text" as const, text: JSON.stringify([...emailAgents.values()]) }] };
-  });
 
   // ─── PROVISIONING ───────────────────────────────────────────────────────────
 

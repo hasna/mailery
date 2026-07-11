@@ -47,30 +47,26 @@ export async function runDiagnostics(db?: Database, opts: DiagnosticsOptions = {
 
   // 3. Providers
   const providers = listProviders(d);
-  const supportedProviders = providers.filter((provider) => provider.type !== "gmail");
-  const legacyGmailProviders = providers.filter((provider) => provider.type === "gmail");
   if (mode.mode === "self_hosted") {
     checks.push({ name: "Providers", status: "pass", message: "Self-hosted provider configuration is owned by the deployment operator" });
   } else {
     checks.push(
-      supportedProviders.length > 0
+      providers.length > 0
         ? {
             name: "Providers",
             status: "pass",
-            message: `${supportedProviders.length} supported provider(s) configured${legacyGmailProviders.length ? `; ${legacyGmailProviders.length} legacy Gmail import-only provider(s) skipped` : ""}`,
+            message: `${providers.length} provider(s) configured`,
           }
         : {
             name: "Providers",
             status: "warn",
-            message: legacyGmailProviders.length
-              ? `No supported providers configured; ${legacyGmailProviders.length} legacy Gmail import-only provider(s) skipped`
-              : "No supported providers configured",
+            message: "No providers configured",
           },
     );
   }
 
   // 4. Provider health
-  if (mode.mode !== "self_hosted" && supportedProviders.length > 0) {
+  if (mode.mode !== "self_hosted" && providers.length > 0) {
     const health = await checkAllProviders(d, { validateCredentials: opts.liveProviderChecks === true });
     for (const h of health) {
       checks.push({

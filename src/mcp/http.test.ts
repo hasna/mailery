@@ -24,7 +24,6 @@ const { createSequence, enroll } = await import("../db/sequences.js");
 const { createAlias } = await import("../db/aliases.js");
 const { createSendKey } = await import("../db/send-keys.js");
 const { createEmail } = await import("../db/emails.js");
-const { saveTriage } = await import("../db/triage.js");
 
 const servers: Array<ReturnType<typeof startHttpServer>> = [];
 
@@ -72,6 +71,19 @@ describe("emails-mcp HTTP transport", () => {
       ]) {
         expect(tools.tools.some((tool) => tool.name === name)).toBe(true);
       }
+      const removedTools = [
+        ["get", "triage"],
+        ["list", "triaged"],
+        ["triage", "stats"],
+        ["delete", "triage"],
+        ["register", "agent"],
+        ["heart", "beat"],
+        ["set", "focus"],
+        ["list", "agents"],
+      ].map((parts) => parts.join("_"));
+      for (const removed of removedTools) {
+        expect(tools.tools.some((tool) => tool.name === removed)).toBe(false);
+      }
 
       const resources = await client.listResources(undefined, { timeout: 10_000 });
       for (const uri of ["emails://agent/context", "emails://agent/context/full", "emails://status", "emails://domains", "emails://addresses", "emails://recent-errors"]) {
@@ -113,8 +125,6 @@ describe("emails-mcp HTTP transport", () => {
       expect(props("list_emails").limit?.maximum).toBe(1000);
       expect(props("search_emails").limit?.maximum).toBe(1000);
       expect(props("search_emails").offset?.description).toContain("Pagination offset");
-      expect(props("triage_batch").limit?.maximum).toBe(100);
-      expect(props("list_triaged").offset?.default).toBe(0);
       expect(props("sync_s3_inbox").limit?.maximum).toBe(10000);
       expect(props("provision_address").timeout_seconds?.maximum).toBe(300);
       expect(props("provision_address").interval_seconds?.maximum).toBe(60);
@@ -301,55 +311,6 @@ describe("emails-mcp HTTP transport", () => {
       expect(searched.cli_equivalent).toContain("--limit 2 --offset 1");
       expect(searched.items[0]).not.toHaveProperty("idempotency_key");
       expect(JSON.stringify(searched)).not.toContain("mcp-secret");
-    } finally {
-      await client.close();
-    }
-  });
-
-  it("paginates triage listing through MCP", async () => {
-    const db = getDatabase();
-    const provider = createProvider({ name: "triage-provider", type: "sandbox" });
-    for (let i = 0; i < 4; i++) {
-      const email = createEmail(provider.id, {
-        from: "ops@example.com",
-        to: `triaged-${i}@example.com`,
-        subject: `MCP triage ${i}`,
-        text: "body",
-      });
-      const triage = saveTriage({
-        email_id: email.id,
-        label: "fyi",
-        priority: 3,
-        summary: `MCP summary ${i}`,
-        draft_reply: `MCP large draft ${i} `.repeat(500),
-      });
-      db.run("UPDATE email_triage SET triaged_at = ?, created_at = ? WHERE id = ?", [
-        `2026-01-01T00:0${i}:00.000Z`,
-        `2026-01-01T00:0${i}:00.000Z`,
-        triage.id,
-      ]);
-    }
-
-    const server = startHttpServer({ port: 0, log: () => {} });
-    servers.push(server);
-
-    const client = new Client({ name: "emails-mcp-triage-paging-test", version: "1.0.0" }, { capabilities: {} });
-    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`));
-
-    try {
-      await client.connect(transport, { timeout: 10_000 });
-      const result = await client.callTool(
-        { name: "list_triaged", arguments: { limit: 2, offset: 1 } },
-        undefined,
-        { timeout: 10_000 },
-      );
-      const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-      const parsed = JSON.parse(text) as Array<Record<string, unknown>> | { items: Array<Record<string, unknown>> };
-      const rows = Array.isArray(parsed) ? parsed : parsed.items;
-
-      expect(rows.map((row) => row.summary)).toEqual(["MCP summary 2", "MCP summary 1"]);
-      expect(rows[0]).not.toHaveProperty("draft_reply");
-      expect(JSON.stringify(rows)).not.toContain("MCP large draft");
     } finally {
       await client.close();
     }

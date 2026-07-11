@@ -66,9 +66,6 @@ export async function runProviderTool(name: ProviderToolName, input: Record<stri
       }
       case "add_provider": {
         const providerInput = createProviderInput(input);
-        if (providerInput.type === "gmail") {
-          return text("Error: Gmail is no longer an active Emails provider. Use SES, Resend, or Cloudflare inbound routing.", true);
-        }
         const provider = createProvider(providerInput);
 
         if (!input["skip_validation"] && provider.type !== "sandbox") {

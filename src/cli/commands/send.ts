@@ -9,7 +9,7 @@ import { getTemplate, renderTemplate } from "../../db/templates.js";
 import { getSuppressedEmailSet, incrementSendCounts } from "../../db/contacts.js";
 import { createScheduledEmail } from "../../db/scheduled.js";
 import { getGroupByName, listMembers } from "../../db/groups.js";
-import { getDatabase } from "../../db/database.js";
+import { getDatabase, type Database } from "../../db/database.js";
 import { log } from "../../lib/logger.js";
 import { createSentEmailLedger, setSentEmailThreading, storeSentEmailContent } from "../../lib/sent-ledger.js";
 import { handleError, resolveId } from "../utils.js";
@@ -102,11 +102,21 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
       trackingUrl?: string;
     }) => {
       try {
-        const db = getDatabase();
+        const ds = resolveMailDataSource();
+        const selfHosted = ds.mode !== "local";
+        let localDatabase: Database | null = null;
+        const localDb = (): Database => {
+          localDatabase ??= getDatabase();
+          return localDatabase;
+        };
 
         // Resolve recipients from --to or --to-group
         let toAddresses: string[] = opts.to || [];
         if (opts.toGroup) {
+          if (selfHosted) {
+            handleError(new Error("--to-group is not available in self_hosted mode without a self-hosted group-members API. Pass explicit --to recipients."));
+          }
+          const db = localDb();
           const group = getGroupByName(opts.toGroup, db);
           if (!group) handleError(new Error(`Group not found: ${opts.toGroup}`));
           const members = listMembers(group!.id, db);
@@ -117,7 +127,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
 
         // Check suppressed contacts
         const allRecipients = [...toAddresses, ...(opts.cc || []), ...(opts.bcc || [])];
-        const suppressedEmailSet = getSuppressedEmailSet(allRecipients, db);
+        const suppressedEmailSet = getSuppressedEmailSet(allRecipients, selfHosted ? undefined : localDb());
         const suppressedRecipients = allRecipients.filter((email) => suppressedEmailSet.has(email));
         if (suppressedRecipients.length > 0 && !opts.force) {
           console.log(chalk.yellow(`Warning: Suppressed recipients: ${suppressedRecipients.join(", ")}`));
@@ -143,7 +153,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         let textBody = !opts.html ? body : undefined;
 
         if (opts.template) {
-          const tpl = getTemplate(opts.template, db);
+          const tpl = getTemplate(opts.template, selfHosted ? undefined : localDb());
           if (!tpl) handleError(new Error(`Template not found: ${opts.template}`));
           const vars: Record<string, string> = opts.vars ? JSON.parse(opts.vars) : {};
           subject = renderTemplate(tpl!.subject_template, vars);
@@ -157,8 +167,7 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
         // Local-only concerns (provider creds/warming/tracking/scheduling/threading
         // tables, local ledger) do not apply — the server owns sending. Route the
         // composed message through the seam so self_hosted send is server-authoritative.
-        const ds = resolveMailDataSource();
-        if (ds.mode !== "local") {
+        if (selfHosted) {
           const attachments = readSendAttachments(opts.attachment);
           if ((opts as Record<string, unknown>).dryRun) {
             console.log(chalk.bold("\n[DRY RUN] Would send (self_hosted):"));
@@ -188,12 +197,12 @@ export function registerSendCommands(program: Command, _output: (data: unknown, 
             scheduledAt: opts.schedule,
             idempotencyKey: (opts as Record<string, unknown>).idempotencyKey as string | undefined,
           });
-          incrementSendCounts(allRecipients, db);
           console.log(chalk.green(`✓ Email sent to ${toAddresses.join(", ")}`));
           if (result.messageId) console.log(chalk.dim(`  Message ID: ${result.messageId}`));
           return;
         }
 
+        const db = localDb();
         let providerId: string;
         if (opts.provider) {
           providerId = resolveId("providers", opts.provider);

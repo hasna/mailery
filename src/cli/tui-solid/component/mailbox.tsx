@@ -110,18 +110,19 @@ export function MailboxRoute() {
       <box height={2} flexDirection="row" justifyContent="space-between">
         <box flexDirection="row" columnGap={1}>
           <Button label={emails.state.sort === "newest" ? "Newest first" : "Oldest first"} onPress={() => emails.actions.cycleSort()} />
-          <Button
-            label="Filter"
-            active={!!emails.state.search || !!emails.state.activeLabel || emails.state.mailbox !== "inbox"}
-            onPress={() => emails.actions.openDialog("filter")}
-          />
+	          <Button
+	            label="Filter"
+	            active={!!emails.state.search || !!emails.state.activeLabel || emails.state.mailbox !== "inbox" || emails.state.selectedSourceId !== "all"}
+	            onPress={() => emails.actions.openDialog("filter")}
+	          />
           <Button
             label="Group"
             active={emails.state.groupMode !== "none"}
             onPress={() => emails.actions.openDialog("group")}
           />
-          <Button label="Search" onPress={() => emails.actions.openDialog("search")} />
-          <Button label="Digest" onPress={() => emails.actions.openDialog("digest")} />
+	          <Button label="Search" onPress={() => emails.actions.openDialog("search")} />
+	          <Button label="Sources" active={emails.state.selectedSourceId !== "all"} onPress={() => emails.actions.openDialog("source")} />
+	          <Button label="Digest" onPress={() => emails.actions.openDialog("digest")} />
           {/* Pull is LOCAL S3→SQLite ingestion. In self_hosted mode the server ingests and the
               client syncs via the automatic changesSince delta, so the manual Pull button is
               meaningless — render it only in local mode. */}
@@ -132,7 +133,11 @@ export function MailboxRoute() {
         <text fg={theme.textMuted}>Page {emails.state.page + 1}</text>
       </box>
 
-      <box height={1} />
+	      <box height={1} paddingLeft={1}>
+	        <Show when={emails.state.selectedSourceId !== "all"}>
+	          <text fg={theme.textMuted}>Source: {emails.selectedSource().label}</text>
+	        </Show>
+	      </box>
 
       <box height={1} flexDirection="row" columnGap={1} paddingLeft={1}>
         <box width={2} flexShrink={0} />

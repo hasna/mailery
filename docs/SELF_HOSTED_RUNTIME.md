@@ -43,8 +43,8 @@ dual-write or synchronization mode between them.
 The AWS reference path remains direct and user-owned: SES for sending, S3 for
 raw inbound mail and attachments, SNS/SQS with a DLQ for ingestion, Route53 for
 DNS, and RDS Postgres for application state. Cloudflare and Resend are optional
-direct integrations using credentials supplied by the user. Gmail import is a
-local archive/source capability; it is not a self-hosted server backend.
+direct integrations using credentials supplied by the user. No additional
+mailbox-provider import backend is included in this OSS package.
 
 ## Production boundary
 

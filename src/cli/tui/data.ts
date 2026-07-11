@@ -1,7 +1,7 @@
 /**
  * Data layer for the Emails UI (`emails ui`).
  *
- * Presents a Gmail-like unified view over the local store. Providers are
+ * Presents a unified mail view over the local store. Providers are
  * credentials/capabilities, sources are ingestion streams, mailboxes are
  * user-visible scopes, and folders are inbox/unread/sent/etc.
  */
@@ -92,7 +92,7 @@ export interface TuiMessage {
   thread_id: string | null;
   provider_thread_id: string | null;
   attachments: number;
-  /** True if I sent it (app-sent, or a Gmail-synced message labelled SENT). */
+  /** True if I sent it (app-sent, or imported mail labelled SENT). */
   sentByMe: boolean;
 }
 
@@ -174,7 +174,7 @@ const FOLDER_WHERE: Record<Exclude<Mailbox, "sent">, string> = {
  * List the messages in a folder, newest first. Uses a LEAN projection
  * (no html_body, snippet via substr) over indexed columns so it stays fast on
  * very large mailboxes. The Sent folder unions app-sent mail (`emails`) with
- * Gmail-synced sent mail (`inbound_emails` where is_sent = 1).
+ * Imported sent mail (`inbound_emails` where is_sent = 1).
  */
 export interface MailboxSource {
   /** Source ID from listMailboxSources(), e.g. provider:<id>, s3:<bucket>, legacy, orphaned:<id>. */
@@ -187,6 +187,8 @@ export interface MailboxSource {
   address?: string;
   /** S3 ingestion stream bucket. */
   s3Bucket?: string;
+  /** Registered S3 source prefix. Undefined means the whole bucket is the filter boundary. */
+  s3Prefix?: string;
   /** Legacy/local mail with no provider/capability provenance. */
   legacy?: boolean;
   /** Unknown source ID that should match no mail. */
@@ -216,7 +218,7 @@ function normalizeSourceId(value: string | undefined): MailboxSource {
   }
   const s3Source = listS3Sources().find((candidate) => candidate.id === raw);
   if (s3Source) {
-    return { sourceId: raw, s3Bucket: s3Source.bucket, providerId: s3Source.provider_id };
+    return { sourceId: raw, s3Bucket: s3Source.bucket, s3Prefix: s3Source.prefix, providerId: s3Source.provider_id };
   }
   return { sourceId: raw, unknown: true };
 }
@@ -229,10 +231,21 @@ export function mailboxSourceFromRef(input?: MailboxSource): MailboxSource | und
     ...input,
     providerId: input.providerId ?? fromId.providerId,
     s3Bucket: input.s3Bucket ?? fromId.s3Bucket,
+    s3Prefix: input.s3Prefix ?? fromId.s3Prefix,
     legacy: input.legacy ?? fromId.legacy,
   };
   if (!hasSourceFilter(normalized)) return undefined;
   return normalized;
+}
+
+function normalizeS3PrefixForFilter(prefix: string | null | undefined): string | undefined {
+  const value = String(prefix ?? "").trim().replace(/^\/+/, "");
+  return value.length > 0 ? value : undefined;
+}
+
+function s3ObjectUrlLike(bucket: string, prefix: string | null | undefined): string {
+  const normalizedPrefix = normalizeS3PrefixForFilter(prefix);
+  return normalizedPrefix ? `s3://${bucket}/${normalizedPrefix}%` : `s3://${bucket}/%`;
 }
 
 function inboundSourceClause(src?: MailboxSource): SqlClause {
@@ -243,17 +256,27 @@ function inboundSourceClause(src?: MailboxSource): SqlClause {
   if (normalized?.providerId) { sql += " AND provider_id = ?"; params.push(normalized.providerId); }
   if (normalized?.legacy) sql += " AND provider_id IS NULL";
   if (normalized?.s3Bucket) {
-    if (normalized.providerId) {
+    const urlPattern = s3ObjectUrlLike(normalized.s3Bucket, normalized.s3Prefix);
+    const prefix = normalizeS3PrefixForFilter(normalized.s3Prefix);
+    if (prefix && normalized.providerId) {
+      sql += ` AND (raw_s3_url LIKE ? OR (
+        (raw_s3_url IS NULL OR raw_s3_url = '')
+        AND message_id IS NOT NULL
+        AND message_id != ''
+        AND (message_id LIKE ? OR message_id LIKE ?)
+      ))`;
+      params.push(urlPattern, `s3://${normalized.s3Bucket}/${prefix}%`, `${prefix}%`);
+    } else if (normalized.providerId) {
       sql += ` AND (raw_s3_url LIKE ? OR (
         (raw_s3_url IS NULL OR raw_s3_url = '')
         AND message_id IS NOT NULL
         AND message_id != ''
         AND message_id NOT LIKE 's3://%'
       ))`;
-      params.push(`s3://${normalized.s3Bucket}/%`);
+      params.push(urlPattern);
     } else {
       sql += " AND raw_s3_url LIKE ?";
-      params.push(`s3://${normalized.s3Bucket}/%`);
+      params.push(urlPattern);
     }
   }
   return { sql, params };
@@ -369,7 +392,7 @@ export function listMailbox(mailbox: Mailbox, opts?: MailboxListOptions, db?: Da
 
   const src = opts?.source;
   const recipientSrc = recipientSourceClause(src);
-  const inboundSearch = searchClause(opts?.search, ["subject", "from_address", "to_addresses"]);
+  const inboundSearch = searchClause(opts?.search, ["subject", "from_address", "to_addresses", "text_body"]);
 
   if (selectedMailbox === "sent") {
     const appSrc = appSentSourceClause(src, opts?.search, !opts?.label);
@@ -424,7 +447,7 @@ export interface MailboxCounts {
 }
 
 function hasSourceFilter(source: MailboxSource | undefined): boolean {
-  return !!(source?.sourceId || source?.providerId || source?.domain || source?.address || source?.s3Bucket || source?.legacy || source?.unknown);
+  return !!(source?.sourceId || source?.providerId || source?.domain || source?.address || source?.s3Bucket || source?.s3Prefix || source?.legacy || source?.unknown);
 }
 
 function unscopedMailboxCounts(db: Database): MailboxCounts {
@@ -530,7 +553,7 @@ export function searchMailbox(query: string, opts?: Omit<MailboxListOptions, "se
   return listMailbox(opts?.mailbox ?? "inbox", { ...opts, search: query }, db);
 }
 
-export type MailboxSourceKind = "all" | "gmail" | "s3" | "provider" | "legacy" | "orphaned";
+export type MailboxSourceKind = "all" | "s3" | "provider" | "legacy" | "orphaned";
 
 export interface MailboxSourceSummary {
   id: string;
@@ -540,6 +563,7 @@ export interface MailboxSourceSummary {
   providerName?: string;
   providerType?: string;
   bucket?: string;
+  s3Prefix?: string;
   region?: string;
   badges: string[];
   counts: MailboxCounts;
@@ -653,27 +677,24 @@ export function listMailboxSources(optsOrDb?: ListMailboxSourcesOptions | Databa
     const hasStoredMail = idsWithMail.has(provider.id);
     if (!provider.active && !hasStoredMail) continue;
     const id = providerSourceId(provider.id);
-    const kind: MailboxSourceKind = provider.type === "gmail" ? "gmail" : "provider";
-    const legacyGmailImport = provider.type === "gmail";
     sources.push(sourceSummary({
       id,
-      label: legacyGmailImport
-        ? `Legacy Gmail import: ${provider.name}`
-        : `Provider-tagged stream: ${provider.name}`,
-      kind,
+      label: `Provider-tagged stream: ${provider.name}`,
+      kind: "provider",
       providerId: provider.id,
       providerName: provider.name,
       providerType: provider.type,
       badges: [
-        ...(legacyGmailImport ? ["legacy"] : []),
-        legacyGmailImport ? "inactive" : provider.active ? "active" : "inactive",
+        provider.active ? "active" : "inactive",
         `capability:${provider.type}`,
         ...(hasStoredMail ? [] : ["empty"]),
       ],
     }, { sourceId: id }, d));
   }
 
+  const bucketsWithExplicitSources = new Set(s3Sources.map((source) => source.bucket));
   for (const bucket of inboundBuckets) {
+    if (bucketsWithExplicitSources.has(bucket.bucket)) continue;
     const id = s3SourceId(bucket.bucket);
     sources.push(sourceSummary({
       id,
@@ -697,9 +718,10 @@ export function listMailboxSources(optsOrDb?: ListMailboxSourcesOptions | Databa
       kind: "s3",
       providerId: source.provider_id,
       bucket: source.bucket,
+      s3Prefix: source.prefix,
       region: source.region,
-      badges: [source.status, source.live_sync_enabled ? "live" : "disabled"],
-    }, { sourceId: id, providerId: source.provider_id, s3Bucket: source.bucket }, d));
+      badges: [source.status, source.live_sync_enabled ? "active" : "disabled"],
+    }, { sourceId: id, providerId: source.provider_id, s3Bucket: source.bucket, s3Prefix: source.prefix }, d));
   }
 
   const legacySource = sourceSummary({
@@ -731,6 +753,7 @@ export function listMailboxSources(optsOrDb?: ListMailboxSourcesOptions | Databa
         source.providerName,
         source.providerType,
         source.bucket,
+        source.s3Prefix,
         ...source.badges,
       ].some((value) => String(value ?? "").toLowerCase().includes(q)))
     : sources;
@@ -990,7 +1013,7 @@ export const COMMON_LABELS = [
   "trash",
 ] as const;
 
-export const GMAIL_CATEGORY_LABELS = [
+export const MAIL_CATEGORY_LABELS = [
   { name: "category_personal", title: "Primary" },
   { name: "category_social", title: "Social" },
   { name: "category_promotions", title: "Promotions" },
@@ -998,7 +1021,7 @@ export const GMAIL_CATEGORY_LABELS = [
   { name: "category_forums", title: "Forums" },
 ] as const;
 
-const GMAIL_CATEGORY_KEYS = new Map(GMAIL_CATEGORY_LABELS.map((category) => [labelNameKey(category.name), category]));
+const MAIL_CATEGORY_KEYS = new Map(MAIL_CATEGORY_LABELS.map((category) => [labelNameKey(category.name), category]));
 
 export interface LabelSummary {
   name: string;
@@ -1058,16 +1081,16 @@ export function labelNameAliases(label: string): string[] {
   return [...new Set([normalized, normalized.replace(/_/g, "-"), normalized.replace(/-/g, "_")])];
 }
 
-export function isGmailCategoryLabel(label: string): boolean {
-  return GMAIL_CATEGORY_KEYS.has(labelNameKey(label));
+export function isMailCategoryLabel(label: string): boolean {
+  return MAIL_CATEGORY_KEYS.has(labelNameKey(label));
 }
 
-export function gmailCategoryTitle(label: string): string | null {
-  return GMAIL_CATEGORY_KEYS.get(labelNameKey(label))?.title ?? null;
+export function mailCategoryTitle(label: string): string | null {
+  return MAIL_CATEGORY_KEYS.get(labelNameKey(label))?.title ?? null;
 }
 
 export function labelDisplayName(label: string): string {
-  const display = gmailCategoryTitle(label) ?? normalizeLabel(label).replace(/^category[_-]+/i, "");
+  const display = mailCategoryTitle(label) ?? normalizeLabel(label).replace(/^category[_-]+/i, "");
   return display
     .trim()
     .replace(/[_-]+/g, " ")

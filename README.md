@@ -122,7 +122,7 @@ emails ui --mailbox unread
 The app uses visible buttons and the Shortcuts command palette for actions.
 Mailbox filtering is handled by the mailbox dialog, which lists all mailboxes
 and configured/observed recipient addresses. Sidebar labels filter mailbox
-content, and Gmail-style Categories show Primary, Social, Promotions, Updates,
+content, and mail categories show Primary, Social, Promotions, Updates,
 and Forums separately from custom labels. Reader shows
 attachments with size/type. Composer writes **markdown** rendered to HTML on
 send. Settings opens as a simple menu dialog for sync, defaults, and display
@@ -152,7 +152,6 @@ emails contact           # contacts (suppression list)
 emails group             # recipient groups
 emails sequence          # drip sequences
 emails schedule          # scheduled emails: list, cancel, run
-emails triage            # AI triage: classify, prioritize, draft replies
 emails db                # self-hosted PostgreSQL migration and status commands
 emails aws               # AWS setup: SES receipt rules, S3 inbound bucket
 emails config            # configuration (key=value)
@@ -160,7 +159,7 @@ emails stats             # delivery statistics (--inbox for received mail)
 emails analytics         # email analytics
 emails doctor            # system diagnostics
 emails doctor delivery   # diagnose missing inbound mail for one address
-emails serve             # HTTP server + dashboard + authenticated /api/v1
+emails serve             # local HTTP server + dashboard + /api management routes
 emails mcp               # install MCP server
 ```
 
@@ -280,20 +279,19 @@ emails-mcp
 
 ## REST API
 
-`emails serve` exposes a dashboard plus two API surfaces:
+`emails serve` exposes the local dashboard and management API:
 
-- **Dashboard / management API** under `/api/*` (providers, domains, addresses, emails, stats).
-- **Authenticated programmatic API** under `/api/v1/*` for agents/apps, keyed on a
-  scoped send key (`Authorization: Bearer esk_…`). Every call is scoped to the
-  key owner's addresses, so one caller cannot act as another principal:
+- **Dashboard / management API** under `/api/*` for providers, domains,
+  addresses, messages, stats, sources, and mailbox views.
+- Scoped send keys remain part of the local send authorization model; there is
+  no separate hosted-agent API surface in this OSS server.
 
 ```bash
 emails serve   # or: emails-serve   (HOST=0.0.0.0 to allow other machines)
 
-curl -H "Authorization: Bearer $ESK" localhost:3900/api/v1/addresses
-curl -H "Authorization: Bearer $ESK" -X POST localhost:3900/api/v1/provision/address -d '{"email":"ops@example.com"}'
-curl -H "Authorization: Bearer $ESK" -X POST localhost:3900/api/v1/send -d '{"from":"ops@example.com","to":"x@y.com","subject":"hi","text":"yo"}'
-curl -H "Authorization: Bearer $ESK" 'localhost:3900/api/v1/inbox?limit=50&offset=0&search=invoice'  # scoped, paginated inbox
+curl localhost:3900/api/providers
+curl localhost:3900/api/sources
+curl 'localhost:3900/api/mailboxes?source_id=legacy'
 ```
 
 ## Library API

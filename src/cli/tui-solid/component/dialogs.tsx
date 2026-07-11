@@ -12,9 +12,7 @@ import { labelDisplayName, mailboxGroupModeLabel, mailboxLabel, MAILBOX_GROUP_MO
 import { formatDate, wrapText } from "../../tui/format.js";
 import { formatAttachmentSize, mergeAttachmentDetails, type AttachmentDetail, type AttachmentPathLike } from "../../../lib/attachment-actions.js";
 import { openLocalTarget } from "../../../lib/local-actions.js";
-import { ensureEmailAgentSettings } from "../../../db/email-agents.js";
 import { emailDigestPeriodLabel, type EmailDigestPeriod } from "../../../db/email-digests.js";
-import { DEFAULT_GROQ_EMAIL_AGENT_MODEL } from "../../../lib/emails-ai.js";
 
 export function EmailsDialogs() {
   const emails = useEmails();
@@ -40,6 +38,13 @@ export function EmailsDialogs() {
     title: address.label,
     detail: inboxDetail(address),
     marker: emails.state.selectedAddressId === address.id ? "●" : " ",
+    markerColor: theme.primary,
+  })));
+  const sourceItems = createMemo<SelectDialogItem[]>(() => emails.state.sources.map((source) => ({
+    id: source.id,
+    title: source.label,
+    detail: source.providerId ? `Provider ${source.providerId.slice(0, 8)}` : source.id,
+    marker: emails.state.selectedSourceId === source.id ? "●" : " ",
     markerColor: theme.primary,
   })));
 
@@ -147,6 +152,24 @@ export function EmailsDialogs() {
           onQuery={emails.actions.setAddressSearch}
           onSelect={(item) => {
             emails.actions.setAddress(item.id);
+            close();
+          }}
+          onClose={close}
+        />
+      ), { size: "large", onClose: emails.actions.closeDialog });
+      return;
+    }
+
+    if (kind === "source") {
+      dialog.replace(() => (
+        <SelectDialog
+          title="Sources"
+          placeholder="Search sources"
+          items={sourceItems()}
+          query={emails.state.sourceSearch}
+          onQuery={emails.actions.setSourceSearch}
+          onSelect={(item) => {
+            emails.actions.setSource(item.id);
             close();
           }}
           onClose={close}
@@ -683,14 +706,13 @@ function DomainsDialog(props: { close: () => void }) {
   );
 }
 
-type SettingsSection = "main" | "sync" | "defaults" | "display" | "agents";
+type SettingsSection = "main" | "sync" | "defaults" | "display";
 
 function settingsTitle(section: SettingsSection): string {
   switch (section) {
     case "sync": return "Settings / Sync";
     case "defaults": return "Settings / Defaults";
     case "display": return "Settings / Display";
-    case "agents": return "Settings / Agents";
     default: return "Settings";
   }
 }
@@ -723,9 +745,6 @@ function SettingsDialog(props: { close: () => void }) {
   const emails = useEmails();
   const [section, setSection] = createSignal<SettingsSection>("main");
   const settings = () => emails.state.settings;
-  const agentSettings = createMemo(() => ensureEmailAgentSettings());
-  const enabledAgentCount = () => agentSettings().filter((setting) => setting.enabled).length;
-  const alwaysOnAgentCount = () => agentSettings().filter((setting) => setting.enabled && setting.always_on).length;
   const goBack = () => {
     if (section() === "main") props.close();
     else setSection("main");
@@ -761,7 +780,6 @@ function SettingsDialog(props: { close: () => void }) {
       <Show when={section() === "main"}>
         <box flexDirection="column" width="100%" rowGap={1}>
           <SettingsMenuRow title="Sync" detail="Auto-pull inbound mail" onPress={() => setSection("sync")} />
-          <SettingsMenuRow title="Agents" detail="Groq defaults and always-on" onPress={() => setSection("agents")} />
           <SettingsMenuRow title="Defaults" detail="Inbox, folder, and sender" onPress={() => setSection("defaults")} />
           <SettingsMenuRow title="Display" detail="Theme and read-state styling" onPress={() => setSection("display")} />
         </box>
@@ -769,20 +787,6 @@ function SettingsDialog(props: { close: () => void }) {
 
       <Show when={section() === "sync"}>
         <box flexDirection="column" width="100%" rowGap={1}>
-          <SettingsActionRow
-            title="Auto-pull inbound"
-            value={boolText(settings().autoPull)}
-            onPress={() => emails.actions.setSetting("autoPull", !settings().autoPull)}
-          />
-        </box>
-      </Show>
-
-      <Show when={section() === "agents"}>
-        <box flexDirection="column" width="100%" rowGap={1}>
-          <SettingsActionRow title="Enabled agents" value={`${enabledAgentCount()}/${agentSettings().length}`} onPress={() => undefined} />
-          <SettingsActionRow title="Always-on agents" value={String(alwaysOnAgentCount())} onPress={() => undefined} />
-          <SettingsActionRow title="Default provider" value="Groq" onPress={() => undefined} />
-          <SettingsActionRow title="Groq email model" value={DEFAULT_GROQ_EMAIL_AGENT_MODEL} onPress={() => undefined} />
           <SettingsActionRow
             title="Auto-pull inbound"
             value={boolText(settings().autoPull)}

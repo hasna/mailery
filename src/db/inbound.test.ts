@@ -395,7 +395,7 @@ describe("listInboundEmails", () => {
     expect(getInboundEmailSummary("missing", db)).toBeNull();
   });
 
-  it("excludes Gmail SENT rows from received-mail lists by default", () => {
+  it("excludes imported SENT rows from received-mail lists by default", () => {
     const db = makeDb();
     storeInboundEmail({ ...sampleInput, subject: "received" }, db);
     const sent = storeInboundEmail({

@@ -237,7 +237,7 @@ export function storeInboundEmail(
   // Auto-detect reply linkage from email headers
   const replyToEmailId = input.in_reply_to_email_id ?? detectReplyToEmailId(input.headers, d);
 
-  // Mail synced from Gmail's Sent folder carries the SENT label — flag it so it
+  // Imported sent mail can carry the SENT label — flag it so it
   // lands in the Sent folder, not the inbox.
   const isSent = (input.label_ids ?? []).some((label) => label.trim().toLowerCase() === "sent") ? 1 : 0;
 
@@ -451,7 +451,7 @@ export interface ListInboundOpts {
   read?: boolean;
   /** When false (default), archived mail is excluded; when true, only archived. */
   archived?: boolean;
-  /** When true, only Gmail-synced sent rows are returned. Defaults to received mail only. */
+  /** When true, only imported sent rows are returned. Defaults to received mail only. */
   sent?: boolean;
   /** When true, do not filter by sent/received state. */
   includeSent?: boolean;

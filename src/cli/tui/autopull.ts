@@ -6,10 +6,13 @@
  *             pull here; it lands the moment the server receives it.
  * Entirely best-effort: missing config/creds is a silent no-op.
  */
+import { buildS3PullTargets } from "./autopull-targets.js";
+export { buildS3PullTargets } from "./autopull-targets.js";
+export type { S3PullTarget } from "./autopull-targets.js";
+
 export interface PullForwardingResult { attempted: number; sent: number; failed: number; skipped: number }
-export interface PullAgentsResult { agents: number; runs: number; errors: number }
-export interface PullResult { pulled: number; ok: boolean; reason?: string; configured: boolean; forwarded?: PullForwardingResult; agents?: PullAgentsResult }
-export interface PullOpts { s3?: boolean; limit?: number; forwarding?: boolean; agents?: boolean }
+export interface PullResult { pulled: number; ok: boolean; reason?: string; configured: boolean; forwarded?: PullForwardingResult }
+export interface PullOpts { s3?: boolean; limit?: number; forwarding?: boolean }
 
 export async function autoPull(opts?: PullOpts): Promise<PullResult> {
   const doS3 = opts?.s3 !== false;
@@ -19,11 +22,15 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
   const buckets = getInboundBuckets();
   const config = loadConfig();
   const queueUrl = config["inbound_realtime_queue_url"] as string | undefined;
-  const configured = buckets.length > 0 || Boolean(queueUrl);
+  const { listLiveS3Sources } = await import("../../lib/s3-sync.js");
+  const liveSources = listLiveS3Sources();
+  const targets = buildS3PullTargets({ liveSources, buckets, inboundPrefix: inbound.prefix });
+  const configured = targets.length > 0 || Boolean(queueUrl);
 
   let pulled = 0;
   let reason: string | undefined;
   let ok = true;
+  const syncErrors: string[] = [];
 
   if (doS3) {
     try {
@@ -32,16 +39,20 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
       if (inbound.profile) process.env["AWS_PROFILE"] = inbound.profile;
       const syncAll = async () => {
         let n = 0;
-        for (const b of buckets) {
-          const prov = b.providerId ? getProvider(b.providerId) : null;
+        for (const target of targets) {
+          const prov = target.providerId ? getProvider(target.providerId) : null;
           const r = await syncS3Inbox({
-            bucket: b.bucket, prefix: inbound.prefix, region: b.region,
+            sourceId: target.sourceId,
+            bucket: target.bucket,
+            prefix: target.prefix,
+            region: target.region,
             accessKeyId: prov?.access_key ?? undefined,
             secretAccessKey: prov?.secret_key ?? undefined,
-            providerId: b.providerId,
+            providerId: target.providerId,
             limit,
           });
           n += r.synced;
+          if (r.errors.length > 0) syncErrors.push(...r.errors);
         }
         return n;
       };
@@ -49,8 +60,12 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
       // EVERY domain regardless of realtime wiring. (A previous version only
       // scanned S3 when the realtime SQS queue had messages; since that queue is
       // wired for one domain, mail to every other domain was never auto-pulled.)
-      if (buckets.length > 0) {
+      if (targets.length > 0) {
         pulled += await syncAll();
+        if (syncErrors.length > 0) {
+          ok = false;
+          reason = syncErrors[0];
+        }
         // Best-effort: drain the realtime SQS queue so it doesn't back up. The
         // objects it points to are already covered by the scan above, so we just
         // clear it (no extra sync needed).
@@ -89,28 +104,11 @@ export async function autoPull(opts?: PullOpts): Promise<PullResult> {
     }
   }
 
-  let agents: PullAgentsResult | undefined;
-  if (opts?.agents !== false) {
-    try {
-      const { runAlwaysOnEmailAgents } = await import("../../lib/email-agents.js");
-      const r = await runAlwaysOnEmailAgents({ limitPerAgent: Math.min(25, Math.max(1, Math.trunc(limit))) });
-      agents = {
-        agents: r.agents,
-        runs: r.runs,
-        errors: r.errors.length,
-      };
-    } catch {
-      // Always-on agents are best-effort; sync and forwarding health should not
-      // be reported as failed just because an AI provider is unavailable.
-    }
-  }
-
   return {
     pulled,
     ok,
     reason,
-    configured: configured || (forwarded?.attempted ?? 0) > 0 || (agents?.agents ?? 0) > 0,
+    configured: configured || (forwarded?.attempted ?? 0) > 0,
     forwarded,
-    agents,
   };
 }

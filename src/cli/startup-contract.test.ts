@@ -17,7 +17,6 @@ const heavyRuntimeImports = [
   "../../lib/s3-sync.js",
   "../../lib/sync.js",
   "../../lib/inbound.js",
-  "../../lib/triage.js",
   "../../lib/send.js",
   "../../lib/batch.js",
   "../../lib/completion.js",

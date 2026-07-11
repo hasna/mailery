@@ -44,7 +44,7 @@ describe("email agent persistence", () => {
     const settings = ensureEmailAgentSettings(getDatabase());
 
     expect(settings.map((setting) => setting.agent_key).sort()).toEqual(["categorizer", "fraud", "labeler"]);
-    expect(settings.every((setting) => setting.provider === "groq")).toBe(true);
+    expect(settings.every((setting) => setting.provider === "external")).toBe(true);
     expect(settings.every((setting) => !setting.enabled)).toBe(true);
   });
 
@@ -52,13 +52,13 @@ describe("email agent persistence", () => {
     const setting = updateEmailAgentSetting("labeler", {
       enabled: true,
       always_on: true,
-      model: "llama-3.3-70b-versatile",
+      model: "external-summary",
       use_network_tools: false,
     }, getDatabase());
 
     expect(setting.enabled).toBe(true);
     expect(setting.always_on).toBe(true);
-    expect(setting.model).toBe("llama-3.3-70b-versatile");
+    expect(setting.model).toBe("external-summary");
     expect(setting.use_network_tools).toBe(false);
   });
 
@@ -70,7 +70,7 @@ describe("email agent persistence", () => {
     saveEmailAgentRun({
       agent_key: "categorizer",
       inbound_email_id: email.id,
-      provider: "groq",
+      provider: "external",
       model: "test-model",
       status: "ok",
       labels: ["fyi"],
@@ -85,7 +85,7 @@ describe("email agent persistence", () => {
     saveEmailAgentRun({
       agent_key: "fraud",
       inbound_email_id: email.id,
-      provider: "groq",
+      provider: "external",
       model: "first",
       status: "error",
       error: "temporary",
@@ -93,7 +93,7 @@ describe("email agent persistence", () => {
     const second = saveEmailAgentRun({
       agent_key: "fraud",
       inbound_email_id: email.id,
-      provider: "groq",
+      provider: "external",
       model: "second",
       status: "ok",
       labels: ["review-risk"],

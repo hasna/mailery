@@ -8,7 +8,6 @@
 type RouteKey =
   | "inbound-webhook"
   | "resend-webhook"
-  | "agent-api"
   | "core"
   | "contacts-groups"
   | "inbound-sequences";
@@ -23,7 +22,6 @@ type ApiRouteHandler = (
 const allRouteModules: readonly RouteKey[] = [
   "inbound-webhook",
   "resend-webhook",
-  "agent-api",
   "core",
   "contacts-groups",
   "inbound-sequences",
@@ -36,7 +34,6 @@ function pathStartsWithAny(path: string, prefixes: readonly string[]): boolean {
 export function routeModulesFor(path: string): readonly RouteKey[] {
   if (path === "/webhook/ses-inbound") return ["inbound-webhook"];
   if (path === "/webhook/resend-inbound") return ["resend-webhook"];
-  if (path.startsWith("/api/v1/")) return ["agent-api"];
   if (path.startsWith("/track/")) return ["inbound-sequences"];
 
   if (
@@ -48,7 +45,6 @@ export function routeModulesFor(path: string): readonly RouteKey[] {
       "/api/events",
       "/api/stats",
       "/api/sandbox",
-      "/api/browserplan",
     ])
   ) {
     return ["core"];
@@ -74,13 +70,11 @@ export function routeModulesFor(path: string): readonly RouteKey[] {
       "/api/mailbox",
       "/api/mailboxes",
       "/api/sources",
-      "/api/doctor",
-      "/api/pull",
-      "/api/digest",
-      "/api/agents",
-      "/api/sequences",
+	      "/api/doctor",
+	      "/api/pull",
+	      "/api/digest",
+	      "/api/sequences",
       "/api/warming",
-      "/api/triage",
     ])
   ) {
     return ["inbound-sequences"];
@@ -98,10 +92,6 @@ async function loadRouteHandler(route: RouteKey): Promise<ApiRouteHandler> {
     case "resend-webhook": {
       const { handleResendWebhook } = await import("./routes/resend-webhook.js");
       return (req, _url, path, method) => handleResendWebhook(req, path, method);
-    }
-    case "agent-api": {
-      const { handle } = await import("./routes/agent-api.js");
-      return handle;
     }
     case "core": {
       const { handle } = await import("./routes/core.js");

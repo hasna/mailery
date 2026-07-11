@@ -6,20 +6,23 @@ import {
   COMMON_LABELS,
   MAILBOXES,
   defaultFromAddress,
-  getSettings,
-  groupMailboxMessages,
-  listDomainSummaries,
-  listInboxAddresses,
+	  getSettings,
+	  groupMailboxMessages,
+	  listDomainSummaries,
+	  listInboxAddresses,
+	  listSources,
   mailboxGroupModeLabel,
   labelNameKey,
   normalizeMailboxGroupMode,
   normalizedLabelName,
   replyDefaults,
   setSetting as persistSetting,
-  type DomainSummary,
-  type InboxAddressChoice,
-  type LabelSummary,
-  type Mailbox,
+	  type DomainSummary,
+	  type InboxAddressChoice,
+	  type InboxSource,
+	  type LabelSummary,
+	  type Mailbox,
+	  type MailboxSource,
   type MailboxGroupMode,
   type MailboxCounts,
   type MessageBody,
@@ -35,7 +38,7 @@ import { loadEmailDigest } from "../../../lib/email-digest.js";
 import type { EmailDigest, EmailDigestPeriod } from "../../../db/email-digests.js";
 
 export type RouteName = "mailbox" | "reader" | "domains";
-export type DialogName = "commands" | "address" | "filter" | "search" | "group" | "digest" | "domains" | "settings" | "labels" | "links" | "attachments" | "raw" | null;
+export type DialogName = "commands" | "address" | "source" | "filter" | "search" | "group" | "digest" | "domains" | "settings" | "labels" | "links" | "attachments" | "raw" | null;
 export type ComposeMode = "new" | "reply" | "forward";
 export type ComposeField = "from" | "to" | "subject" | "body";
 
@@ -53,10 +56,12 @@ export interface EmailsState {
   mailbox: Mailbox;
   route: RouteName;
   messages: TuiMessage[];
-  counts: MailboxCounts;
-  addresses: InboxAddressChoice[];
-  selectedAddressId: string;
-  selectedMessageId: string | null;
+	  counts: MailboxCounts;
+	  addresses: InboxAddressChoice[];
+	  selectedAddressId: string;
+	  sources: InboxSource[];
+	  selectedSourceId: string;
+	  selectedMessageId: string | null;
   page: number;
   hasMore: boolean;
   search: string;
@@ -73,9 +78,10 @@ export interface EmailsState {
   linkIndex: number;
   digestPeriod: EmailDigestPeriod;
   digest: EmailDigest | null;
-  digestLoading: boolean;
-  addressSearch: string;
-  dialog: DialogName;
+	  digestLoading: boolean;
+	  addressSearch: string;
+	  sourceSearch: string;
+	  dialog: DialogName;
   readerScroll: number;
   compose: ComposeState | null;
   settings: TuiSettings;
@@ -95,8 +101,11 @@ function emptyCounts(): MailboxCounts {
   return { inbox: 0, unread: 0, starred: 0, sent: 0, archived: 0, spam: 0, trash: 0 };
 }
 
-function sourceForAddress(address: InboxAddressChoice | undefined) {
-  return address?.address ? { address: address.address } : undefined;
+function sourceForSelection(address: InboxAddressChoice | undefined, sourceId: string | undefined): MailboxSource | undefined {
+  const source: MailboxSource = {};
+  if (sourceId && sourceId !== "all") source.sourceId = sourceId;
+  if (address?.address) source.address = address.address;
+  return Object.keys(source).length > 0 ? source : undefined;
 }
 
 /**
@@ -116,6 +125,12 @@ export function resolveAddressChoice(id: string, candidates: InboxAddressChoice[
 
 function selectedAddress(state: Pick<EmailsState, "addresses" | "selectedAddressId">): InboxAddressChoice {
   return resolveAddressChoice(state.selectedAddressId, state.addresses);
+}
+
+function selectedSource(state: Pick<EmailsState, "sources" | "selectedSourceId">): InboxSource {
+  return state.sources.find((source) => source.id === state.selectedSourceId)
+    ?? state.sources.find((source) => source.id === "all")
+    ?? { id: "all", label: "All sources" };
 }
 
 function pageOffset(page: number): number {
@@ -146,6 +161,12 @@ function createEmailsStore(initialMailbox?: Mailbox) {
   // the full list loads in the post-mount reload, so first paint isn't blocked on it.
   const defaultChoice = settings.defaultAddress ? addressChoiceByAddress(settings.defaultAddress) : ALL_ADDRESSES;
   const initialAddresses = defaultChoice.id === ALL_ADDRESSES.id ? [ALL_ADDRESSES] : [ALL_ADDRESSES, defaultChoice];
+  // The active mail data source: `local` (SQLite) or `self_hosted` (API client). All
+  // message reads/writes below flow through this seam so the TUI works in both
+  // modes; local-only concepts (domains, address picker, settings, threaded
+  // conversation bodies) still read the local store directly.
+  const ds = resolveMailDataSource();
+  const initialSources = ds.mode === "local" ? listSources().slice(0, 80) : [{ id: "all", label: "All sources" }];
   const [state, setState] = createStore<EmailsState>({
     mailbox: clampMailbox(initialMailbox ?? settings.defaultMailbox),
     route: "mailbox",
@@ -153,6 +174,8 @@ function createEmailsStore(initialMailbox?: Mailbox) {
     counts: emptyCounts(),
     addresses: initialAddresses,
     selectedAddressId: defaultChoice.id,
+    sources: initialSources.length ? initialSources : [{ id: "all", label: "All sources" }],
+    selectedSourceId: "all",
     selectedMessageId: null,
     page: 0,
     hasMore: false,
@@ -172,6 +195,7 @@ function createEmailsStore(initialMailbox?: Mailbox) {
     digest: null,
     digestLoading: false,
     addressSearch: "",
+    sourceSearch: "",
     dialog: null,
     readerScroll: 0,
     compose: null,
@@ -182,13 +206,8 @@ function createEmailsStore(initialMailbox?: Mailbox) {
     lastError: null,
   });
 
-  // The active mail data source: `local` (SQLite) or `self_hosted` (API client). All
-  // message reads/writes below flow through this seam so the TUI works in both
-  // modes; local-only concepts (domains, address picker, settings, threaded
-  // conversation bodies) still read the local store directly.
-  const ds = resolveMailDataSource();
-
   const currentAddress = createMemo(() => selectedAddress(state));
+  const currentSource = createMemo(() => selectedSource(state));
   const currentMessage = createMemo(() => selectedMessage(state));
   const [currentBody] = createResource(currentMessage, async (message): Promise<MessageBody | null> => {
     return message ? await ds.getMessageBody(message) : null;
@@ -232,7 +251,7 @@ function createEmailsStore(initialMailbox?: Mailbox) {
   let sidebarMetaTimer: ReturnType<typeof setTimeout> | undefined;
   let addressSearchTimer: ReturnType<typeof setTimeout> | undefined;
   let labelSearchTimer: ReturnType<typeof setTimeout> | undefined;
-  const scheduleSidebarMeta = (source: ReturnType<typeof sourceForAddress>, addressSearch?: string) => {
+  const scheduleSidebarMeta = (source: MailboxSource | undefined, addressSearch?: string) => {
     if (sidebarMetaTimer) clearTimeout(sidebarMetaTimer);
     sidebarMetaTimer = setTimeout(() => {
       sidebarMetaTimer = undefined;
@@ -250,11 +269,12 @@ function createEmailsStore(initialMailbox?: Mailbox) {
             : loaded[0]?.id === ALL_ADDRESSES.id
               ? [loaded[0], selected, ...loaded.slice(1)]
               : [selected, ...loaded];
-          const [counts, labels] = await Promise.all([
-            ds.mailboxCounts({ source }),
-            ds.listLabelSummaries({ limit: 80, search: state.labelSearch || undefined }),
-          ]);
-          setState({ addresses, counts, labels });
+	          const [counts, labels] = await Promise.all([
+	            ds.mailboxCounts({ source }),
+	            ds.listLabelSummaries({ limit: 80, search: state.labelSearch || undefined }),
+	          ]);
+	          const sources = ds.mode === "local" ? listSources().slice(0, 80) : [{ id: "all", label: "All sources" }];
+	          setState({ addresses, counts, labels, sources: sources.length ? sources : [{ id: "all", label: "All sources" }] });
         } catch (error) {
           setState("lastError", error instanceof Error ? error.message : String(error));
         }
@@ -268,9 +288,10 @@ function createEmailsStore(initialMailbox?: Mailbox) {
     try {
       // Resolve the selected inbox cheaply (current in-memory list → DB) WITHOUT scanning the
       // full address list, so the message list — what the user is waiting for — paints first.
-      // The full address list, counts, and labels load off the critical path below.
-      const selected = resolveAddressChoice(state.selectedAddressId, state.addresses);
-      const source = sourceForAddress(selected);
+	      // The full address list, counts, and labels load off the critical path below.
+	      const selected = resolveAddressChoice(state.selectedAddressId, state.addresses);
+	      const selectedSrc = selectedSource(state);
+	      const source = sourceForSelection(selected, selectedSrc.id);
       const messages = await ds.listMailbox(state.mailbox, {
         limit: PAGE_SIZE + 1,
         offset: pageOffset(state.page),
@@ -284,7 +305,8 @@ function createEmailsStore(initialMailbox?: Mailbox) {
         ? state.selectedMessageId
         : visible[0]?.id ?? null;
       setState({
-        selectedAddressId: selected.id,
+	        selectedAddressId: selected.id,
+	        selectedSourceId: selectedSrc.id,
         messages: visible,
         hasMore: messages.length > PAGE_SIZE,
         selectedMessageId: selectedId,
@@ -324,7 +346,7 @@ function createEmailsStore(initialMailbox?: Mailbox) {
   };
 
   const startCompose = (mode: ComposeMode, message?: TuiMessage) => {
-    const source = sourceForAddress(currentAddress());
+    const source = sourceForSelection(currentAddress(), state.selectedSourceId);
     if (mode === "new" || !message) {
       setState("compose", {
         mode: "new",
@@ -464,13 +486,17 @@ function createEmailsStore(initialMailbox?: Mailbox) {
       setState("page", next);
       reload({ preserveSelection: false });
     },
-    setAddress(id: string) {
-      setState({ selectedAddressId: id, page: 0, selectedMessageId: null });
-      const address = state.addresses.find((item) => item.id === id);
-      persistSetting("defaultAddress", address?.address ?? null);
-      setState("settings", "defaultAddress", address?.address ?? null);
-      reload({ preserveSelection: false });
-    },
+	    setAddress(id: string) {
+	      setState({ selectedAddressId: id, page: 0, selectedMessageId: null });
+	      const address = state.addresses.find((item) => item.id === id);
+	      persistSetting("defaultAddress", address?.address ?? null);
+	      setState("settings", "defaultAddress", address?.address ?? null);
+	      reload({ preserveSelection: false });
+	    },
+	    setSource(id: string) {
+	      setState({ selectedSourceId: id || "all", page: 0, selectedMessageId: null });
+	      reload({ preserveSelection: false });
+	    },
     search(value: string) {
       setState({ search: value, searchDraft: value, page: 0, selectedMessageId: null });
       reload({ preserveSelection: false });
@@ -479,9 +505,10 @@ function createEmailsStore(initialMailbox?: Mailbox) {
       setState({
         mailbox: "inbox",
         activeLabel: null,
-        search: "",
-        searchDraft: "",
-        page: 0,
+	        search: "",
+	        searchDraft: "",
+	        selectedSourceId: "all",
+	        page: 0,
         route: "mailbox",
         selectedMessageId: null,
       });
@@ -493,8 +520,8 @@ function createEmailsStore(initialMailbox?: Mailbox) {
     setCommandSearch(value: string) {
       setState("commandSearch", value);
     },
-    setAddressSearch(value: string) {
-      setState("addressSearch", value);
+	    setAddressSearch(value: string) {
+	      setState("addressSearch", value);
       // Keep typing responsive: the dialog filters the already-loaded list client-side
       // instantly; debounce the DB re-query (a recipient scan that can take >300ms on a
       // large mailbox) so it runs once after the user pauses.
@@ -502,8 +529,16 @@ function createEmailsStore(initialMailbox?: Mailbox) {
       addressSearchTimer = setTimeout(() => {
         addressSearchTimer = undefined;
         setState("addresses", loadAddresses(value));
-      }, 160);
-    },
+	      }, 160);
+	    },
+	    setSourceSearch(value: string) {
+	      setState("sourceSearch", value);
+	      const q = value.trim().toLowerCase();
+	      const sources = listSources()
+	        .filter((source) => !q || `${source.label} ${source.id}`.toLowerCase().includes(q))
+	        .slice(0, 80);
+	      setState("sources", sources.length ? sources : [{ id: "all", label: "All sources" }]);
+	    },
     setLabelSearch(value: string) {
       setState("labelSearch", value);
       if (labelSearchTimer) clearTimeout(labelSearchTimer);
@@ -568,14 +603,20 @@ function createEmailsStore(initialMailbox?: Mailbox) {
       // pulling is a no-op there (mirrors the CLI/MCP mode gating).
       if (ds.mode !== "local") return { pulled: 0, ok: true, configured: false, reason: "self_hosted mode" };
       if (state.busyPull) return { pulled: 0, ok: false, configured: false, reason: "Pull already running" };
-      setState("busyPull", true);
-      try {
-        const result = await autoPull({ limit: 1000, forwarding: true, agents: true });
-        reload({ preserveSelection: true });
-        return result;
-      } finally {
-        setState("busyPull", false);
-      }
+	      setState("busyPull", true);
+	      try {
+	        const result = await autoPull({ limit: 1000, forwarding: true });
+	        await reload({ preserveSelection: true });
+	        if (!result.ok) setState("lastError", result.reason ?? "Pull failed");
+	        else setState("lastError", null);
+	        return result;
+	      } catch (error) {
+	        const reason = error instanceof Error ? error.message : String(error);
+	        setState("lastError", reason);
+	        return { pulled: 0, ok: false, configured: false, reason };
+	      } finally {
+	        setState("busyPull", false);
+	      }
     },
   };
 
@@ -605,9 +646,10 @@ function createEmailsStore(initialMailbox?: Mailbox) {
     // Resolved data-source mode ("local" | "self_hosted"). Same signal pullNow() gates on
     // (ds.mode), so UI affordances stay in lockstep with the seam: self_hosted ingestion is
     // the server's job, so the manual Pull affordance is local-only.
-    mode: ds.mode,
-    selectedAddress: currentAddress,
-    selectedMessage: currentMessage,
+	    mode: ds.mode,
+	    selectedAddress: currentAddress,
+	    selectedSource: currentSource,
+	    selectedMessage: currentMessage,
     selectedBody: currentBody,
     conversation: currentConversation,
     links: currentLinks,

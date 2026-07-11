@@ -67,7 +67,7 @@ References:
 - Use the mailbox dialog to choose all mail or an exact email address.
 - Use CLI/API/MCP source filters to inspect active, legacy, or orphaned ingestion streams.
 - Sidebar labels filter the mailbox without mutating message labels.
-- Gmail-style Categories are listed separately as Primary, Social, Promotions,
+- Mail categories are listed separately as Primary, Social, Promotions,
   Updates, and Forums.
 - Sources carry provider/account provenance in the picker; domain diagnostics
   live in Domains.

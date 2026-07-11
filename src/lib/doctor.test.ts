@@ -8,8 +8,17 @@ import { suppressContact, upsertContact } from "../db/contacts.js";
 import { runDiagnostics, formatDiagnostics } from "./doctor.js";
 import type { DoctorCheck } from "./doctor.js";
 import type { Database } from "../db/database.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+let previousHome: string | undefined;
+let tempHome: string | undefined;
 
 beforeEach(() => {
+  previousHome = process.env["HOME"];
+  tempHome = mkdtempSync(join(tmpdir(), "emails-doctor-test-home-"));
+  process.env["HOME"] = tempHome;
   process.env["EMAILS_DB_PATH"] = ":memory:";
   delete process.env["EMAILS_MODE"];
   delete process.env["HASNA_EMAILS_MODE"];
@@ -25,6 +34,11 @@ afterEach(() => {
   delete process.env["HASNA_EMAILS_MODE"];
   delete process.env["EMAILS_MODE"];
   delete process.env["EMAILS_STORAGE_MODE"];
+  if (previousHome === undefined) delete process.env["HOME"];
+  else process.env["HOME"] = previousHome;
+  if (tempHome) rmSync(tempHome, { recursive: true, force: true });
+  tempHome = undefined;
+  previousHome = undefined;
 });
 
 describe("runDiagnostics", () => {
@@ -59,7 +73,7 @@ describe("runDiagnostics", () => {
     const provCheck = checks.find((c) => c.name === "Providers");
     expect(provCheck).toBeDefined();
     expect(provCheck!.status).toBe("warn");
-    expect(provCheck!.message).toContain("No supported providers");
+    expect(provCheck!.message).toContain("No providers configured");
   });
 
   it("passes when providers exist", async () => {
@@ -67,20 +81,7 @@ describe("runDiagnostics", () => {
     const checks = await runDiagnostics();
     const provCheck = checks.find((c) => c.name === "Providers");
     expect(provCheck!.status).toBe("pass");
-    expect(provCheck!.message).toContain("1 supported provider(s)");
-  });
-
-  it("does not fail local diagnostics for inactive legacy Gmail providers", async () => {
-    const gmail = createProvider({ name: "Old Gmail", type: "gmail" });
-    updateProvider(gmail.id, { active: false });
-
-    const checks = await runDiagnostics();
-    const provCheck = checks.find((c) => c.name === "Providers");
-    const gmailHealth = checks.find((c) => c.name.includes("Old Gmail"));
-
-    expect(provCheck).toMatchObject({ status: "warn" });
-    expect(provCheck?.message).toContain("legacy Gmail import-only provider(s) skipped");
-    expect(gmailHealth).toBeUndefined();
+    expect(provCheck!.message).toContain("1 provider(s)");
   });
 
   it("checks domain verification status", async () => {

@@ -4,7 +4,7 @@ import { parseJsonArray, parseJsonObject } from "./json.js";
 import { cappedLimit, safeOffset } from "./pagination.js";
 
 export type EmailAgentKey = "categorizer" | "labeler" | "fraud";
-export type EmailAgentProvider = "cerebras" | "groq";
+export type EmailAgentProvider = "external";
 export type EmailAgentRunStatus = "ok" | "error" | "skipped";
 
 export interface EmailAgentDefinition {
@@ -102,7 +102,7 @@ export const EMAIL_AGENT_DEFINITIONS: EmailAgentDefinition[] = [
     key: "categorizer",
     name: "Categorizer",
     description: "Classifies each inbound email into a useful category, priority, and short summary.",
-    defaultModel: "llama-3.3-70b-versatile",
+    defaultModel: "external-summary",
     appliesLabels: false,
     investigatesDomains: false,
   },
@@ -110,7 +110,7 @@ export const EMAIL_AGENT_DEFINITIONS: EmailAgentDefinition[] = [
     key: "labeler",
     name: "Labeler",
     description: "Applies concise local labels to each inbound email for mailbox organization.",
-    defaultModel: "llama-3.3-70b-versatile",
+    defaultModel: "external-summary",
     appliesLabels: true,
     investigatesDomains: false,
   },
@@ -118,7 +118,7 @@ export const EMAIL_AGENT_DEFINITIONS: EmailAgentDefinition[] = [
     key: "fraud",
     name: "Fraud Investigator",
     description: "Checks sender/link domains with read-only investigation tools and scores fraud risk.",
-    defaultModel: "llama-3.3-70b-versatile",
+    defaultModel: "external-summary",
     appliesLabels: true,
     investigatesDomains: true,
   },
@@ -205,7 +205,7 @@ export function ensureEmailAgentSettings(db?: Database): EmailAgentSetting[] {
     d.run(
       `INSERT OR IGNORE INTO email_agent_settings
        (agent_key, enabled, always_on, provider, model, apply_labels, use_network_tools, config_json, created_at, updated_at)
-       VALUES (?, 0, 0, 'groq', ?, ?, 1, '{}', ?, ?)`,
+       VALUES (?, 0, 0, 'external', ?, ?, 1, '{}', ?, ?)`,
       [agent.key, agent.defaultModel, agent.appliesLabels ? 1 : 0, timestamp, timestamp],
     );
   }
@@ -382,7 +382,7 @@ function ensureEmailAgentSettingsRowsOnly(db: Database): void {
     db.run(
       `INSERT OR IGNORE INTO email_agent_settings
        (agent_key, enabled, always_on, provider, model, apply_labels, use_network_tools, config_json, created_at, updated_at)
-       VALUES (?, 0, 0, 'groq', ?, ?, 1, '{}', ?, ?)`,
+       VALUES (?, 0, 0, 'external', ?, ?, 1, '{}', ?, ?)`,
       [agent.key, agent.defaultModel, agent.appliesLabels ? 1 : 0, timestamp, timestamp],
     );
   }

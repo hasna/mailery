@@ -248,7 +248,6 @@ const INBOUND_LABELS_TRIGGERS_SQL = `
 
 function mailSourceTypeSql(providerTypeSql: string, rawS3Sql: string, metadataS3Sql: string, messageIdSql: string): string {
   return `CASE
-    WHEN ${providerTypeSql} = 'gmail' THEN 'gmail'
     WHEN ${providerTypeSql} = 'ses' AND (${rawS3Sql} IS NOT NULL OR ${metadataS3Sql} IS NOT NULL OR COALESCE(${messageIdSql}, '') LIKE 'inbound/%') THEN 'ses_s3'
     WHEN ${providerTypeSql} = 'ses' THEN 'ses'
     WHEN ${providerTypeSql} = 'resend' THEN 'resend'
@@ -328,7 +327,7 @@ const MAIL_ARCHITECTURE_SCHEMA_SQL = `
     id TEXT PRIMARY KEY,
     mailbox_id TEXT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
     provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
-    type TEXT NOT NULL CHECK(type IN ('ses','ses_s3','gmail','resend','sandbox','legacy_inbound','manual')),
+    type TEXT NOT NULL CHECK(type IN ('ses','ses_s3','resend','sandbox','legacy_inbound','manual')),
     name TEXT NOT NULL,
     external_account_id TEXT,
     external_mailbox TEXT,
@@ -528,7 +527,7 @@ const MAIL_ARCHITECTURE_BACKFILL_SQL = `
          source_type,
          COALESCE(provider_name || ' ' || source_type, 'Legacy inbound'),
          substr(mailbox_id, 5),
-         CASE WHEN source_type IN ('legacy_inbound', 'gmail') THEN 'legacy' ELSE 'active' END,
+         CASE WHEN source_type = 'legacy_inbound' THEN 'legacy' ELSE 'active' END,
          '{}',
          CASE WHEN provider_id IS NULL THEN '{}' ELSE json_object(
            'id', provider_id,
@@ -681,10 +680,7 @@ const MAIL_ARCHITECTURE_INBOUND_INSERT_TRIGGER_SQL = `
            ${mailSourceTypeSql("provider.type", "NEW.raw_s3_url", "NEW.metadata_s3_url", "NEW.message_id")},
            COALESCE(provider.name || ' ' || ${mailSourceTypeSql("provider.type", "NEW.raw_s3_url", "NEW.metadata_s3_url", "NEW.message_id")}, 'Legacy inbound'),
            recipients.address,
-           CASE
-             WHEN provider.id IS NULL OR provider.type = 'gmail' THEN 'legacy'
-             ELSE 'active'
-           END,
+           CASE WHEN provider.id IS NULL THEN 'legacy' ELSE 'active' END,
            '{}',
            CASE WHEN provider.id IS NULL THEN '{}' ELSE json_object(
              'id', provider.id,
@@ -938,7 +934,6 @@ const PROVIDER_DELETE_GUARD_SQL = `
     OR EXISTS (SELECT 1 FROM emails WHERE provider_id = OLD.id LIMIT 1)
     OR EXISTS (SELECT 1 FROM events WHERE provider_id = OLD.id LIMIT 1)
     OR EXISTS (SELECT 1 FROM sandbox_emails WHERE provider_id = OLD.id LIMIT 1)
-    OR EXISTS (SELECT 1 FROM gmail_sync_state WHERE provider_id = OLD.id LIMIT 1)
   BEGIN
     SELECT RAISE(ABORT, 'Cannot delete provider with mail/source history; deactivate it instead');
   END;
@@ -1118,7 +1113,7 @@ const MIGRATIONS = [
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
-  -- Note: type CHECK constraint only covers resend/ses for migration 1, gmail added in migration 2
+  -- Note: type CHECK constraint only covers resend/ses for migration 1; sandbox support is added later.
 
   CREATE TABLE IF NOT EXISTS domains (
     id TEXT PRIMARY KEY,
@@ -1200,7 +1195,7 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (1);
   `,
 
-  // Migration 2: Add OAuth fields for Gmail provider + allow gmail type
+  // Migration 2: Add historical OAuth columns retained for old local databases.
   `
   ALTER TABLE providers ADD COLUMN oauth_client_id TEXT;
   ALTER TABLE providers ADD COLUMN oauth_client_secret TEXT;
@@ -1305,12 +1300,12 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (7);
   `,
 
-  // Migration 8: Recreate providers table to expand type CHECK constraint to include gmail and sandbox
+  // Migration 8: Recreate providers table to expand type CHECK constraint to include sandbox
   `
   CREATE TABLE IF NOT EXISTS providers_new (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    type TEXT NOT NULL CHECK(type IN ('resend', 'ses', 'gmail', 'sandbox')),
+    type TEXT NOT NULL CHECK(type IN ('resend', 'ses', 'sandbox')),
     api_key TEXT,
     region TEXT,
     access_key TEXT,
@@ -1326,7 +1321,7 @@ const MIGRATIONS = [
   );
   INSERT OR IGNORE INTO providers_new SELECT id, name, type, api_key, region, access_key, secret_key,
     oauth_client_id, oauth_client_secret, oauth_refresh_token, oauth_access_token, oauth_token_expiry,
-    active, created_at, updated_at FROM providers;
+    active, created_at, updated_at FROM providers WHERE type IN ('resend', 'ses', 'sandbox');
   DROP TABLE providers;
   ALTER TABLE providers_new RENAME TO providers;
   INSERT OR IGNORE INTO _migrations (id) VALUES (8);
@@ -1459,22 +1454,14 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (14);
   `,
 
-  // Migration 15: Gmail sync state + dedup index on inbound_emails(provider_id, message_id)
+  // Migration 15: Dedup index on inbound_emails(provider_id, message_id)
   `
-  CREATE TABLE IF NOT EXISTS gmail_sync_state (
-    provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
-    last_synced_at TEXT,
-    last_message_id TEXT,
-    history_id TEXT,
-    next_page_token TEXT,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_provider_message ON inbound_emails(provider_id, message_id)
     WHERE provider_id IS NOT NULL AND message_id IS NOT NULL;
   INSERT OR IGNORE INTO _migrations (id) VALUES (15);
   `,
 
-  // Migration 16: AI triage table — stores classification, priority, summary, sentiment, draft replies
+  // Migration 16: stored triage table — stores classification, priority, summary, sentiment, draft replies
   `
   CREATE TABLE IF NOT EXISTS email_triage (
     id TEXT PRIMARY KEY,
@@ -1505,7 +1492,7 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (17);
   `,
 
-  // Migration 18: Gmail archive metadata and S3 object references
+  // Migration 18: Provider metadata and S3 object references
   `
   ALTER TABLE inbound_emails ADD COLUMN provider_thread_id TEXT;
   ALTER TABLE inbound_emails ADD COLUMN provider_history_id TEXT;
@@ -1600,8 +1587,7 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (22);
   `,
 
-  // Migration 23: local read-state / archive / star for inbound mail (parity
-  // with Gmail flags, but server-independent — works for SES-S3 mail too).
+  // Migration 23: local read-state / archive / star for inbound mail.
   `
   ALTER TABLE inbound_emails ADD COLUMN is_read INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE inbound_emails ADD COLUMN read_at TEXT;
@@ -1664,9 +1650,9 @@ const MIGRATIONS = [
   INSERT OR IGNORE INTO _migrations (id) VALUES (27);
   `,
 
-  // Migration 28: denormalized is_sent flag on inbound_emails. Mail I sent shows
-  // up in a Gmail sync labelled SENT; this indexed flag lets the Sent folder and
-  // the receiving folders be plain indexed seeks (no JSON label scanning).
+  // Migration 28: denormalized is_sent flag on inbound_emails. Imported sent
+  // mail can be labelled SENT; this indexed flag lets Sent and received folders
+  // be plain indexed seeks (no JSON label scanning).
   `
   ALTER TABLE inbound_emails ADD COLUMN is_sent INTEGER NOT NULL DEFAULT 0;
   UPDATE inbound_emails
@@ -1727,8 +1713,8 @@ const MIGRATIONS = [
   `,
 
   // Migration 32: standalone inbound message-id index for S3 object dedupe.
-  // The Gmail dedupe index is keyed by provider_id first; S3 sync probes by
-  // message_id alone, so it needs its own indexed seek to avoid full scans.
+  // Provider dedupe is keyed by provider_id first; S3 sync probes by message_id
+  // alone, so it needs its own indexed seek to avoid full scans.
   `
   CREATE INDEX IF NOT EXISTS idx_inbound_message_id ON inbound_emails(message_id)
     WHERE message_id IS NOT NULL;
@@ -1796,7 +1782,7 @@ const MIGRATIONS = [
     agent_key TEXT PRIMARY KEY,
     enabled INTEGER NOT NULL DEFAULT 0,
     always_on INTEGER NOT NULL DEFAULT 0,
-    provider TEXT NOT NULL DEFAULT 'groq' CHECK(provider IN ('cerebras','groq')),
+    provider TEXT NOT NULL DEFAULT 'external' CHECK(provider IN ('external')),
     model TEXT,
     apply_labels INTEGER NOT NULL DEFAULT 1,
     use_network_tools INTEGER NOT NULL DEFAULT 1,
@@ -1808,7 +1794,7 @@ const MIGRATIONS = [
     id TEXT PRIMARY KEY,
     agent_key TEXT NOT NULL,
     inbound_email_id TEXT NOT NULL REFERENCES inbound_emails(id) ON DELETE CASCADE,
-    provider TEXT NOT NULL CHECK(provider IN ('cerebras','groq')),
+    provider TEXT NOT NULL CHECK(provider IN ('external')),
     model TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('ok','error','skipped')),
     category TEXT,
@@ -1839,7 +1825,7 @@ const MIGRATIONS = [
     period TEXT NOT NULL CHECK(period IN ('today','yesterday','last7','month')),
     since TEXT NOT NULL,
     until TEXT NOT NULL,
-    provider TEXT NOT NULL CHECK(provider IN ('local','cerebras','groq')),
+    provider TEXT NOT NULL CHECK(provider IN ('local','external')),
     model TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('ok','error')),
     message_count INTEGER NOT NULL DEFAULT 0,
@@ -2218,7 +2204,7 @@ function ensureSchema(db: Database): void {
   ensureProvTable("CREATE INDEX IF NOT EXISTS idx_enrollments_due ON sequence_enrollments(status, next_send_at, id)");
 
   // Migration 35 idempotent guarantee: expression indexes for display-name
-  // sender filters in sent mail and Gmail-synced sent mail.
+  // sender filters in sent mail and imported sent mail.
   ensureProvTable(`CREATE INDEX IF NOT EXISTS idx_emails_sender_canonical_sent ON emails(${sqlEmailAddress("from_address")}, sent_at)`);
   ensureProvTable(`CREATE INDEX IF NOT EXISTS idx_emails_sender_domain_sent ON emails(${sqlEmailDomain("from_address")}, sent_at)`);
   ensureProvTable(`CREATE INDEX IF NOT EXISTS idx_inbound_sender_canonical_recv ON inbound_emails(is_sent, is_archived, ${sqlEmailAddress("from_address")}, received_at)`);
@@ -2444,18 +2430,9 @@ function ensureSchema(db: Database): void {
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_warming_domain ON warming_schedules(domain)");
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_warming_status ON warming_schedules(status)");
 
-  // Gmail sync state
-  ensureTable(`CREATE TABLE IF NOT EXISTS gmail_sync_state (
-    provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
-    last_synced_at TEXT,
-    last_message_id TEXT,
-    history_id TEXT,
-    next_page_token TEXT,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )`);
   ensureMailArchitecture(db);
 
-  // Dedup index on inbound_emails for Gmail sync
+  // Dedup index on inbound_emails for provider imports
   ensureIndex(`CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_provider_message ON inbound_emails(provider_id, message_id)
     WHERE provider_id IS NOT NULL AND message_id IS NOT NULL`);
   ensureIndex("CREATE INDEX IF NOT EXISTS idx_inbound_message_id ON inbound_emails(message_id) WHERE message_id IS NOT NULL");
@@ -2487,7 +2464,7 @@ function ensureSchema(db: Database): void {
     agent_key TEXT PRIMARY KEY,
     enabled INTEGER NOT NULL DEFAULT 0,
     always_on INTEGER NOT NULL DEFAULT 0,
-    provider TEXT NOT NULL DEFAULT 'groq' CHECK(provider IN ('cerebras','groq')),
+    provider TEXT NOT NULL DEFAULT 'external' CHECK(provider IN ('external')),
     model TEXT,
     apply_labels INTEGER NOT NULL DEFAULT 1,
     use_network_tools INTEGER NOT NULL DEFAULT 1,
@@ -2499,7 +2476,7 @@ function ensureSchema(db: Database): void {
     id TEXT PRIMARY KEY,
     agent_key TEXT NOT NULL,
     inbound_email_id TEXT NOT NULL REFERENCES inbound_emails(id) ON DELETE CASCADE,
-    provider TEXT NOT NULL CHECK(provider IN ('cerebras','groq')),
+    provider TEXT NOT NULL CHECK(provider IN ('external')),
     model TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('ok','error','skipped')),
     category TEXT,
@@ -2526,7 +2503,7 @@ function ensureSchema(db: Database): void {
     period TEXT NOT NULL CHECK(period IN ('today','yesterday','last7','month')),
     since TEXT NOT NULL,
     until TEXT NOT NULL,
-    provider TEXT NOT NULL CHECK(provider IN ('local','cerebras','groq')),
+    provider TEXT NOT NULL CHECK(provider IN ('local','external')),
     model TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('ok','error')),
     message_count INTEGER NOT NULL DEFAULT 0,

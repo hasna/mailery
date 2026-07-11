@@ -37,7 +37,6 @@ export interface EmailSystemStatus {
   providers: {
     total: number;
     active: number;
-    legacy_gmail: number;
     by_type: Record<string, number>;
   };
   domains: {
@@ -259,10 +258,8 @@ function firstDomainFixCommand(
 
 export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemStatus {
   const mode = resolveEmailsMode();
-  const allProviders = listProviderSummaries(db);
-  const providers = allProviders.filter((provider) => provider.type !== "gmail");
-  const legacyGmailProviders = allProviders.filter((provider) => provider.type === "gmail");
-  const providersById = new Map(allProviders.map((provider) => [provider.id, provider]));
+  const providers = listProviderSummaries(db);
+  const providersById = new Map(providers.map((provider) => [provider.id, provider]));
   const config = loadConfig();
   const inboundBuckets = getInboundBuckets();
   const inboxCounts = inboxSummary(db);
@@ -306,7 +303,6 @@ export function getEmailSystemStatus(db: Database = getDatabase()): EmailSystemS
     providers: {
       total: providers.length,
       active: providers.filter((provider) => provider.active).length,
-      legacy_gmail: legacyGmailProviders.length,
       by_type: countByType(providers),
     },
     domains: {
@@ -413,7 +409,6 @@ export function formatEmailSystemStatus(status: EmailSystemStatus): string {
   lines.push(`  Mailboxes: ${status.mailboxes.counts.inbox} inbox, ${status.mailboxes.counts.unread} unread, ${status.mailboxes.counts.sent} sent`);
   lines.push(`  Inbox:     ${status.inbox.total} total, ${status.inbox.unread} unread${status.inbox.latest_received_at ? `, latest ${status.inbox.latest_received_at}` : ""}`);
   lines.push(`  Sources:   ${status.sources.total} ingestion source(s), ${status.sources.legacy} legacy, ${status.sources.orphaned} orphaned, realtime ${status.inbox.realtime.queue_configured ? "configured" : "not configured"}`);
-  if (status.providers.legacy_gmail > 0) lines.push(`  Legacy Gmail: ${status.providers.legacy_gmail} import-only provider(s) skipped`);
   if (status.inbox.realtime.last_error) lines.push(`  Last realtime error: ${status.inbox.realtime.last_error}`);
   if (status.provisioning.domains_failed || status.provisioning.addresses_failed) {
     lines.push(`  Provisioning failures: ${status.provisioning.domains_failed} domain(s), ${status.provisioning.addresses_failed} address(es)`);

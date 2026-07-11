@@ -9,7 +9,7 @@ function setupDb() {
   process.env["EMAILS_DB_PATH"] = ":memory:";
   const db = getDatabase();
   const providerId = uuid();
-  db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Gmail Test', 'gmail', 1)`, [providerId]);
+  db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'Sandbox Test', 'sandbox', 1)`, [providerId]);
   return { db, providerId };
 }
 
@@ -37,7 +37,7 @@ afterEach(() => {
 });
 
 describe("inbound count command", () => {
-  it("counts received mail without Gmail SENT rows", async () => {
+  it("counts received mail without imported SENT rows", async () => {
     const { db, providerId } = setupDb();
     storeInboundEmail({
       provider_id: providerId,

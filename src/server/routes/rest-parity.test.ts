@@ -143,8 +143,8 @@ describe("emails serve REST parity smoke", () => {
     saveEmailAgentRun({
       agent_key: "categorizer",
       inbound_email_id: inboundEmail.id,
-      provider: "groq",
-      model: "llama-3.3-70b-versatile",
+      provider: "external",
+      model: "external-summary",
       status: "ok",
       category: "fyi",
       labels: ["fyi"],
@@ -492,37 +492,6 @@ describe("emails serve REST parity smoke", () => {
     expect(await json<Array<unknown>>("/api/emails?limit=0")).toHaveLength(1);
     expect(await json<Array<unknown>>("/api/emails?limit=bad")).toHaveLength(3);
     expect(await json<Array<unknown>>("/api/inbound?limit=0")).toHaveLength(1);
-    expect(await json<Array<unknown>>("/api/triage?limit=0")).toHaveLength(1);
-  });
-
-  it("paginates REST triage results with offset", async () => {
-    const provider = createProvider({ name: "sandbox", type: "sandbox", active: true });
-    const db = getDatabase();
-    for (let i = 0; i < 4; i++) {
-      const email = createEmail(provider.id, {
-        from: "ops@example.com",
-        to: `triaged-${i}@example.com`,
-        subject: `REST triage ${i}`,
-        text: "hello",
-      });
-      const triage = saveTriage({
-        email_id: email.id,
-        label: "fyi",
-        priority: 3,
-        summary: `REST summary ${i}`,
-        draft_reply: `REST large draft ${i} `.repeat(500),
-      });
-      db.run("UPDATE email_triage SET triaged_at = ?, created_at = ? WHERE id = ?", [
-        `2026-01-01T00:0${i}:00.000Z`,
-        `2026-01-01T00:0${i}:00.000Z`,
-        triage.id,
-      ]);
-    }
-
-    const page = await json<Array<Record<string, unknown>>>("/api/triage?limit=2&offset=1");
-    expect(page.map((item) => item.summary)).toEqual(["REST summary 2", "REST summary 1"]);
-    expect(page[0]).not.toHaveProperty("draft_reply");
-    expect(JSON.stringify(page)).not.toContain("REST large draft");
   });
 
   it("paginates inbound REST results after recipient filtering", async () => {

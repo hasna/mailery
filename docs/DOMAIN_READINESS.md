@@ -7,8 +7,8 @@ Emails supports two deployment modes:
 
 Provider integrations are capabilities, not deployment modes. AWS SES/S3/SNS/SQS,
 Route53, Cloudflare and Resend always use credentials supplied by the operator
-and communicate directly with those providers. Gmail import is local-only; it
-is not a backend for the self-hosted Emails service.
+and communicate directly with those providers. Additional mailbox providers are
+not supported as provider backends.
 
 A sending domain is ready only after ownership, DKIM and SPF evidence is valid.
 Inbound readiness additionally requires an active provider route and durable

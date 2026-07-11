@@ -1,8 +1,8 @@
 import { For, Show, createSignal } from "solid-js";
 import { TextAttributes, type MouseEvent } from "@opentui/core";
 import {
-  GMAIL_CATEGORY_LABELS,
-  isGmailCategoryLabel,
+  MAIL_CATEGORY_LABELS,
+  isMailCategoryLabel,
   labelDisplayName,
   labelNameAliases,
   labelNameKey,
@@ -37,7 +37,7 @@ export function Sidebar() {
     return emails.state.labels.reduce((sum, item) => sum + (aliases.has(item.name) ? item.count : 0), 0);
   };
   const labelRows = () => emails.state.labels
-    .filter((label) => !isGmailCategoryLabel(label.name) && !SYSTEM_LABEL_KEYS.has(labelNameKey(label.name)))
+    .filter((label) => !isMailCategoryLabel(label.name) && !SYSTEM_LABEL_KEYS.has(labelNameKey(label.name)))
     .slice(0, 4);
 
   return (
@@ -77,7 +77,7 @@ export function Sidebar() {
 
       <SectionHeader label={open().categories ? "Categories" : "Categories +"} onPress={() => setOpen((value) => ({ ...value, categories: !value.categories }))} />
       <Show when={open().categories}>
-        <For each={GMAIL_CATEGORY_LABELS}>
+        <For each={MAIL_CATEGORY_LABELS}>
           {(category) => {
             const active = () => activeLabel(category.name);
             const fg = () => active() ? selectedForeground(theme, theme.primary) : theme.text;

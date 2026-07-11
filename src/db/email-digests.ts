@@ -5,7 +5,7 @@ import { cappedLimit, safeOffset } from "./pagination.js";
 
 export type EmailDigestPeriod = "today" | "yesterday" | "last7" | "month";
 export type EmailDigestStatus = "ok" | "error";
-export type EmailDigestProvider = "local" | "cerebras" | "groq";
+export type EmailDigestProvider = "local" | "external";
 
 export interface EmailDigest {
   id: string;

@@ -28,8 +28,6 @@ describe("CLI router", () => {
       [["contacts", "list"], ["contacts"]],
       [["schedule", "list"], ["misc"]],
       [["links", "abc123"], ["inbox"]],
-      [["ask", "latest"], ["status"]],
-      [["project-panel"], ["status"]],
       [["logs"], ["daemon"]],
     ];
 
@@ -48,16 +46,8 @@ describe("CLI router", () => {
     expect(requestedCommand(["--json", "extract", "links"])).toBe("extract");
     expect([...commandModulesFor(["definitely-not-a-command"])]).toEqual([...allCommandModules]);
     expect(routeRootPromptArgs(["definitely-not-a-command"])).toEqual(["definitely-not-a-command"]);
-    expect(routeRootPromptArgs(["--json", "extract", "links", "from", "latest", "email"])).toEqual([
-      "--json",
-      "agent",
-      "extract",
-      "links",
-      "from",
-      "latest",
-      "email",
-    ]);
-    expect(routeRootPromptArgs(["links", "from", "latest", "email"])).toEqual(["agent", "links", "from", "latest", "email"]);
+    expect(routeRootPromptArgs(["--json", "extract", "links", "from", "latest", "email"])).toEqual(["--json", "extract", "links", "from", "latest", "email"]);
+    expect(routeRootPromptArgs(["links", "from", "latest", "email"])).toEqual(["links", "from", "latest", "email"]);
     expect(routeRootPromptArgs(["links", "abc123"])).toEqual(["links", "abc123"]);
     expect(routeRootPromptArgs(["--help"])).toEqual(["--help"]);
   });

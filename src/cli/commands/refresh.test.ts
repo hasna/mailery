@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { closeDatabase, resetDatabase } from "../../db/database.js";
 
 // Mock the pull engine so we test the command's behavior, not AWS.
-let pullResult: { pulled: number; ok: boolean; reason?: string; configured: boolean };
+let pullResult: { pulled: number; ok: boolean; reason?: string; configured: boolean; forwarded?: { attempted: number; sent: number; failed: number; skipped: number } };
 let lastOpts: unknown;
 mock.module("../tui/autopull.js", () => ({
   autoPull: mock(async (opts: unknown) => { lastOpts = opts; return pullResult; }),

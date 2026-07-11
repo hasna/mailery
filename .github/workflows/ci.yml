@@ -42,9 +42,7 @@ jobs:
             -u AWS_CONTAINER_CREDENTIALS_FULL_URI -u AWS_CONTAINER_AUTHORIZATION_TOKEN \
             -u EMAILS_AWS_REGION -u EMAILS_SES_AWS_PROFILE \
             -u RESEND_API_KEY -u RESEND_WEBHOOK_SECRET \
-            -u CEREBRAS_API_KEY -u GROQ_API_KEY \
             -u BRANDSIGHT_API_KEY -u BRANDSIGHT_API_SECRET -u BRANDSIGHT_CUSTOMER_ID \
-            -u BRAVE_API_KEY -u BRAVE_SEARCH_API_KEY \
             AWS_EC2_METADATA_DISABLED=true \
             HOME="$tmp_home" EMAILS_MODE=local EMAILS_DB_PATH=:memory: bun test
       - name: Build

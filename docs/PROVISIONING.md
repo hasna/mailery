@@ -75,7 +75,7 @@ received (SES→S3→SQLite). See `docs/PLAN-PROVISIONING.md` for the architectu
 
 `emails config set inbound_s3_bucket <bucket>` makes `emails inbox sync-s3` default to that inbound bucket (no `--bucket` needed). Inbound buckets must block public access and use server-side encryption; keep the versioning policy explicit because raw MIME objects are the mailbox for the `ses-s3` strategy. `emails doctor` reports SES sandbox/production + provisioning creds.
 
-### Integration status (priority: SES, Resend, Cloudflare — not Gmail)
+### Integration status (priority: SES, Resend, Cloudflare)
 - **SES**: verified + send/receive tested with operator-owned domains.
 - **Resend**: ✅ send tested end-to-end (Resend send → our domain → SES inbound).
 - **Cloudflare**: ✅ DNS + Email Routing client.

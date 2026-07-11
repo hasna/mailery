@@ -1,5 +1,5 @@
 // Provider types
-export type ProviderType = "resend" | "ses" | "gmail" | "sandbox";
+export type ProviderType = "resend" | "ses" | "sandbox";
 
 export interface Provider {
   id: string;
@@ -28,11 +28,6 @@ export interface CreateProviderInput {
   region?: string;
   access_key?: string;
   secret_key?: string;
-  oauth_client_id?: string;
-  oauth_client_secret?: string;
-  oauth_refresh_token?: string;
-  oauth_access_token?: string;
-  oauth_token_expiry?: string;
 }
 
 export interface ProviderRow {
@@ -56,7 +51,7 @@ export interface ProviderRow {
 // Core mail architecture model
 export type MailboxStatus = "active" | "inactive";
 export type MailFolderRole = "inbox" | "sent" | "archive" | "spam" | "trash" | "custom";
-export type MailboxSourceType = "ses" | "ses_s3" | "gmail" | "resend" | "sandbox" | "legacy_inbound" | "manual";
+export type MailboxSourceType = "ses" | "ses_s3" | "resend" | "sandbox" | "legacy_inbound" | "manual";
 export type MailboxSourceStatus = "active" | "inactive" | "legacy";
 export type MailboxMessageDirection = "inbound" | "outbound" | "sent";
 

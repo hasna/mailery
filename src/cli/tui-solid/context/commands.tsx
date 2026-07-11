@@ -62,6 +62,12 @@ function createCommands(): Accessor<EmailsCommand[]> {
       run: () => emails.actions.openDialog("address"),
     },
     {
+      id: "sources.open",
+      title: "Sources",
+      category: "Mail",
+      run: () => emails.actions.openDialog("source"),
+    },
+    {
       id: "filter.open",
       title: "Filter Mail",
       category: "Mail",

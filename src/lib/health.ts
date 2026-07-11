@@ -29,8 +29,6 @@ function locallyConfigured(provider: Provider): { ok: boolean; message?: string 
       return provider.api_key ? { ok: true } : { ok: false, message: "Missing Resend API key" };
     case "ses":
       return provider.region ? { ok: true } : { ok: false, message: "Missing AWS region" };
-    case "gmail":
-      return { ok: false, message: "Gmail is legacy-only and no longer supports live provider checks" };
     default:
       return { ok: false, message: `Unknown provider type: ${(provider as { type?: unknown }).type}` };
   }

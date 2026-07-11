@@ -15,8 +15,6 @@ const lazyRootModules = [
   "./lib/health.js",
   "./lib/dns-check.js",
   "./lib/email-verify.js",
-  "./lib/triage.js",
-  "./lib/cerebras.js",
   "./lib/forwarding.js",
 ];
 
@@ -80,24 +78,9 @@ describe("public package entrypoint", () => {
       "processForwardingRules",
       "extractEmailLinks",
       "formatEmailLinks",
-      "buildReadOnlyEmailsTools",
-      "runEmailsAgent",
-      "formatEmailsAgentResult",
-      "resolveEmailsAgentDefaults",
       "getInboundAttachmentStorageConfig",
-      "getDefaultGmailArchiveS3Bucket",
-      "getDefaultGmailArchiveS3Region",
-      "getDefaultGmailArchiveS3Prefix",
-      "getGmailArchiveConfig",
-      "buildGmailArchiveKeys",
-      "uploadGmailArchive",
-      "uploadGmailArchiveAttachment",
-      "uploadGmailArchiveManifest",
-      "verifyGmailArchive",
-      "migrateS3Prefix",
       "listSandboxEmailSummaries",
       "listScheduledEmailSummaries",
-      "listTriagedSummaries",
     ]) {
       expect(typeof (emails as Record<string, unknown>)[name]).toBe("function");
     }

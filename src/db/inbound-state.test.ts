@@ -351,9 +351,9 @@ describe("inbound filters + unread count", () => {
     expect(getUnreadCount(undefined, db)).toBe(1);
   });
 
-  it("getUnreadCount excludes Gmail SENT rows", () => {
-    const providerId = "gmail-provider";
-    db.run("INSERT INTO providers (id, name, type) VALUES (?, 'gmail', 'gmail')", [providerId]);
+  it("getUnreadCount excludes imported SENT rows", () => {
+    const providerId = "sandbox-provider";
+    db.run("INSERT INTO providers (id, name, type) VALUES (?, 'sandbox', 'sandbox')", [providerId]);
     storeInboundEmail({
       provider_id: providerId,
       message_id: "<received@x.com>",

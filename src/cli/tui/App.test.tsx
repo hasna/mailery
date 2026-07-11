@@ -14,15 +14,17 @@ import { saveEmailAgentRun } from "../../db/email-agents.js";
 import { storeInboundEmail } from "../../db/inbound.js";
 import { createProvider } from "../../db/providers.js";
 import { setSetting } from "./data.js";
+import { registerS3Source } from "../../lib/s3-sync.js";
 import { App } from "./App.js";
 import { resolveAddressChoice } from "../tui-solid/context/emails-state.js";
 import { resetMailDataSource } from "../../lib/mail-data-source.js";
 
 let autoPullCalls = 0;
+let autoPullResult = { pulled: 2, ok: true, configured: true, reason: undefined as string | undefined };
 mock.module("./autopull.js", () => ({
   autoPull: mock(async () => {
     autoPullCalls += 1;
-    return { pulled: 2, ok: true, configured: true };
+    return autoPullResult;
   }),
 }));
 
@@ -61,6 +63,7 @@ beforeEach(() => {
   setSetting("autoPull", false);
   setSetting("defaultAddress", null);
   autoPullCalls = 0;
+  autoPullResult = { pulled: 2, ok: true, configured: true, reason: undefined };
 });
 
 afterEach(() => {
@@ -262,7 +265,7 @@ describe("Emails Solid TUI", () => {
     saveEmailAgentRun({
       agent_key: "categorizer",
       inbound_email_id: email.id,
-      provider: "groq",
+      provider: "external",
       model: "test",
       status: "ok",
       summary: "AI summary belongs below the email body.",
@@ -317,7 +320,7 @@ describe("Emails Solid TUI", () => {
     expect(frame()).not.toContain("Search: invoice");
   });
 
-  it("filters mailbox content from sidebar labels and Gmail categories", async () => {
+  it("filters mailbox content from sidebar labels and mail categories", async () => {
     seedMessage("urgent message", "2026-01-03T10:00:00.000Z", "ops@example.com", ["urgent"]);
     seedMessage("updates message", "2026-01-02T10:00:00.000Z", "ops@example.com", ["CATEGORY_UPDATES"]);
     seedMessage("plain message", "2026-01-01T10:00:00.000Z");
@@ -344,8 +347,24 @@ describe("Emails Solid TUI", () => {
     expect(frame()).not.toContain("plain message");
   });
 
-  it("opens inbox picker, compose, domains dialog, and settings dialog from visible buttons", async () => {
+  it("opens inbox picker, sources, compose, domains dialog, and settings dialog from visible buttons", async () => {
     seedMessage("workspace smoke");
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "s3://workspace-source/inbound/msg001",
+      raw_s3_url: "s3://workspace-source/inbound/msg001",
+      from_address: "source@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "source only",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-05T12:00:00.000Z",
+    });
+    registerS3Source({ id: "s3-workspace-source", bucket: "workspace-source", prefix: "inbound/", providerId, status: "live", liveSyncEnabled: true });
     createDomain(providerId, "example.com");
     await renderApp();
     expect(frame()).not.toContain("Profiles");
@@ -358,6 +377,14 @@ describe("Emails Solid TUI", () => {
     expect(frame()).toContain("configured");
     expect(frame()).not.toContain("Profiles");
     await key("escape");
+
+    await clickText("Sources");
+    expect(frame()).toContain("Sources");
+    expect(frame()).toContain("workspace-source");
+    await clickText("S3 ingestion");
+    expect(frame()).toContain("Source: S3 ingestion");
+    expect(frame()).toContain("source only");
+    expect(frame()).not.toContain("workspace smoke");
 
     await clickText("Compose");
     expect(frame()).toContain("Compose");
@@ -387,20 +414,12 @@ describe("Emails Solid TUI", () => {
     await clickText("Settings");
     expect(frame()).toContain("Settings");
     expect(frame()).toContain("Sync");
-    expect(frame()).toContain("Agents");
     expect(frame()).toContain("Defaults");
     expect(frame()).toContain("Display");
 
     await clickText("Sync");
     expect(frame()).toContain("Settings / Sync");
     expect(frame()).toContain("Auto-pull inbound");
-    await key("escape");
-
-    await clickText("Agents");
-    expect(frame()).toContain("Settings / Agents");
-    expect(frame()).toContain("Default provider");
-    expect(frame()).toContain("Groq email model");
-    expect(frame()).toContain("llama-3.3-70b-versatile");
     await key("escape");
 
     await clickText("Defaults");
@@ -450,6 +469,18 @@ describe("Emails Solid TUI", () => {
     expect(toastLine).toBeGreaterThanOrEqual(0);
     expect(toastLine).toBeLessThan(8);
     expect(lines[toastLine]!.indexOf("Pull complete")).toBeGreaterThan(58);
+  });
+
+  it("pull now surfaces autopull failures in toast and sidebar state", async () => {
+    autoPullResult = { pulled: 0, ok: false, configured: true, reason: "S3 list failed" };
+    seedMessage("pull failure");
+    await renderApp();
+
+    await clickText("Pull");
+
+    expect(autoPullCalls).toBe(1);
+    expect(frame()).toContain("Pull failed");
+    expect(frame()).toContain("S3 list failed");
   });
 
   // The manual Pull affordance triggers LOCAL S3→SQLite ingestion (autoPull). In self_hosted

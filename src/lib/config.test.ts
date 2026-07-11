@@ -4,8 +4,6 @@ import { join } from "path";
 import {
   loadConfig, saveConfig, getConfigValue, setConfigValue,
   getDefaultProviderId, getFailoverProviderIds, getInboundAttachmentStorageConfig,
-  getDefaultGmailArchiveS3Bucket, getDefaultGmailArchiveS3Prefix,
-  getDefaultGmailArchiveS3Region, getGmailArchiveConfig,
   CANONICAL_OPEN_EMAILS_S3_BUCKET,
   CANONICAL_OPEN_EMAILS_S3_REGION,
   CANONICAL_OPEN_EMAILS_SECRET_PATHS,
@@ -252,31 +250,6 @@ describe("config", () => {
     });
   });
 
-  it("getInboundAttachmentStorageConfig keeps legacy attachment key compatibility", () => {
-    setConfigValue("gmail_attachment_storage", "none");
-    setConfigValue("gmail_s3_region", "eu-central-1");
-
-    expect(getInboundAttachmentStorageConfig()).toMatchObject({
-      attachment_storage: "none",
-      s3_region: "eu-central-1",
-    });
-  });
-
-  it("keeps legacy Gmail archive config helpers for old imports", () => {
-    expect(getDefaultGmailArchiveS3Bucket()).toBeNull();
-    expect(getDefaultGmailArchiveS3Region()).toBe(CANONICAL_OPEN_EMAILS_S3_REGION);
-    expect(getDefaultGmailArchiveS3Prefix()).toBe("gmail");
-
-    setConfigValue("gmail_archive_s3_bucket", "legacy-bucket");
-    setConfigValue("gmail_archive_s3_region", "eu-west-1");
-    setConfigValue("gmail_archive_s3_prefix", "legacy/gmail");
-
-    expect(getGmailArchiveConfig()).toEqual({
-      archive_s3_bucket: "legacy-bucket",
-      archive_s3_region: "eu-west-1",
-      archive_s3_prefix: "legacy/gmail",
-    });
-  });
 });
 
 import { getInboundBuckets, addInboundBucket } from "./config.js";

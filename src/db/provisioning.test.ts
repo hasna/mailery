@@ -131,7 +131,7 @@ describe("setAddressProvisioning / getAddressProvisioning", () => {
     setAddressProvisioning(a.id, {
       domain_id: dom.id,
       receive_strategy: "ses-s3",
-      forward_to: "me@gmail.com",
+      forward_to: "me@example.net",
       routing_rule_id: "rule1",
       provisioning_status: "validating",
       next_check_at: "2026-06-02T00:00:00.000Z",
@@ -139,7 +139,7 @@ describe("setAddressProvisioning / getAddressProvisioning", () => {
     const p = getAddressProvisioning(a.id)!;
     expect(p.domain_id).toBe(dom.id);
     expect(p.receive_strategy).toBe("ses-s3");
-    expect(p.forward_to).toBe("me@gmail.com");
+    expect(p.forward_to).toBe("me@example.net");
     expect(p.routing_rule_id).toBe("rule1");
     expect(p.provisioning_status).toBe("validating");
   });

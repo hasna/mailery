@@ -13,7 +13,7 @@ import {
   listMailbox, mailboxCounts, getMessageBody, toggleStar, toggleRead, archiveMessage,
   replyDefaults, sendComposed, listSources, listInboxAddresses, getSettings, setSetting,
   defaultFromAddress, providerIdForSender, listDomainSummaries, mailboxLabel, addressChoiceByAddress,
-  listLabelSummaries, toggleMessageLabel, getConversation, labelDisplayName, isGmailCategoryLabel,
+  listLabelSummaries, toggleMessageLabel, getConversation, labelDisplayName, isMailCategoryLabel,
   groupMailboxMessages, isImportantMessage, listMailboxSources, listMailboxStatus, searchMailbox,
   providerSourceId,
 } from "./data.js";
@@ -111,8 +111,8 @@ describe("tui data — mailboxes", () => {
     const db = getDatabase();
     createEmail(providerId, { from: "me@x.com", to: "you@y.com", subject: "app-sent", text: "body" }, "app-sent", db);
     storeInboundEmail({
-      provider_id: providerId, message_id: "<gmail-sent@x>", from_address: "me@x.com", to_addresses: ["you@y.com"],
-      cc_addresses: [], subject: "gmail sent", text_body: "body", html_body: null, attachments: [],
+      provider_id: providerId, message_id: "<imported-sent@x>", from_address: "me@x.com", to_addresses: ["you@y.com"],
+      cc_addresses: [], subject: "imported sent", text_body: "body", html_body: null, attachments: [],
       label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
     }, db);
 
@@ -161,8 +161,8 @@ describe("tui data — mailboxes", () => {
     const db = getDatabase();
     createEmail(providerId, { from: "me@x.com", to: "you@y.com", subject: "app-sent", text: "body" }, "app-sent", db);
     storeInboundEmail({
-      provider_id: providerId, message_id: "<gmail-sent@x>", from_address: "me@x.com", to_addresses: ["you@y.com"],
-      cc_addresses: [], subject: "gmail sent", text_body: "body", html_body: null, attachments: [],
+      provider_id: providerId, message_id: "<imported-sent@x>", from_address: "me@x.com", to_addresses: ["you@y.com"],
+      cc_addresses: [], subject: "imported sent", text_body: "body", html_body: null, attachments: [],
       label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
     }, db);
 
@@ -229,7 +229,7 @@ describe("tui data — mailboxes", () => {
     expect(toggleMessageLabel(updated, "urgent")).not.toContain("urgent");
   });
 
-  it("filters mailboxes by labels and displays Gmail categories without the Category prefix", () => {
+  it("filters mailboxes by labels and displays mail categories without the Category prefix", () => {
     const urgent = seed("urgent work");
     seed("category update", { labels: ["CATEGORY_UPDATES"] });
     seed("plain note");
@@ -240,8 +240,8 @@ describe("tui data — mailboxes", () => {
     expect(listMailbox("inbox", { label: "category-updates" }).map((m) => m.subject)).toEqual(["category update"]);
     expect(listMailbox("inbox", { label: "category_updates" }).map((m) => m.subject)).toEqual(["category update"]);
     expect(labelDisplayName("category_updates")).toBe("Updates");
-    expect(isGmailCategoryLabel("category-updates")).toBe(true);
-    expect(isGmailCategoryLabel("urgent")).toBe(false);
+    expect(isMailCategoryLabel("category-updates")).toBe(true);
+    expect(isMailCategoryLabel("urgent")).toBe(false);
   });
 
   it("filters by search", () => {
@@ -250,24 +250,44 @@ describe("tui data — mailboxes", () => {
     expect(listMailbox("inbox", { search: "invoice" }).map((m) => m.subject)).toEqual(["invoice report"]);
   });
 
+  it("searches inbound message body text before applying the page limit", () => {
+    seed("subject-only");
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "<body-search@x>",
+      from_address: "alice@ext.com",
+      to_addresses: ["me@x.com"],
+      cc_addresses: [],
+      subject: "plain subject",
+      text_body: "body-only-token from aws mail",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-05T12:00:00.000Z",
+    });
+
+    expect(listMailbox("inbox", { search: "body-only-token" }).map((m) => m.subject)).toEqual(["plain subject"]);
+  });
+
   it("builds conversations from provider thread ids when RFC thread ids are absent", () => {
     const db = getDatabase();
     storeInboundEmail({
-      provider_id: providerId, message_id: "<gmail-sent-thread@x>", from_address: "me@x.com", to_addresses: ["client@y.com"],
-      cc_addresses: [], subject: "gmail sent thread", text_body: "sent body", html_body: null, attachments: [],
-      label_ids: ["SENT"], provider_thread_id: "gmail-thread-1", headers: {}, raw_size: 1, received_at: "2026-01-01T10:00:00.000Z",
+      provider_id: providerId, message_id: "<imported-sent-thread@x>", from_address: "me@x.com", to_addresses: ["client@y.com"],
+      cc_addresses: [], subject: "imported sent thread", text_body: "sent body", html_body: null, attachments: [],
+      label_ids: ["SENT"], provider_thread_id: "imported-thread-1", headers: {}, raw_size: 1, received_at: "2026-01-01T10:00:00.000Z",
     }, db);
     storeInboundEmail({
-      provider_id: providerId, message_id: "<gmail-reply-thread@x>", from_address: "client@y.com", to_addresses: ["me@x.com"],
-      cc_addresses: [], subject: "gmail reply thread", text_body: "reply body", html_body: null, attachments: [],
-      provider_thread_id: "gmail-thread-1", headers: {}, raw_size: 1, received_at: "2026-01-01T11:00:00.000Z",
+      provider_id: providerId, message_id: "<imported-reply-thread@x>", from_address: "client@y.com", to_addresses: ["me@x.com"],
+      cc_addresses: [], subject: "imported reply thread", text_body: "reply body", html_body: null, attachments: [],
+      provider_thread_id: "imported-thread-1", headers: {}, raw_size: 1, received_at: "2026-01-01T11:00:00.000Z",
     }, db);
 
-    const msg = listMailbox("inbox").find((item) => item.subject === "gmail reply thread")!;
-    expect(msg.provider_thread_id).toBe("gmail-thread-1");
+    const msg = listMailbox("inbox").find((item) => item.subject === "imported reply thread")!;
+    expect(msg.provider_thread_id).toBe("imported-thread-1");
     expect(getConversation(msg).map((item) => `${item.kind}:${item.subject}`)).toEqual([
-      "sent:gmail sent thread",
-      "received:gmail reply thread",
+      "sent:imported sent thread",
+      "received:imported reply thread",
     ]);
   });
 
@@ -369,7 +389,7 @@ describe("tui data — body + mutations", () => {
     saveEmailAgentRun({
       agent_key: "categorizer",
       inbound_email_id: e.id,
-      provider: "groq",
+      provider: "external",
       model: "test",
       status: "ok",
       summary: "Agent summary: this email asks for a contract review.",
@@ -492,7 +512,7 @@ describe("tui data — body + mutations", () => {
     expect(queries.join("\n")).not.toMatch(/\b(text_body|html_body|headers_json)\b/);
   });
 
-  it("groups messages by priority and Gmail-like categories", () => {
+  it("groups messages by priority and mail categories", () => {
     seed("contract", { labels: ["ai:priority"] });
     seed("promo", { labels: ["category_promotions"] });
     seed("update", { labels: ["transactional"] });
@@ -523,14 +543,14 @@ describe("tui data — compose / reply", () => {
     expect(d.from).toBe("ops@me.com");
   });
 
-  it("derives reply defaults for Gmail-synced sent mail from sentByMe", () => {
+  it("derives reply defaults for imported sent mail from sentByMe", () => {
     storeInboundEmail({
       provider_id: providerId,
-      message_id: "<gmail-sent-reply-defaults@example.com>",
+      message_id: "<imported-sent-reply-defaults@example.com>",
       from_address: "me@x.com",
       to_addresses: ["client@y.com"],
       cc_addresses: [],
-      subject: "Sent from Gmail",
+      subject: "Sent from import",
       text_body: "already sent",
       html_body: null,
       attachments: [],
@@ -540,11 +560,11 @@ describe("tui data — compose / reply", () => {
       received_at: "2026-01-01T10:00:00.000Z",
     });
 
-    const msg = listMailbox("sent").find((item) => item.subject === "Sent from Gmail")!;
+    const msg = listMailbox("sent").find((item) => item.subject === "Sent from import")!;
     const d = replyDefaults(msg);
 
     expect(msg.sentByMe).toBe(true);
-    expect(d.subject).toBe("Re: Sent from Gmail");
+    expect(d.subject).toBe("Re: Sent from import");
     expect(d.from).toBe("me@x.com");
     expect(d.to).toBe("client@y.com");
   });
@@ -690,18 +710,18 @@ describe("tui data — attachments + markdown + inbox metadata", () => {
   });
 });
 
-describe("tui data — Sent folder (Gmail SENT + app-sent)", () => {
-  it("routes Gmail SENT-labelled mail to Sent (not inbox) and unions app-sent", async () => {
+describe("tui data — Sent folder (imported SENT + app-sent)", () => {
+  it("routes imported SENT-labelled mail to Sent (not inbox) and unions app-sent", async () => {
     const db = getDatabase();
-    // a Gmail-synced sent message (labelled SENT)
+    // an imported sent message (labelled SENT)
     storeInboundEmail({
       provider_id: null, message_id: "<sent1@x>", from_address: "me@x.com", to_addresses: ["client@y.com"],
-      cc_addresses: [], subject: "gmail sent", text_body: "b", html_body: null, attachments: [],
+      cc_addresses: [], subject: "imported sent", text_body: "b", html_body: null, attachments: [],
       label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
     }, db);
     storeInboundEmail({
       provider_id: null, message_id: "<sent-lower@x>", from_address: "me@x.com", to_addresses: ["client2@y.com"],
-      cc_addresses: [], subject: "gmail lower sent", text_body: "b", html_body: null, attachments: [],
+      cc_addresses: [], subject: "imported lower sent", text_body: "b", html_body: null, attachments: [],
       label_ids: ["sent"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
     }, db);
     // a received message
@@ -710,18 +730,18 @@ describe("tui data — Sent folder (Gmail SENT + app-sent)", () => {
     await sendComposed({ from: "me@x.com", to: "z@y.com", subject: "app sent", body: "hi" });
 
     const sent = listMailbox("sent").map((m) => m.subject);
-    expect(sent).toContain("gmail sent");
-    expect(sent).toContain("gmail lower sent");
+    expect(sent).toContain("imported sent");
+    expect(sent).toContain("imported lower sent");
     expect(sent).toContain("app sent");
     expect(sent).not.toContain("received-1");
 
     const inbox = listMailbox("inbox").map((m) => m.subject);
     expect(inbox).toContain("received-1");
-    expect(inbox).not.toContain("gmail sent");   // SENT excluded from inbox
-    expect(inbox).not.toContain("gmail lower sent");
+    expect(inbox).not.toContain("imported sent");   // SENT excluded from inbox
+    expect(inbox).not.toContain("imported lower sent");
 
     const c = mailboxCounts();
-    expect(c.sent).toBe(3);   // 2 gmail-sent + 1 app-sent
+    expect(c.sent).toBe(3);   // 2 imported sent + 1 app-sent
   });
 
   it("marks sentByMe + shows the recipient for sent mail", () => {
@@ -753,18 +773,18 @@ describe("tui data — Sent folder (Gmail SENT + app-sent)", () => {
     db.run("UPDATE emails SET sent_at = ? WHERE id = ?", ["2026-01-04T10:00:00.000Z", newest.id]);
     db.run("UPDATE emails SET sent_at = ? WHERE id = ?", ["2026-01-01T10:00:00.000Z", oldest.id]);
     storeInboundEmail({
-      provider_id: providerId, message_id: "<gmail-newer@x>", from_address: "me@x.com", to_addresses: ["client@y.com"],
-      cc_addresses: [], subject: "gmail newer", text_body: "body", html_body: null, attachments: [],
+      provider_id: providerId, message_id: "<imported-newer@x>", from_address: "me@x.com", to_addresses: ["client@y.com"],
+      cc_addresses: [], subject: "imported newer", text_body: "body", html_body: null, attachments: [],
       label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: "2026-01-03T10:00:00.000Z",
     }, db);
     storeInboundEmail({
-      provider_id: providerId, message_id: "<gmail-older@x>", from_address: "me@x.com", to_addresses: ["client@y.com"],
-      cc_addresses: [], subject: "gmail older", text_body: "body", html_body: null, attachments: [],
+      provider_id: providerId, message_id: "<imported-older@x>", from_address: "me@x.com", to_addresses: ["client@y.com"],
+      cc_addresses: [], subject: "imported older", text_body: "body", html_body: null, attachments: [],
       label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: "2026-01-02T10:00:00.000Z",
     }, db);
 
-    expect(listMailbox("sent", { limit: 2, offset: 1 }).map((m) => m.subject)).toEqual(["gmail newer", "gmail older"]);
-    expect(listMailbox("sent", { limit: 2, offset: 1, sort: "oldest" }).map((m) => m.subject)).toEqual(["gmail older", "gmail newer"]);
+    expect(listMailbox("sent", { limit: 2, offset: 1 }).map((m) => m.subject)).toEqual(["imported newer", "imported older"]);
+    expect(listMailbox("sent", { limit: 2, offset: 1, sort: "oldest" }).map((m) => m.subject)).toEqual(["imported older", "imported newer"]);
   });
 
   it("uses one bounded SQL page for the combined sent mailbox", () => {
@@ -1173,36 +1193,6 @@ describe("tui data — mailbox scopes and ingestion sources", () => {
     expect(listMailbox("inbox", { source: { sourceId: "orphaned:missing-provider-id" } }, db).map((message) => message.subject)).toEqual(["orphaned visible"]);
   });
 
-  it("labels inactive Gmail provenance as legacy import rather than live sync", () => {
-    const db = getDatabase();
-    const gmail = createProvider({ name: "Gmail (old)", type: "gmail", active: true }, db);
-    updateProvider(gmail.id, { active: false }, db);
-    storeInboundEmail({
-      provider_id: gmail.id,
-      message_id: "legacy-gmail-visible",
-      from_address: "sender@example.com",
-      to_addresses: ["ops@example.com"],
-      cc_addresses: [],
-      subject: "legacy gmail visible",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-01-03T10:00:00.000Z",
-    }, db);
-
-    const sources = listMailboxSources(undefined, db);
-    const source = sources.find((item) => item.providerId === gmail.id);
-
-    expect(source).toMatchObject({
-      label: "Legacy Gmail import: Gmail (old)",
-      kind: "gmail",
-      badges: expect.arrayContaining(["legacy", "inactive", "capability:gmail"]),
-      total: 1,
-    });
-  });
-
   it("backfills provider-tagged S3 rows only when a configured bucket maps the provider", () => {
     const db = getDatabase();
     const otherProvider = createProvider({ name: "other-ses", type: "ses", active: true }).id;
@@ -1279,10 +1269,107 @@ describe("tui data — mailbox scopes and ingestion sources", () => {
       kind: "s3",
       providerId,
       bucket: "registered-s3-bucket",
+      s3Prefix: "inbound/",
       badges: expect.arrayContaining(["live"]),
       total: 1,
     });
-    expect(listMailbox("inbox", { source: { sourceId: source.id } }, db).map((message) => message.subject)).toEqual(["registered s3 row"]);
+	  expect(listMailbox("inbox", { source: { sourceId: source.id } }, db).map((message) => message.subject)).toEqual(["registered s3 row"]);
+	});
+
+  it("keeps registered S3 source filters scoped to their exact prefix", () => {
+    const db = getDatabase();
+    const sourceA = registerS3Source({
+      id: "s3-shared-prefix-a",
+      bucket: "shared-prefix-bucket",
+      prefix: "inbound/a/",
+      region: "us-east-1",
+      providerId,
+      status: "live",
+      liveSyncEnabled: true,
+    });
+    const sourceB = registerS3Source({
+      id: "s3-shared-prefix-b",
+      bucket: "shared-prefix-bucket",
+      prefix: "inbound/b/",
+      region: "us-east-1",
+      providerId,
+      status: "live",
+      liveSyncEnabled: true,
+    });
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "s3://shared-prefix-bucket/inbound/a/msg001",
+      raw_s3_url: "s3://shared-prefix-bucket/inbound/a/msg001",
+      from_address: "sender-a@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "source a row",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-04T12:01:00.000Z",
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "s3://shared-prefix-bucket/inbound/b/msg001",
+      raw_s3_url: "s3://shared-prefix-bucket/inbound/b/msg001",
+      from_address: "sender-b@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "source b row",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-04T12:02:00.000Z",
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "<plain-provider-row@example.com>",
+      raw_s3_url: null,
+      from_address: "plain@example.com",
+      to_addresses: ["ops@example.com"],
+      cc_addresses: [],
+      subject: "plain provider row",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-01-04T12:03:00.000Z",
+    }, db);
+
+    const listed = listMailboxSources({ search: "shared-prefix-bucket" }, db).filter((item) => item.kind === "s3");
+
+    expect(listed).toHaveLength(2);
+    expect(listed.find((item) => item.id === sourceA.id)).toMatchObject({ s3Prefix: "inbound/a/", total: 1, unread: 1 });
+    expect(listed.find((item) => item.id === sourceB.id)).toMatchObject({ s3Prefix: "inbound/b/", total: 1, unread: 1 });
+    expect(listMailbox("inbox", { source: { sourceId: sourceA.id } }, db).map((message) => message.subject)).toEqual(["source a row"]);
+    expect(listMailbox("inbox", { source: { sourceId: sourceB.id } }, db).map((message) => message.subject)).toEqual(["source b row"]);
+    expect(listMailboxStatus({ source: { sourceId: sourceA.id } }, db).counts.inbox).toBe(1);
+    expect(searchMailbox("source", { mailbox: "inbox", source: { sourceId: sourceB.id } }, db).map((message) => message.subject)).toEqual(["source b row"]);
+  });
+
+  it("prefers exact registered S3 sources over generic bucket-only source rows", () => {
+    const db = getDatabase();
+    setConfigValue("inbound_s3_buckets", [{ bucket: "dedupe-s3-bucket", region: "us-east-1", providerId }]);
+    const source = registerS3Source({
+      id: "s3-dedupe-source",
+      bucket: "dedupe-s3-bucket",
+      prefix: "inbound/example.com/",
+      region: "us-east-1",
+      providerId,
+      status: "live",
+      liveSyncEnabled: true,
+    });
+
+    const listed = listMailboxSources({ search: "dedupe-s3-bucket" }, db).filter((item) => item.kind === "s3");
+
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({ id: source.id, bucket: "dedupe-s3-bucket" });
   });
 
   it("treats unknown lifecycle source IDs as an empty source filter", () => {
@@ -1349,8 +1436,8 @@ describe("tui data — mailbox scopes and ingestion sources", () => {
     await sendComposed({ from: "ops@elyratelier.com", to: "client@y.com", subject: "sent ops", body: "hi", providerId });
     await sendComposed({ from: "team@elyratelier.com", to: "client@y.com", subject: "sent team", body: "hi", providerId });
     storeInboundEmail({
-      provider_id: providerId, message_id: "<gmail-ops@x>", from_address: "ops@elyratelier.com", to_addresses: ["client@y.com"],
-      cc_addresses: [], subject: "gmail sent ops", text_body: "b", html_body: null, attachments: [],
+      provider_id: providerId, message_id: "<imported-ops@x>", from_address: "ops@elyratelier.com", to_addresses: ["client@y.com"],
+      cc_addresses: [], subject: "imported sent ops", text_body: "b", html_body: null, attachments: [],
       label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
     });
 
@@ -1358,7 +1445,7 @@ describe("tui data — mailbox scopes and ingestion sources", () => {
     expect(inbox).toEqual(["to-ops"]);
     const sent = listMailbox("sent", { source: { address: "ops@elyratelier.com" } }).map((m) => m.subject);
     expect(sent).toContain("sent ops");
-    expect(sent).toContain("gmail sent ops");
+    expect(sent).toContain("imported sent ops");
     expect(sent).not.toContain("sent team");
     expect(mailboxCounts({ source: { address: "ops@elyratelier.com" } }).inbox).toBe(1);
     expect(mailboxCounts({ source: { address: "ops@elyratelier.com" } }).sent).toBe(2);
@@ -1377,15 +1464,15 @@ describe("tui data — mailbox scopes and ingestion sources", () => {
       subject: "team app sent",
     }, "team-app-sent", db);
     storeInboundEmail({
-      provider_id: providerId, message_id: "<display-gmail-sent@x>", from_address: '"Ops Team" <ops@elyratelier.com>',
-      to_addresses: ["client@y.com"], cc_addresses: [], subject: "display gmail sent", text_body: "b",
+      provider_id: providerId, message_id: "<display-imported-sent@x>", from_address: '"Ops Team" <ops@elyratelier.com>',
+      to_addresses: ["client@y.com"], cc_addresses: [], subject: "display imported sent", text_body: "b",
       html_body: null, attachments: [], label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
     }, db);
 
     const sent = listMailbox("sent", { source: { address: "ops@elyratelier.com" } }).map((m) => m.subject);
 
     expect(sent).toContain("display app sent");
-    expect(sent).toContain("display gmail sent");
+    expect(sent).toContain("display imported sent");
     expect(sent).not.toContain("team app sent");
     expect(mailboxCounts({ source: { address: "ops@elyratelier.com" } }).sent).toBe(2);
   });
@@ -1557,7 +1644,7 @@ describe("tui data — mailbox scopes and ingestion sources", () => {
     });
   });
 
-  it("filters Sent by sender domain for app-sent and Gmail SENT mail", async () => {
+  it("filters Sent by sender domain for app-sent and imported SENT mail", async () => {
     const db = getDatabase();
     await sendComposed({ from: "me@elyratelier.com", to: "client@y.com", subject: "app elyra", body: "hi", providerId });
     await sendComposed({ from: "me@droolbowl.com", to: "client@y.com", subject: "app other", body: "hi", providerId });
@@ -1568,21 +1655,21 @@ describe("tui data — mailbox scopes and ingestion sources", () => {
     }, undefined, db);
     storeInboundEmail({
       provider_id: providerId, message_id: "<gs1@x>", from_address: "me@elyratelier.com", to_addresses: ["client@y.com"],
-      cc_addresses: [], subject: "gmail elyra", text_body: "b", html_body: null, attachments: [],
+      cc_addresses: [], subject: "imported elyra", text_body: "b", html_body: null, attachments: [],
       label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
     }, db);
     storeInboundEmail({
       provider_id: providerId, message_id: "<gs2@x>", from_address: "me@droolbowl.com", to_addresses: ["client@y.com"],
-      cc_addresses: [], subject: "gmail other", text_body: "b", html_body: null, attachments: [],
+      cc_addresses: [], subject: "imported other", text_body: "b", html_body: null, attachments: [],
       label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: new Date().toISOString(),
     }, db);
 
     const sent = listMailbox("sent", { source: { domain: "elyratelier.com" } }).map((m) => m.subject);
     expect(sent).toContain("app elyra");
     expect(sent).toContain("app display elyra");
-    expect(sent).toContain("gmail elyra");
+    expect(sent).toContain("imported elyra");
     expect(sent).not.toContain("app other");
-    expect(sent).not.toContain("gmail other");
+    expect(sent).not.toContain("imported other");
     expect(mailboxCounts({ source: { domain: "elyratelier.com" } }).sent).toBe(3);
   });
 });

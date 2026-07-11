@@ -23,11 +23,11 @@ describe("CloudflareRoutingClient", () => {
 
   it("createForwardRule builds a literal matcher + forward action", async () => {
     const r = recorder({ id: "rule1" });
-    const res = await new CloudflareRoutingClient({ auth, fetchImpl: r.fetchImpl }).createForwardRule("Z", "andrew@d.com", ["me@gmail.com"]);
+    const res = await new CloudflareRoutingClient({ auth, fetchImpl: r.fetchImpl }).createForwardRule("Z", "andrew@d.com", ["me@example.net"]);
     expect(res.id).toBe("rule1");
     const body = r.calls[0].body;
     expect(body.matchers[0]).toEqual({ type: "literal", field: "to", value: "andrew@d.com" });
-    expect(body.actions[0]).toEqual({ type: "forward", value: ["me@gmail.com"] });
+    expect(body.actions[0]).toEqual({ type: "forward", value: ["me@example.net"] });
   });
 
   it("createWorkerRule targets a worker", async () => {
@@ -38,14 +38,14 @@ describe("CloudflareRoutingClient", () => {
 
   it("addDestination is account-scoped", async () => {
     const r = recorder();
-    await new CloudflareRoutingClient({ auth, fetchImpl: r.fetchImpl }).addDestination("ACC", "me@gmail.com");
+    await new CloudflareRoutingClient({ auth, fetchImpl: r.fetchImpl }).addDestination("ACC", "me@example.net");
     expect(r.calls[0].url).toContain("/accounts/ACC/email/routing/addresses");
-    expect(r.calls[0].body).toEqual({ email: "me@gmail.com" });
+    expect(r.calls[0].body).toEqual({ email: "me@example.net" });
   });
 
   it("setCatchAllForward PUTs catch_all", async () => {
     const r = recorder();
-    await new CloudflareRoutingClient({ auth, fetchImpl: r.fetchImpl }).setCatchAllForward("Z", ["me@gmail.com"]);
+    await new CloudflareRoutingClient({ auth, fetchImpl: r.fetchImpl }).setCatchAllForward("Z", ["me@example.net"]);
     expect(r.calls[0].method).toBe("PUT");
     expect(r.calls[0].url).toContain("/rules/catch_all");
   });

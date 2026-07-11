@@ -68,13 +68,11 @@ describe("config command redaction", () => {
     expect(result.out).toContain("inbound_s3_bucket");
     expect(result.out).toContain("inbound_s3_prefix");
     expect(result.out).toContain("inbound_s3_region");
-    expect(result.out).toContain("gmail_archive_s3_bucket");
-    expect(result.out).toContain("Legacy Gmail archive bucket override");
     expect(result.out).not.toContain("aws_s3_inbound_bucket");
     expect(result.out).toContain("Use --verbose for examples");
 
     const verbose = await runConfigCommand(["config", "keys", "--verbose"]);
     expect(verbose.out).toContain("my-email-archive");
-    expect(verbose.out).toContain("my-legacy-mail-archive");
+    expect(verbose.out).not.toContain("my-legacy-mail-archive");
   });
 });

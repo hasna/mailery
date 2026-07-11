@@ -26,16 +26,14 @@ export const allCommandModules = [
   "reply",
   "forwarding",
   "ui",
-  "triage",
   "aws",
   "status",
   "daemon",
-  "browserplan",
   "db",
   "self-hosted",
 ] as const;
 
-export type CommandModule = typeof allCommandModules[number] | "project-panel";
+export type CommandModule = typeof allCommandModules[number];
 
 export const knownCommandNames = new Set([
   "provider",
@@ -87,49 +85,17 @@ export const knownCommandNames = new Set([
   "forwarding",
   "ui",
   "links",
-  "triage",
   "agent",
-  "ask",
   "aws",
   "status",
-  "project-panel",
   "daemon",
   "logs",
-  "browserplan",
   "db",
   "self-hosted",
-  // Event-integration commands registered dynamically from @hasna/events
-  // (see registerOptionalEventsCommands). They must be recognized here so that
-  // multi-word invocations like `events list` / `channels list` / `webhooks list`
-  // are dispatched to their real handlers instead of being rerouted to the
-  // natural-language `agent` command (which requires an AI credential).
-  "events",
-  "channels",
-  "webhooks",
 ]);
 
 export function routeRootPromptArgs(args: string[]): string[] {
-  const command = requestedCommand(args);
-  if (args.includes("--help") || args.includes("-h")) return args;
-
-  const firstCommandIndex = args.findIndex((arg) => arg === command);
-  const promptArgs = firstCommandIndex >= 0 ? args.slice(firstCommandIndex) : args;
-  if (!command) return args;
-  if (knownCommandNames.has(command)) {
-    if (command !== "links" || !looksLikeLinksPrompt(promptArgs)) return args;
-  }
-  const promptText = promptArgs.join(" ").trim();
-  const looksNatural = promptArgs.length > 1 || /\s|\?/.test(command);
-  if (!promptText || !looksNatural) return args;
-
-  const leading = firstCommandIndex > 0 ? args.slice(0, firstCommandIndex) : [];
-  return [...leading, "agent", ...promptArgs];
-}
-
-function looksLikeLinksPrompt(args: string[]): boolean {
-  const target = args.slice(1).find((arg) => !arg.startsWith("-"));
-  if (!target) return false;
-  return !/^[a-f0-9-]{4,}$/i.test(target);
+  return args;
 }
 
 export function requestedCommand(args: string[]): string | null {
@@ -194,23 +160,13 @@ export function commandModulesFor(args: string[]): readonly CommandModule[] {
     case "forward": return ["reply"];
     case "forwarding": return ["forwarding"];
     case "ui": return ["ui"];
-    case "triage": return ["triage"];
-    case "agent":
-    case "ask": return ["status"];
+    case "agent": return ["status"];
     case "aws": return ["aws"];
     case "status": return ["status"];
-    case "project-panel": return ["status"];
     case "daemon":
     case "logs": return ["daemon"];
-    case "browserplan": return ["browserplan"];
     case "db": return ["db"];
     case "self-hosted": return ["self-hosted"];
-    // The event-integration commands are registered separately by
-    // registerOptionalEventsCommands (from @hasna/events), so they need none of
-    // Emails' own command modules loaded.
-    case "events":
-    case "channels":
-    case "webhooks": return [];
     default: return allCommandModules;
   }
 }

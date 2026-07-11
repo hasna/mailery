@@ -726,7 +726,10 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--no-live-sync", "Register source but disable live sync")
     .action(async (opts: { bucket: string; prefix?: string; region?: string; provider?: string; name?: string; status?: string; liveSync?: boolean }) => {
       try {
-        const { registerS3Source } = await import("../../lib/s3-sync.js");
+        const [{ addInboundBucket }, { registerS3Source }] = await Promise.all([
+          import("../../lib/config.js"),
+          import("../../lib/s3-sync.js"),
+        ]);
         const status = parseSourceStatus(opts.status);
         const providerId = opts.provider ? resolvePartialIdOrThrow(getDatabase(), "providers", opts.provider) : undefined;
         const source = registerS3Source({
@@ -738,6 +741,9 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           status,
           liveSyncEnabled: opts.liveSync !== false && status === "live",
         });
+        if (source.status === "live" && source.live_sync_enabled) {
+          addInboundBucket(source.bucket, source.region, source.provider_id);
+        }
         output(source, chalk.green(`✓ S3 source ${source.id} is ${source.status}${source.live_sync_enabled ? " (live sync enabled)" : " (live sync disabled)"}`));
       } catch (e) {
         handleError(e);

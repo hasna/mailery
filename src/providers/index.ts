@@ -77,8 +77,6 @@ function assertProviderConfig(provider: Provider): void {
     case "resend":
       if (!provider.api_key) throw new ProviderConfigError("Resend provider requires an API key");
       return;
-    case "gmail":
-      throw new ProviderConfigError("Gmail is no longer an active Emails provider. Existing Gmail-sourced mail remains available as legacy local mailbox data.");
     case "ses":
     case "sandbox":
       return;

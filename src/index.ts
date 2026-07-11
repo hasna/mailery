@@ -152,31 +152,6 @@ export { parseCsv } from "./lib/csv.js";
 export { extractEmailLinks, formatEmailLinks } from "./lib/email-links.js";
 export type { ExtractEmailLinksInput, ExtractedEmailLink, EmailLinkSource } from "./lib/email-links.js";
 export {
-  buildReadOnlyEmailsTools,
-  formatEmailsAgentResult,
-  resolveEmailsAgentDefaults,
-  runEmailsAgent,
-  EMAILS_AGENT_SYSTEM_PROMPT,
-} from "./lib/emails-agent.js";
-export type { EmailsAgentOptions, EmailsAgentProvider, EmailsAgentResult } from "./lib/emails-agent.js";
-export {
-  buildManagedEmailAgentTools,
-  formatEmailAgentRun,
-  formatEmailAgentSetting,
-  formatEmailOrganizationResult,
-  runAlwaysOnEmailAgents,
-  runEmailAgentBatch,
-  runEmailOrganization,
-  runManagedEmailAgent,
-} from "./lib/email-agents.js";
-export type {
-  AlwaysOnEmailAgentsResult,
-  EmailOrganizationResult,
-  RunEmailAgentBatchOptions,
-  RunEmailAgentBatchResult,
-  RunManagedEmailAgentOptions,
-} from "./lib/email-agents.js";
-export {
   formatEmailDigest,
   generateEmailDigest,
   loadEmailDigest,
@@ -187,61 +162,6 @@ export type {
   GenerateEmailDigestOptions,
   LoadEmailDigestOptions,
 } from "./lib/email-digest.js";
-export {
-  assertBrowserPlanAddressCapacity,
-  defaultBrowserPlanIdentityStorePath,
-  deriveBrowserPlanIdentityFromEmail,
-  detectedBrowserPlanMachineId,
-  listBrowserPlanAddresses,
-  loadBrowserPlanIdentityIndex,
-  reserveBrowserPlanAddress,
-  resolveBrowserPlanMachineId,
-  validateBrowserPlanAddress,
-  BrowserPlanCapacityError,
-  BrowserPlanConflictError,
-  BrowserPlanInputError,
-  BrowserPlanMachineMismatchError,
-  BrowserPlanNotFoundError,
-} from "./lib/browserplan.js";
-export type {
-  BrowserPlanAddressListResult,
-  BrowserPlanAddressProfile,
-  BrowserPlanIdentityRecord,
-  BrowserPlanIdentityStore,
-  BrowserPlanIdentitySummary,
-  BrowserPlanListOptions,
-  BrowserPlanReservationResult,
-  BrowserPlanReserveIdentityInput,
-  BrowserPlanReserveOptions,
-  BrowserPlanValidationResult,
-  BrowserPlanValidateOptions,
-} from "./lib/browserplan.js";
-export {
-  EMAIL_AGENT_DEFINITIONS,
-  ensureEmailAgentSettings,
-  getEmailAgentDefinition,
-  getEmailAgentRun,
-  getEmailAgentSetting,
-  listEmailAgentRuns,
-  listEmailAgentSettings,
-  listEnabledAlwaysOnEmailAgents,
-  listPendingInboundEmailsForAgent,
-  normalizeEmailAgentKey,
-  saveEmailAgentRun,
-  updateEmailAgentSetting,
-} from "./db/email-agents.js";
-export type {
-  EmailAgentDefinition,
-  EmailAgentKey,
-  EmailAgentProvider,
-  EmailAgentRun,
-  EmailAgentRunFilter,
-  EmailAgentRunStatus,
-  EmailAgentSetting,
-  PendingAgentEmail,
-  SaveEmailAgentRunInput,
-  SaveEmailAgentSettingInput,
-} from "./db/email-agents.js";
 export {
   emailDigestPeriodLabel,
   getEmailDigest,
@@ -310,10 +230,6 @@ export {
   CANONICAL_OPEN_EMAILS_RDS_DATABASE,
   CANONICAL_OPEN_EMAILS_RDS_SECRET_PATH,
   getCanonicalOpenEmailsRdsConfig,
-  getDefaultGmailArchiveS3Bucket,
-  getDefaultGmailArchiveS3Prefix,
-  getDefaultGmailArchiveS3Region,
-  getGmailArchiveConfig,
   getInboundAttachmentStorageConfig,
   loadConfig,
   saveConfig,
@@ -323,11 +239,8 @@ export {
 } from "./lib/config.js";
 export { log, setLogLevel } from "./lib/logger.js";
 export { colorStatus, colorDnsStatus, truncate, formatDate } from "./lib/format.js";
-export { buildGmailArchiveKeys } from "./lib/gmail-archive-keys.js";
-export type { GmailArchiveKeyInput, GmailArchiveKeys } from "./lib/gmail-archive-keys.js";
 export { formatVerifyResult } from "./lib/email-verify-format.js";
 export type { VerifyResult } from "./lib/email-verify-format.js";
-export { CerebrasError } from "./lib/cerebras-error.js";
 export {
   formatProviderHealth,
 } from "./lib/provider-health-format.js";
@@ -372,15 +285,6 @@ export {
 export { generateWarmingPlan, getTodayLimit, getTodaySentCount, formatWarmingStatus } from "./lib/warming.js";
 export type { WarmingSchedule, WarmingDay } from "./lib/warming.js";
 
-// Triage (AI)
-export {
-  saveTriage, getTriage, getTriageById, listTriaged, listTriagedSummaries,
-  getUntriaged, deleteTriage, deleteTriageByEmail,
-  getTriageStats, clearTriage,
-} from "./db/triage.js";
-export type { TriageResult, TriageSummary, TriageLabel, TriageSentiment, SaveTriageInput, TriageFilter, TriageStats } from "./db/triage.js";
-export type { ClassifyResult, EmailContext, TriageOptions } from "./lib/triage.js";
-export type { CerebrasMessage, CerebrasCompletionOptions, CerebrasResponse } from "./lib/cerebras.js";
 export type { ForwardingRunOptions, ForwardingRunResult, ForwardingRunItem } from "./lib/forwarding.js";
 
 // Provider factory
@@ -393,10 +297,7 @@ type BatchModule = typeof import("./lib/batch.js");
 type DoctorModule = typeof import("./lib/doctor.js");
 type HealthModule = typeof import("./lib/health.js");
 type DnsCheckModule = typeof import("./lib/dns-check.js");
-type GmailArchiveModule = typeof import("./lib/gmail-archive.js");
 type EmailVerifyModule = typeof import("./lib/email-verify.js");
-type TriageModule = typeof import("./lib/triage.js");
-type CerebrasModule = typeof import("./lib/cerebras.js");
 type ForwardingModule = typeof import("./lib/forwarding.js");
 
 export async function syncProvider(...args: Parameters<SyncModule["syncProvider"]>): Promise<Awaited<ReturnType<SyncModule["syncProvider"]>>> {
@@ -444,91 +345,7 @@ export async function checkDnsRecords(...args: Parameters<DnsCheckModule["checkD
   return checkDnsRecords(...args);
 }
 
-export async function uploadGmailArchive(...args: Parameters<GmailArchiveModule["uploadGmailArchive"]>): Promise<Awaited<ReturnType<GmailArchiveModule["uploadGmailArchive"]>>> {
-  const { uploadGmailArchive } = await import("./lib/gmail-archive.js");
-  return uploadGmailArchive(...args);
-}
-
-export async function uploadGmailArchiveAttachment(...args: Parameters<GmailArchiveModule["uploadGmailArchiveAttachment"]>): Promise<Awaited<ReturnType<GmailArchiveModule["uploadGmailArchiveAttachment"]>>> {
-  const { uploadGmailArchiveAttachment } = await import("./lib/gmail-archive.js");
-  return uploadGmailArchiveAttachment(...args);
-}
-
-export async function uploadGmailArchiveManifest(...args: Parameters<GmailArchiveModule["uploadGmailArchiveManifest"]>): Promise<Awaited<ReturnType<GmailArchiveModule["uploadGmailArchiveManifest"]>>> {
-  const { uploadGmailArchiveManifest } = await import("./lib/gmail-archive.js");
-  return uploadGmailArchiveManifest(...args);
-}
-
-export async function verifyGmailArchive(...args: Parameters<GmailArchiveModule["verifyGmailArchive"]>): Promise<Awaited<ReturnType<GmailArchiveModule["verifyGmailArchive"]>>> {
-  const { verifyGmailArchive } = await import("./lib/gmail-archive.js");
-  return verifyGmailArchive(...args);
-}
-
-export async function migrateS3Prefix(...args: Parameters<GmailArchiveModule["migrateS3Prefix"]>): Promise<Awaited<ReturnType<GmailArchiveModule["migrateS3Prefix"]>>> {
-  const { migrateS3Prefix } = await import("./lib/gmail-archive.js");
-  return migrateS3Prefix(...args);
-}
-
 export async function verifyEmailAddress(...args: Parameters<EmailVerifyModule["verifyEmailAddress"]>): Promise<Awaited<ReturnType<EmailVerifyModule["verifyEmailAddress"]>>> {
   const { verifyEmailAddress } = await import("./lib/email-verify.js");
   return verifyEmailAddress(...args);
-}
-
-export async function classifyEmail(...args: Parameters<TriageModule["classifyEmail"]>): Promise<Awaited<ReturnType<TriageModule["classifyEmail"]>>> {
-  const { classifyEmail } = await import("./lib/triage.js");
-  return classifyEmail(...args);
-}
-
-export async function scorePriority(...args: Parameters<TriageModule["scorePriority"]>): Promise<Awaited<ReturnType<TriageModule["scorePriority"]>>> {
-  const { scorePriority } = await import("./lib/triage.js");
-  return scorePriority(...args);
-}
-
-export async function summarizeEmail(...args: Parameters<TriageModule["summarizeEmail"]>): Promise<Awaited<ReturnType<TriageModule["summarizeEmail"]>>> {
-  const { summarizeEmail } = await import("./lib/triage.js");
-  return summarizeEmail(...args);
-}
-
-export async function analyzeSentiment(...args: Parameters<TriageModule["analyzeSentiment"]>): Promise<Awaited<ReturnType<TriageModule["analyzeSentiment"]>>> {
-  const { analyzeSentiment } = await import("./lib/triage.js");
-  return analyzeSentiment(...args);
-}
-
-export async function generateDraftReply(...args: Parameters<TriageModule["generateDraftReply"]>): Promise<Awaited<ReturnType<TriageModule["generateDraftReply"]>>> {
-  const { generateDraftReply } = await import("./lib/triage.js");
-  return generateDraftReply(...args);
-}
-
-export async function triageEmail(...args: Parameters<TriageModule["triageEmail"]>): Promise<Awaited<ReturnType<TriageModule["triageEmail"]>>> {
-  const { triageEmail } = await import("./lib/triage.js");
-  return triageEmail(...args);
-}
-
-export async function triageBatch(...args: Parameters<TriageModule["triageBatch"]>): Promise<Awaited<ReturnType<TriageModule["triageBatch"]>>> {
-  const { triageBatch } = await import("./lib/triage.js");
-  return triageBatch(...args);
-}
-
-export async function generateDraftForEmail(...args: Parameters<TriageModule["generateDraftForEmail"]>): Promise<Awaited<ReturnType<TriageModule["generateDraftForEmail"]>>> {
-  const { generateDraftForEmail } = await import("./lib/triage.js");
-  return generateDraftForEmail(...args);
-}
-
-export async function chatCompletion(...args: Parameters<CerebrasModule["chatCompletion"]>): Promise<Awaited<ReturnType<CerebrasModule["chatCompletion"]>>> {
-  const { chatCompletion } = await import("./lib/cerebras.js");
-  return chatCompletion(...args);
-}
-
-export async function prompt(...args: Parameters<CerebrasModule["prompt"]>): Promise<Awaited<ReturnType<CerebrasModule["prompt"]>>> {
-  const { prompt } = await import("./lib/cerebras.js");
-  return prompt(...args);
-}
-
-export async function promptJson<T = unknown>(
-  systemPrompt: string,
-  userPrompt: string,
-  opts?: { model?: string; temperature?: number; max_tokens?: number },
-): Promise<T> {
-  const { promptJson } = await import("./lib/cerebras.js");
-  return promptJson<T>(systemPrompt, userPrompt, opts);
 }

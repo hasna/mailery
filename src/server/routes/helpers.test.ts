@@ -20,7 +20,7 @@ describe("route integer parsing", () => {
     expect(queryInteger(url, "missing", 50, { min: 1, max: 1000 })).toBe(50);
     expect(optionalQueryInteger(url, "offset", { min: 0 })).toBeUndefined();
     expect(optionalQueryInteger(url, "missing", { min: 0 })).toBeUndefined();
-    expect(optionalQueryInteger(new URL("http://127.0.0.1/api/triage?priority=-2"), "priority", { min: 1 })).toBe(1);
+    expect(optionalQueryInteger(new URL("http://127.0.0.1/api/messages?priority=-2"), "priority", { min: 1 })).toBe(1);
   });
 
   it("builds bounded collection pages with defaults", () => {

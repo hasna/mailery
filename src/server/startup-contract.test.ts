@@ -10,7 +10,6 @@ const heavyRouteImports = [
   "@aws-sdk/",
   "@hasna/connectors",
   "mailparser",
-  "../../lib/triage.js",
   "../../lib/send.js",
   "../../lib/sync.js",
   "../../lib/doctor.js",
@@ -75,18 +74,15 @@ describe("server startup contract", () => {
   it("routes common server paths to the smallest route module set", () => {
     expect(routeModulesFor("/webhook/ses-inbound")).toEqual(["inbound-webhook"]);
     expect(routeModulesFor("/webhook/resend-inbound")).toEqual(["resend-webhook"]);
-    expect(routeModulesFor("/api/v1/inbox")).toEqual(["agent-api"]);
     expect(routeModulesFor("/api/providers")).toEqual(["core"]);
     expect(routeModulesFor("/api/providers/abc/auth")).toEqual(["core"]);
     expect(routeModulesFor("/api/templates/welcome")).toEqual(["contacts-groups"]);
     expect(routeModulesFor("/api/digest")).toEqual(["inbound-sequences"]);
-    expect(routeModulesFor("/api/agents/organize")).toEqual(["inbound-sequences"]);
     expect(routeModulesFor("/api/sequences/abc/enrollments")).toEqual(["inbound-sequences"]);
     expect(routeModulesFor("/track/open/email-1")).toEqual(["inbound-sequences"]);
     expect(routeModulesFor("/api/unknown")).toEqual([
       "inbound-webhook",
       "resend-webhook",
-      "agent-api",
       "core",
       "contacts-groups",
       "inbound-sequences",

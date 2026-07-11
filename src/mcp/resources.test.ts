@@ -51,7 +51,7 @@ afterEach(() => {
 
 describe("MCP resource payloads", () => {
   it("exposes mailbox and source resource payloads with legacy badges", () => {
-    const provider = createProvider({ name: "Legacy Gmail import", type: "gmail", active: false });
+    const provider = createProvider({ name: "Sandbox import", type: "sandbox" });
     storeInboundEmail({
       provider_id: provider.id,
       message_id: "<mcp-source-provider@example.com>",

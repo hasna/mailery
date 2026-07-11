@@ -15,7 +15,6 @@ const nativePackages = [
 
 const alwaysExternal = [
   "@aws-sdk/*",
-  "@hasna/contacts",
   "@hasna/domains",
   "@modelcontextprotocol/sdk",
   "mailparser",

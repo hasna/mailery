@@ -1,6 +1,6 @@
 {
   "name": "@hasna/emails",
-  "version": "0.6.117",
+  "version": "0.6.118",
   "description": "Emails local and self-hosted email management CLI, MCP server, and dashboard",
   "type": "module",
   "repository": {
@@ -71,9 +71,8 @@
     "@aws-sdk/client-sqs": "^3.1072.0",
     "@aws-sdk/client-sts": "^3.1072.0",
     "@aws-sdk/credential-provider-ini": "^3.972.55",
-    "@hasna/contacts": "0.6.19",
     "@hasna/contracts": "0.4.2",
-    "@hasna/domains": "0.0.26",
+    "@hasna/domains": "0.0.35",
     "@hasna/events": "^0.1.8",
     "@hasna/mcp-harness": "0.1.0",
     "@modelcontextprotocol/sdk": "^1.29.0",

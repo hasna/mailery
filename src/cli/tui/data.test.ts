@@ -325,6 +325,22 @@ describe("tui data — mailboxes", () => {
     expect(listMailbox("inbox", { sort: "oldest" }).map((m) => m.subject)).toEqual(["oldest", "middle", "newest"]);
   });
 
+  it("filters local inbox since dates by instant, not timestamp text", () => {
+    const db = getDatabase();
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<before-cutoff@x>", from_address: "a@example.com", to_addresses: ["me@x.com"],
+      cc_addresses: [], subject: "before cutoff", text_body: "body", html_body: null, attachments: [],
+      headers: {}, raw_size: 1, received_at: "2026-07-11T23:59:59+00:00",
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<offset-after-cutoff@x>", from_address: "a@example.com", to_addresses: ["me@x.com"],
+      cc_addresses: [], subject: "offset after cutoff", text_body: "body", html_body: null, attachments: [],
+      headers: {}, raw_size: 1, received_at: "2026-07-11T23:30:00-02:00",
+    }, db);
+
+    expect(listMailbox("inbox", { since: "2026-07-12T00:00:00.000Z" }, db).map((m) => m.subject)).toEqual(["offset after cutoff"]);
+  });
+
   it("normalizes bad mailbox and pagination inputs at runtime", () => {
     seed("first");
     seed("second");
@@ -785,6 +801,29 @@ describe("tui data — Sent folder (imported SENT + app-sent)", () => {
 
     expect(listMailbox("sent", { limit: 2, offset: 1 }).map((m) => m.subject)).toEqual(["imported newer", "imported older"]);
     expect(listMailbox("sent", { limit: 2, offset: 1, sort: "oldest" }).map((m) => m.subject)).toEqual(["imported older", "imported newer"]);
+  });
+
+  it("filters local sent since dates across app-sent and imported mail", () => {
+    const db = getDatabase();
+    const appBefore = createEmail(providerId, { from: "me@x.com", to: "client@y.com", subject: "app before", text: "body" }, "app-before", db);
+    const appAfter = createEmail(providerId, { from: "me@x.com", to: "client@y.com", subject: "app offset after", text: "body" }, "app-after", db);
+    db.run("UPDATE emails SET sent_at = ? WHERE id = ?", ["2026-07-11T23:59:59+00:00", appBefore.id]);
+    db.run("UPDATE emails SET sent_at = ? WHERE id = ?", ["2026-07-11T23:30:00-02:00", appAfter.id]);
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<imported-before@x>", from_address: "me@x.com", to_addresses: ["client@y.com"],
+      cc_addresses: [], subject: "imported before", text_body: "body", html_body: null, attachments: [],
+      label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: "2026-07-11T23:59:59+00:00",
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId, message_id: "<imported-offset-after@x>", from_address: "me@x.com", to_addresses: ["client@y.com"],
+      cc_addresses: [], subject: "imported offset after", text_body: "body", html_body: null, attachments: [],
+      label_ids: ["SENT"], headers: {}, raw_size: 1, received_at: "2026-07-11T23:30:00-02:00",
+    }, db);
+
+    expect(listMailbox("sent", { since: "2026-07-12T00:00:00.000Z" }, db).map((m) => m.subject).sort()).toEqual([
+      "app offset after",
+      "imported offset after",
+    ]);
   });
 
   it("uses one bounded SQL page for the combined sent mailbox", () => {

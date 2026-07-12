@@ -208,6 +208,12 @@ describe("getInboundEmail", () => {
       headers: { "x-hidden": "new" },
       received_at: "2026-01-02T00:00:00.000Z",
     }, db);
+    storeInboundEmail({
+      ...sampleInput,
+      subject: "offset target",
+      to_addresses: ["receiver@example.com"],
+      received_at: "2026-01-01T23:30:00-02:00",
+    }, db);
 
     const queries: string[] = [];
     const recordingDb = new Proxy(db, {
@@ -227,7 +233,7 @@ describe("getInboundEmail", () => {
       recordingDb,
     );
 
-    expect(subjects.map((row) => row.subject)).toEqual(["new target"]);
+    expect(subjects.map((row) => row.subject)).toEqual(["new target", "offset target"]);
     expect(queries).toHaveLength(1);
     expect(queries[0]).toContain("FROM inbound_recipients recipient");
     expect(queries[0]).toContain("recipient.address = ?");
@@ -277,6 +283,14 @@ describe("listInboundEmails", () => {
     expect(page2.length).toBe(2);
     expect(page2).not.toEqual(page1);
     expect(page2.some((id) => page1.includes(id))).toBe(false);
+  });
+
+  it("filters by since using timestamp instants instead of lexical text", () => {
+    const db = makeDb();
+    storeInboundEmail({ ...sampleInput, subject: "before cutoff", received_at: "2026-07-11T23:59:59+00:00" }, db);
+    storeInboundEmail({ ...sampleInput, subject: "offset after cutoff", received_at: "2026-07-11T23:30:00-02:00" }, db);
+
+    expect(listInboundEmails({ since: "2026-07-12T00:00:00.000Z" }, db).map((email) => email.subject)).toEqual(["offset after cutoff"]);
   });
 
   it("clamps negative pagination values", () => {

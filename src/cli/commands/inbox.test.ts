@@ -190,6 +190,46 @@ describe("inbox list — listInboundEmails", () => {
     }
   });
 
+  it("filters inbox list --since by timestamp instant for offset dates", async () => {
+    const { db, providerId } = setupDb();
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "before-cutoff",
+      in_reply_to_email_id: null,
+      from_address: "before@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "before cutoff",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-07-11T23:59:59+00:00",
+    }, db);
+    storeInboundEmail({
+      provider_id: providerId,
+      message_id: "offset-after-cutoff",
+      in_reply_to_email_id: null,
+      from_address: "after@example.com",
+      to_addresses: ["me@example.com"],
+      cc_addresses: [],
+      subject: "offset after cutoff",
+      text_body: "body",
+      html_body: null,
+      attachments: [],
+      attachment_paths: [],
+      headers: {},
+      raw_size: 1,
+      received_at: "2026-07-11T23:30:00-02:00",
+    }, db);
+
+    const { data } = await runInboxCommand(["inbox", "list", "--since", "2026-07-12T00:00:00.000Z"]);
+
+    expect((data as Array<{ subject: string }>).map((email) => email.subject)).toEqual(["offset after cutoff"]);
+  });
+
   it("returns empty array when no emails", () => {
     setupDb();
     const emails = listInboundEmails();

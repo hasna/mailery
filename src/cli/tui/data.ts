@@ -73,6 +73,17 @@ function normalizeIsoDate(value: string | undefined): string | undefined {
   return new Date(time).toISOString();
 }
 
+function sincePredicate(column: string): string {
+  return `julianday(${column}) >= julianday(?)`;
+}
+
+function appendWhereCondition(clause: SqlClause, condition: string, params: string[]): SqlClause {
+  return {
+    sql: clause.sql ? `${clause.sql} AND ${condition}` : ` WHERE ${condition}`,
+    params: [...clause.params, ...params],
+  };
+}
+
 function isDatabase(value: unknown): value is Database {
   return typeof (value as { query?: unknown } | undefined)?.query === "function";
 }
@@ -404,19 +415,19 @@ export function listMailbox(mailbox: Mailbox, opts?: MailboxListOptions, db?: Da
   const inboundSearch = searchClause(opts?.search, ["subject", "from_address", "to_addresses", "text_body"]);
 
   if (selectedMailbox === "sent") {
-    const appSrc = appSentSourceClause(src, opts?.search, !opts?.label);
+    const baseAppSrc = appSentSourceClause(src, opts?.search, !opts?.label);
+    const appSrc = since ? appendWhereCondition(baseAppSrc, sincePredicate("e.sent_at"), [since]) : baseAppSrc;
     const senderSrc = senderSourceClause(src);
     const sentSearch = searchClause(opts?.search, ["subject", "from_address", "to_addresses", "text_body"]);
     const sentLabel = labelClause(opts?.label);
-    const appSinceSql = since ? " AND e.sent_at >= ?" : "";
-    const syncedSinceSql = since ? " AND received_at >= ?" : "";
+    const syncedSinceSql = since ? ` AND ${sincePredicate("received_at")}` : "";
     const branchLimit = limit + offset;
     const rows = d.query(
       `WITH app_sent AS (
          SELECT 'sent' AS kind, e.id, e.from_address, e.to_addresses, e.subject, e.sent_at AS date,
                 1 AS is_read, 0 AS is_starred, '[]' AS label_ids_json, e.thread_id, NULL AS provider_thread_id,
                 substr(c.text_body, 1, 140) AS snippet, e.attachment_count AS attachments
-         FROM emails e LEFT JOIN email_content c ON c.email_id = e.id${appSrc.sql}${appSinceSql}
+         FROM emails e LEFT JOIN email_content c ON c.email_id = e.id${appSrc.sql}
          ORDER BY e.sent_at ${order}
          LIMIT ?
        ),
@@ -434,11 +445,11 @@ export function listMailbox(mailbox: Mailbox, opts?: MailboxListOptions, db?: Da
          UNION ALL
          SELECT ${MAILBOX_UNION_COLS} FROM synced_sent
        ) ORDER BY date ${order} LIMIT ? OFFSET ?`,
-    ).all(...appSrc.params, ...(since ? [since] : []), branchLimit, ...senderSrc.params, ...sentSearch.params, ...sentLabel.params, ...(since ? [since] : []), branchLimit, limit, offset) as MailboxUnionRow[];
+    ).all(...appSrc.params, branchLimit, ...senderSrc.params, ...sentSearch.params, ...sentLabel.params, ...(since ? [since] : []), branchLimit, limit, offset) as MailboxUnionRow[];
     messages = rows.map((r) => liteToMessage(r, r.kind));
   } else {
     const inboundLabel = labelClause(opts?.label);
-    const sinceSql = since ? " AND received_at >= ?" : "";
+    const sinceSql = since ? ` AND ${sincePredicate("received_at")}` : "";
     const rows = d.query(
       `SELECT ${INBOUND_LITE_COLS} FROM inbound_emails WHERE ${FOLDER_WHERE[selectedMailbox]}${recipientSrc.sql}${inboundSearch.sql}${inboundLabel.sql}${sinceSql} ORDER BY received_at ${order} LIMIT ? OFFSET ?`,
     ).all(...recipientSrc.params, ...inboundSearch.params, ...inboundLabel.params, ...(since ? [since] : []), limit, offset) as LiteRow[];

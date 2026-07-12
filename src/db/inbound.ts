@@ -85,6 +85,10 @@ interface InboundEmailRow {
 
 type InboundEmailSummaryRow = Omit<InboundEmailRow, "text_body" | "html_body" | "headers_json">;
 
+function sincePredicate(column: string): string {
+  return `julianday(${column}) >= julianday(?)`;
+}
+
 const INBOUND_SUMMARY_COLS = `
   id,
   provider_id,
@@ -426,7 +430,7 @@ export function listInboundSubjectsForRecipient(
   const params: Array<string | number> = [normalized];
 
   if (opts?.since) {
-    conditions.push("inbound_emails.received_at >= ?");
+    conditions.push(sincePredicate("inbound_emails.received_at"));
     params.push(opts.since);
   }
   params.push(limit);
@@ -476,7 +480,7 @@ function applyInboundFilters(opts: ListInboundOpts | undefined, conditions: stri
     params.push(opts.provider_id);
   }
   if (opts?.since) {
-    conditions.push("received_at >= ?");
+    conditions.push(sincePredicate("received_at"));
     params.push(opts.since);
   }
   if (opts?.unread) conditions.push("is_read = 0");

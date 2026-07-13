@@ -1,8 +1,35 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { addStep, createSequence, enroll, unenroll } from "../../db/sequences.js";
+import { resetSelfHostedConfigCache } from "../../db/self-hosted-store.js";
 import { registerSequenceCommands } from "./sequences.js";
+
+const ENV_KEYS = [
+  "HOME",
+  "EMAILS_DB_PATH",
+  "HASNA_EMAILS_DB_PATH",
+  "EMAILS_MODE",
+  "HASNA_EMAILS_MODE",
+  "EMAILS_SELF_HOSTED_URL",
+  "EMAILS_SELF_HOSTED_API_KEY",
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+  "HASNA_MAILERY_ENV_FILE",
+] as const;
 
 async function runSequenceCommand(args: string[]) {
   const program = new Command();
@@ -17,14 +44,84 @@ async function runSequenceCommand(args: string[]) {
   return { data, out: out.join("\n") };
 }
 
+async function runSequenceCommandExpectingExit(args: string[]) {
+  const originalExit = process.exit;
+  const originalError = console.error;
+  const errors: string[] = [];
+  process.exit = ((code?: number) => {
+    throw new Error(`process.exit:${code ?? 0}`);
+  }) as typeof process.exit;
+  console.error = (...args: unknown[]) => {
+    errors.push(args.map(String).join(" "));
+  };
+  try {
+    await runSequenceCommand(args);
+    return { error: null, stderr: errors.join("\n") };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e), stderr: errors.join("\n") };
+  } finally {
+    process.exit = originalExit;
+    console.error = originalError;
+  }
+}
+
+async function withTempSelfHostedHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
+  const saved = new Map<string, string | undefined>(ENV_KEYS.map((key) => [key, process.env[key]]));
+  const root = mkdtempSync(join(tmpdir(), "emails-sequence-self-hosted-"));
+  const home = join(root, "home");
+  closeDatabase();
+  resetDatabase();
+  process.env["HOME"] = home;
+  delete process.env["EMAILS_DB_PATH"];
+  delete process.env["HASNA_EMAILS_DB_PATH"];
+  delete process.env["HASNA_EMAILS_MODE"];
+  process.env["EMAILS_MODE"] = "self_hosted";
+  process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example.test";
+  process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-api-key";
+  resetSelfHostedConfigCache();
+  try {
+    return await fn(home);
+  } finally {
+    closeDatabase();
+    resetDatabase();
+    resetSelfHostedConfigCache();
+    for (const key of ENV_KEYS) {
+      const value = saved.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function localDbPath(home: string): string {
+  return join(home, ".hasna", "emails", "emails.db");
+}
+
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
+  delete process.env["EMAILS_MODE"];
+  delete process.env["HASNA_EMAILS_MODE"];
+  delete process.env["EMAILS_SELF_HOSTED_URL"];
+  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
+  for (const key of ENV_KEYS) {
+    if (key !== "HOME" && key !== "EMAILS_DB_PATH") delete process.env[key];
+  }
+  resetSelfHostedConfigCache();
   resetDatabase();
 });
 
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  delete process.env["EMAILS_MODE"];
+  delete process.env["HASNA_EMAILS_MODE"];
+  delete process.env["EMAILS_SELF_HOSTED_URL"];
+  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
+  for (const key of ENV_KEYS) {
+    if (key !== "HOME") delete process.env[key];
+  }
+  resetSelfHostedConfigCache();
 });
 
 describe("sequence list command", () => {
@@ -140,5 +237,40 @@ describe("sequence enrollments command", () => {
     ]);
     expect(data.every((enrollment) => enrollment.sequence_id === sequence.id)).toBe(true);
     expect(data.every((enrollment) => enrollment.status === "active")).toBe(true);
+  });
+
+  it("fails closed in self_hosted mode before reading local enrollments", async () => {
+    await withTempSelfHostedHome(async (home) => {
+      const result = await runSequenceCommandExpectingExit(["sequence", "enrollments"]);
+
+      expect(result.error).toBe("process.exit:1");
+      expect(result.stderr).toContain("self_hosted API-only mode");
+      expect(result.stderr).toContain("local sequence enrollment rows");
+      expect(existsSync(localDbPath(home))).toBe(false);
+    });
+  });
+});
+
+describe("sequence step command self_hosted guards", () => {
+  it("fails closed in self_hosted mode before writing local steps", async () => {
+    await withTempSelfHostedHome(async (home) => {
+      const result = await runSequenceCommandExpectingExit([
+        "sequence",
+        "step",
+        "add",
+        "api-sequence",
+        "--step",
+        "1",
+        "--delay",
+        "0",
+        "--template",
+        "welcome",
+      ]);
+
+      expect(result.error).toBe("process.exit:1");
+      expect(result.stderr).toContain("self_hosted API-only mode");
+      expect(result.stderr).toContain("local sequence step rows");
+      expect(existsSync(localDbPath(home))).toBe(false);
+    });
   });
 });

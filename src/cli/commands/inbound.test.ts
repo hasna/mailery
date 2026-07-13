@@ -4,6 +4,29 @@ import { closeDatabase, getDatabase, resetDatabase, uuid } from "../../db/databa
 import { storeInboundEmail } from "../../db/inbound.js";
 import { registerInboundCommands } from "./inbound.js";
 
+const LEGACY_MODE_ENV_KEYS = [
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+] as const;
+
+function clearModeEnv(): void {
+  delete process.env["EMAILS_MODE"];
+  delete process.env["HASNA_EMAILS_MODE"];
+  delete process.env["EMAILS_SELF_HOSTED_URL"];
+  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
+  for (const key of LEGACY_MODE_ENV_KEYS) delete process.env[key];
+}
+
 function setupDb() {
   resetDatabase();
   process.env["EMAILS_DB_PATH"] = ":memory:";
@@ -26,14 +49,35 @@ async function runInboundCommand(args: string[]) {
   return { data, out: out.join("\n") };
 }
 
+async function runInboundCommandExpectingExit(args: string[]) {
+  const originalExit = process.exit;
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = ((message?: unknown) => { errors.push(String(message ?? "")); }) as typeof console.error;
+  process.exit = ((code?: number) => {
+    throw new Error(`process.exit:${code ?? 0}`);
+  }) as typeof process.exit;
+  try {
+    await runInboundCommand(args);
+    throw new Error("Expected command to exit");
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e), stderr: errors.join("\n") };
+  } finally {
+    process.exit = originalExit;
+    console.error = originalError;
+  }
+}
+
 beforeEach(() => {
   resetDatabase();
   process.env["EMAILS_DB_PATH"] = ":memory:";
+  clearModeEnv();
 });
 
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  clearModeEnv();
 });
 
 describe("inbound count command", () => {
@@ -101,6 +145,38 @@ describe("inbound show command", () => {
     expect(out).not.toContain("<strong>");
     expect(out).not.toContain("&amp;");
   });
+});
+
+describe("inbound open command", () => {
+  it("fails closed in self_hosted mode before rendering a local body file", async () => {
+    process.env["EMAILS_MODE"] = "self_hosted";
+
+    const result = await runInboundCommandExpectingExit(["inbound", "open", "abc123"]);
+
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("unavailable in self_hosted mode");
+  });
+});
+
+describe("inbound self_hosted local-only guards", () => {
+  for (const args of [
+    ["inbound", "listen"],
+    ["inbound", "list"],
+    ["inbound", "show", "abc123"],
+    ["inbound", "clear"],
+    ["inbound", "count"],
+  ]) {
+    it(`fails closed for emails ${args.join(" ")}`, async () => {
+      process.env["EMAILS_MODE"] = "self_hosted";
+
+      const result = await runInboundCommandExpectingExit(args);
+
+      expect(result.error).toBe("process.exit:1");
+      expect(result.stderr).toContain("self_hosted API-only mode");
+      expect(result.stderr).toContain("emails inbox");
+      expect(result.stderr).toContain("EMAILS_MODE=local");
+    });
+  }
 });
 
 describe("inbound list command", () => {

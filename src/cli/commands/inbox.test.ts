@@ -3,7 +3,7 @@
  * exercised by `emails inbox` subcommands.
  */
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
-import { mkdirSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { getDatabase, resetDatabase, closeDatabase, uuid } from "../../db/database.js";
 import { storeInboundEmail, listInboundEmails, getInboundEmail } from "../../db/inbound.js";
@@ -18,9 +18,27 @@ mock.module("../tui/autopull.js", () => ({ autoPull: mockAutoPull }));
 const { registerInboxCommands } = await import("./inbox.js");
 const { Command } = await import("commander");
 const { getConfigValue } = await import("../../lib/config.js");
+const { resetMailDataSource } = await import("../../lib/mail-data-source.js");
+const { resetSelfHostedConfigCache } = await import("../../db/self-hosted-store.js");
 
 const TMP_HOME = join("/tmp", `emails-inbox-test-${process.pid}`);
 const origHome = process.env["HOME"];
+const origTmpdir = process.env["TMPDIR"];
+const LEGACY_MODE_ENV_KEYS = [
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+  "HASNA_MAILERY_ENV_FILE",
+] as const;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -31,6 +49,55 @@ function setupDb() {
   const providerId = uuid();
   db.run(`INSERT INTO providers (id, name, type, active) VALUES (?, 'SES Test', 'ses', 1)`, [providerId]);
   return { db, providerId };
+}
+
+function clearSelfHostedModeEnv(): void {
+  delete process.env["EMAILS_MODE"];
+  delete process.env["HASNA_EMAILS_MODE"];
+  delete process.env["EMAILS_SELF_HOSTED_URL"];
+  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
+  for (const key of LEGACY_MODE_ENV_KEYS) delete process.env[key];
+}
+
+function setSelfHostedModeEnv(): void {
+  process.env["EMAILS_MODE"] = "self_hosted";
+  process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example/v1";
+  process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
+  resetMailDataSource();
+  resetSelfHostedConfigCache();
+}
+
+function localDbPath(): string {
+  return join(TMP_HOME, ".hasna", "emails", "emails.db");
+}
+
+function useSelfHostedStatusFetch(): () => void {
+  setSelfHostedModeEnv();
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    const body = url.pathname.endsWith("/messages/counts")
+      ? {
+          counts: {
+            inbox: 5,
+            unread: 2,
+            starred: 1,
+            sent: 1,
+            archived: 1,
+            spam: 1,
+            trash: 0,
+            total: 8,
+            latest_received_at: "2026-07-08T19:50:52.000Z",
+          },
+        }
+      : { messages: [] };
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  return () => {
+    globalThis.fetch = previousFetch;
+    resetMailDataSource();
+    resetSelfHostedConfigCache();
+  };
 }
 
 function seedInboundEmails(providerId: string, count: number) {
@@ -91,6 +158,7 @@ async function runInboxCommandExpectingExit(args: string[]) {
 }
 
 beforeEach(() => {
+  clearSelfHostedModeEnv();
   if (existsSync(TMP_HOME)) rmSync(TMP_HOME, { recursive: true, force: true });
   mkdirSync(TMP_HOME, { recursive: true });
   process.env["HOME"] = TMP_HOME;
@@ -101,11 +169,16 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  clearSelfHostedModeEnv();
+  resetMailDataSource();
+  resetSelfHostedConfigCache();
   process.exitCode = 0;
   delete process.env["AWS_ACCESS_KEY_ID"];
   delete process.env["AWS_SECRET_ACCESS_KEY"];
   if (origHome !== undefined) process.env["HOME"] = origHome;
   else delete process.env["HOME"];
+  if (origTmpdir !== undefined) process.env["TMPDIR"] = origTmpdir;
+  else delete process.env["TMPDIR"];
   if (existsSync(TMP_HOME)) rmSync(TMP_HOME, { recursive: true, force: true });
 });
 
@@ -1064,7 +1137,269 @@ describe("inbox read", () => {
   });
 });
 
+describe("inbox open", () => {
+  it("fails closed in self_hosted mode before rendering a local body file", async () => {
+    setSelfHostedModeEnv();
+
+    const { error, stderr } = await runInboxCommandExpectingExit(["inbox", "open", "legacy-inbound:31f40200-dc2c-48ba-a348-ed7d4414381e"]);
+
+    expect(error).toBe("process.exit:1");
+    expect(stderr).toContain("unavailable in self_hosted mode");
+    expect(stderr).toContain("emails inbox read <id>");
+    expect(existsSync(join(TMP_HOME, ".hasna"))).toBe(false);
+  });
+});
+
+describe("inbox open", () => {
+  it("fails closed in self_hosted mode before writing a local rendered body file", async () => {
+    const tmpRoot = join(TMP_HOME, "self-hosted-open-tmp");
+    mkdirSync(tmpRoot, { recursive: true });
+    process.env["TMPDIR"] = tmpRoot;
+    setSelfHostedModeEnv();
+
+    const result = await runInboxCommandExpectingExit(["inbox", "open", "abc123"]);
+
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("unavailable in self_hosted mode");
+    expect(result.stderr).toContain("emails inbox read <id>");
+    expect(readdirSync(tmpRoot).filter((name) => name.startsWith("emails-inbox-"))).toHaveLength(0);
+  });
+});
+
+describe("self_hosted local ingestion guards", () => {
+  it("fails explain closed before reading local routing database or config", async () => {
+    setSelfHostedModeEnv();
+    const originalFetch = globalThis.fetch;
+    const requests: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify({ error: "unexpected request" }), { status: 500 });
+    }) as typeof fetch;
+
+    try {
+      expect(existsSync(join(TMP_HOME, ".hasna"))).toBe(false);
+      const result = await runInboxCommandExpectingExit(["inbox", "explain", "31f40200"]);
+
+      expect(result.error).toBe("process.exit:1");
+      expect(result.stderr).toContain("emails inbox explain");
+      expect(result.stderr).toContain("reads local SQLite routing metadata");
+      expect(result.stderr).toContain("self-hosted server");
+      expect(existsSync(join(TMP_HOME, ".hasna"))).toBe(false);
+      expect(requests).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("fails unread-count by address in self_hosted mode without falling back to local SQLite", async () => {
+    setSelfHostedModeEnv();
+    const originalFetch = globalThis.fetch;
+    const requests: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify({
+        counts: {
+          inbox: 0,
+          unread: 0,
+          starred: 0,
+          sent: 0,
+          archived: 0,
+          spam: 0,
+          trash: 0,
+          total: 0,
+          latest_received_at: null,
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    try {
+      expect(existsSync(join(TMP_HOME, ".hasna"))).toBe(false);
+      const result = await runInboxCommandExpectingExit(["inbox", "unread-count", "--by-address"]);
+
+      expect(result.error).toBe("process.exit:1");
+      expect(result.stderr).toContain("inbox unread-count --by-address");
+      expect(result.stderr).toContain("not available in self_hosted mode");
+      expect(result.stderr).toContain("Use `emails inbox unread-count`");
+      expect(existsSync(join(TMP_HOME, ".hasna"))).toBe(false);
+      expect(requests).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("uses the API and does not create local SQLite for inbox status", async () => {
+    const restore = useSelfHostedStatusFetch();
+    try {
+      expect(existsSync(localDbPath())).toBe(false);
+      const result = await runInboxCommand(["inbox", "status"]);
+      expect(existsSync(localDbPath())).toBe(false);
+      expect(result.data).toMatchObject({
+        total: 7,
+        unread: 2,
+        latest_received_at: "2026-07-08T19:50:52.000Z",
+      });
+      expect(result.out).toContain("Inbox sync status");
+    } finally {
+      restore();
+    }
+  });
+
+  it("uses the API and does not create local SQLite for inbox sync-status", async () => {
+    const restore = useSelfHostedStatusFetch();
+    try {
+      expect(existsSync(localDbPath())).toBe(false);
+      const result = await runInboxCommand(["inbox", "sync-status"]);
+      expect(existsSync(localDbPath())).toBe(false);
+      expect(result.data).toMatchObject({
+        inbox: {
+          total: 7,
+          unread: 2,
+          latest_received_at: "2026-07-08T19:50:52.000Z",
+        },
+        mailboxes: {
+          counts: {
+            inbox: 5,
+            sent: 1,
+            archived: 1,
+          },
+        },
+        sources: {
+          total: 1,
+          legacy: 0,
+          orphaned: 0,
+        },
+      });
+      expect(result.out).toContain("Inbox sync status");
+    } finally {
+      restore();
+    }
+  });
+
+  it("fails setup-realtime closed before writing local realtime config", async () => {
+    setSelfHostedModeEnv();
+
+    const result = await runInboxCommandExpectingExit(["inbox", "setup-realtime", "example.com"]);
+
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("emails inbox setup-realtime");
+    expect(result.stderr).toContain("writes local CLI config");
+    expect(result.stderr).toContain("emails-serve ingest-worker");
+    expect(result.stderr).toContain("EMAILS_INGEST_QUEUE_URL");
+    expect(existsSync(join(TMP_HOME, ".hasna"))).toBe(false);
+  });
+
+  it("fails realtime-status closed before reading local realtime config or SQLite counters", async () => {
+    setSelfHostedModeEnv();
+
+    const result = await runInboxCommandExpectingExit(["inbox", "realtime-status"]);
+
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("emails inbox realtime-status");
+    expect(result.stderr).toContain("reads local realtime config and local SQLite inbox counters");
+    expect(result.stderr).toContain("emails inbox sync-status");
+    expect(result.stderr).toContain("emails-serve ingest-worker");
+    expect(existsSync(join(TMP_HOME, ".hasna"))).toBe(false);
+  });
+
+  it("fails local S3 source control commands closed before touching local config", async () => {
+    setSelfHostedModeEnv();
+
+    for (const { args, command } of [
+      { args: ["inbox", "source", "list"], command: "emails inbox source list" },
+      { args: ["inbox", "source", "add-s3", "--bucket", "mail-bucket"], command: "emails inbox source add-s3" },
+      { args: ["inbox", "source", "retire", "s3-mail-bucket"], command: "emails inbox source retire" },
+    ]) {
+      const result = await runInboxCommandExpectingExit(args);
+      expect(result.error).toBe("process.exit:1");
+      expect(result.stderr).toContain(command);
+      expect(result.stderr).toContain("local S3 source config");
+      expect(result.stderr).toContain("emails inbox sources");
+      expect(existsSync(join(TMP_HOME, ".hasna"))).toBe(false);
+    }
+  });
+
+  it("fails sync-s3 closed before local S3 sync can create artifacts", async () => {
+    setSelfHostedModeEnv();
+
+    const result = await runInboxCommandExpectingExit(["inbox", "sync-s3", "--bucket", "mail-bucket", "--limit", "1"]);
+
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("emails inbox sync-s3");
+    expect(result.stderr).toContain("Production ingestion belongs to the self_hosted API/worker");
+    expect(existsSync(join(TMP_HOME, ".hasna"))).toBe(false);
+  });
+
+  it("fails watch closed before local SQS/S3 polling can create artifacts", async () => {
+    setSelfHostedModeEnv();
+
+    const result = await runInboxCommandExpectingExit([
+      "inbox",
+      "watch",
+      "--once",
+      "--queue-url",
+      "https://sqs.us-east-1.amazonaws.com/123/mail",
+      "--bucket",
+      "mail-bucket",
+    ]);
+
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("emails inbox watch");
+    expect(result.stderr).toContain("Production ingestion belongs to the self_hosted API/worker");
+    expect(existsSync(join(TMP_HOME, ".hasna"))).toBe(false);
+  });
+
+  it("fails listen closed before starting a local SMTP listener", async () => {
+    setSelfHostedModeEnv();
+
+    const result = await runInboxCommandExpectingExit(["inbox", "listen", "--port", "2526"]);
+
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("emails inbox listen");
+    expect(result.stderr).toContain("Production ingestion belongs to the self_hosted API/worker");
+    expect(existsSync(join(TMP_HOME, ".hasna"))).toBe(false);
+  });
+});
+
 describe("inbox attachment", () => {
+  it("does not suggest local sync/download for self_hosted metadata-only attachments", async () => {
+    setSelfHostedModeEnv();
+    const id = "31f40200-dc2c-48ba-a348-ed7d4414381e";
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === `/v1/messages/${id}`) {
+        return new Response(JSON.stringify({
+          message: {
+            id,
+            direction: "inbound",
+            from_addr: "sender@example.com",
+            to_addrs: ["me@example.com"],
+            cc_addrs: [],
+            subject: "Self-hosted attachment",
+            body_text: "body",
+            body_html: null,
+            status: "received",
+            received_at: "2026-06-04T11:29:09.000Z",
+            is_read: true,
+            is_starred: false,
+            labels: [],
+            attachments: [{ filename: "invoice.pdf", content_type: "application/pdf", size: 2048 }],
+          },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+    }) as typeof fetch;
+    try {
+      const { out } = await runInboxCommand(["inbox", "read", id, "--keep-unread"]);
+
+      expect(out).toContain("metadata only; no local download in self_hosted mode");
+      expect(out).not.toContain("emails inbox sync to download");
+      expect(existsSync(join(TMP_HOME, ".hasna"))).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("lists attachment paths by partial inbound id and filename", async () => {
     const { db, providerId } = setupDb();
     const email = storeInboundEmail({

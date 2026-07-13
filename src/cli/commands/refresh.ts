@@ -1,8 +1,17 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
+import { getEmailsMode } from "../../lib/mode.js";
 import { handleError, parseCliPositiveIntOption } from "../utils.js";
 
 const MAX_REFRESH_SCAN_LIMIT = 10000;
+
+function failIfSelfHostedRefresh(): void {
+  if (getEmailsMode() !== "self_hosted") return;
+  throw new Error(
+    "`emails refresh` runs local S3 inbox sync and app-level forwarding, so it is unavailable in self_hosted API-only mode. " +
+      "Production ingestion belongs to the self_hosted API/worker; use `emails inbox sync-status` to inspect server-side state.",
+  );
+}
 
 async function runAutoPull(opts: { s3?: boolean; forwarding?: boolean; limit?: number }) {
   const { autoPull } = await import("../tui/autopull.js");
@@ -24,6 +33,7 @@ export function registerRefreshCommand(program: Command, output: (data: unknown,
 	    .option("--limit <n>", "Max objects to scan per bucket", "1000")
 	    .action(async (opts: { forwarding?: boolean; limit?: string }) => {
 	      try {
+	        failIfSelfHostedRefresh();
 	        const limit = parseCliPositiveIntOption(opts.limit, 1000, MAX_REFRESH_SCAN_LIMIT);
 	        const r = await runAutoPull({ s3: true, forwarding: opts.forwarding !== false, limit });
 

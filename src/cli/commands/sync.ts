@@ -4,8 +4,20 @@ import { listEmails } from "../../db/emails.js";
 import { getLocalStats, formatStatsTable } from "../../lib/stats.js";
 import { getAnalytics, formatAnalytics } from "../../lib/analytics.js";
 import { colorStatus, truncate } from "../../lib/format.js";
+import { getEmailsMode } from "../../lib/mode.js";
 import { getDatabase } from "../../db/database.js";
 import { handleError, resolveId, parseDuration, padRight } from "../utils.js";
+
+function isSelfHostedCliMode(): boolean {
+  return getEmailsMode() === "self_hosted";
+}
+
+function failIfSelfHostedLocalOnly(command: string, guidance: string): void {
+  if (!isSelfHostedCliMode()) return;
+  handleError(new Error(
+    `\`${command}\` is local provider/log storage only and is disabled in self_hosted API-only mode. ${guidance}`,
+  ));
+}
 
 export function registerSyncCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   // ─── PROVIDER SYNC ────────────────────────────────────────────────────────────
@@ -18,6 +30,7 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
       .option("--provider <id>", "Specific provider ID")
       .action(async (opts: { provider?: string }) => {
         try {
+          failIfSelfHostedLocalOnly("emails provider sync", "The self-hosted server owns provider event ingestion.");
           const { syncAll, syncProvider } = await import("../../lib/sync.js");
           if (opts.provider) {
             const id = resolveId("providers", opts.provider);
@@ -40,6 +53,7 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
     .option("--interval <duration>", "Watch interval (e.g. 30s, 5m, 1h)", "5m")
     .action(async (opts: { provider?: string; watch?: boolean; interval?: string }) => {
       try {
+        failIfSelfHostedLocalOnly("emails pull", "Use the self-hosted server ingestion/scheduler path instead.");
         const { syncAll, syncProvider } = await import("../../lib/sync.js");
         const runSync = async () => {
           if (opts.provider) {
@@ -84,6 +98,7 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
     .option("--inbox", "Show inbound email stats instead of outbound")
     .action((opts: { provider?: string; period?: string; inbox?: boolean }) => {
       try {
+        failIfSelfHostedLocalOnly("emails stats", "Use `emails inbox mailboxes` or `emails status --json` for API-backed mailbox status.");
         if (opts.inbox) {
           const db = getDatabase();
           const providerFilter = opts.provider ? resolveId("providers", opts.provider) : undefined;
@@ -135,44 +150,49 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
     .option("--provider <id>", "Provider ID")
     .option("--interval <seconds>", "Refresh interval in seconds", "30")
     .action(async (opts: { provider?: string; interval?: string }) => {
-      const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-      const intervalSec = parseInt(opts.interval ?? "30", 10);
+      try {
+        failIfSelfHostedLocalOnly("emails monitor", "Use self-hosted service monitoring instead of the local sent-log monitor.");
+        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+        const intervalSec = parseInt(opts.interval ?? "30", 10);
 
-      const render = () => {
-        process.stdout.write("\x1Bc"); // Clear screen
-        const now = new Date().toLocaleTimeString();
-        console.log(chalk.bold(`Email Monitor  [${now}]  (Ctrl+C to exit)\n`));
+        const render = () => {
+          process.stdout.write("\x1Bc"); // Clear screen
+          const now = new Date().toLocaleTimeString();
+          console.log(chalk.bold(`Email Monitor  [${now}]  (Ctrl+C to exit)\n`));
 
-        try {
-          const stats = getLocalStats(providerId, "7d");
-          console.log(chalk.bold("Last 7 days:"));
-          console.log(`  ${chalk.cyan("Sent")}:       ${stats.sent}`);
-          console.log(`  ${chalk.green("Delivered")}: ${stats.delivered}  (${stats.delivery_rate.toFixed(1)}%)`);
-          console.log(`  ${chalk.red("Bounced")}:   ${stats.bounced}  (${stats.bounce_rate.toFixed(1)}%)`);
-          console.log(`  ${chalk.yellow("Opened")}:    ${stats.opened}  (${stats.open_rate.toFixed(1)}%)`);
-          console.log();
+          try {
+            const stats = getLocalStats(providerId, "7d");
+            console.log(chalk.bold("Last 7 days:"));
+            console.log(`  ${chalk.cyan("Sent")}:       ${stats.sent}`);
+            console.log(`  ${chalk.green("Delivered")}: ${stats.delivered}  (${stats.delivery_rate.toFixed(1)}%)`);
+            console.log(`  ${chalk.red("Bounced")}:   ${stats.bounced}  (${stats.bounce_rate.toFixed(1)}%)`);
+            console.log(`  ${chalk.yellow("Opened")}:    ${stats.opened}  (${stats.open_rate.toFixed(1)}%)`);
+            console.log();
 
-          const emails = listEmails({ provider_id: providerId, limit: 5 });
-          if (emails.length > 0) {
-            console.log(chalk.bold("Recent emails:"));
-            for (const e of emails) {
-              const status = colorStatus(e.status);
-              console.log(`  ${padRight(status, 12)}  ${truncate(e.subject, 40)}  \u2192 ${e.to_addresses[0] ?? ""}`);
+            const emails = listEmails({ provider_id: providerId, limit: 5 });
+            if (emails.length > 0) {
+              console.log(chalk.bold("Recent emails:"));
+              for (const e of emails) {
+                const status = colorStatus(e.status);
+                console.log(`  ${padRight(status, 12)}  ${truncate(e.subject, 40)}  \u2192 ${e.to_addresses[0] ?? ""}`);
+              }
             }
+          } catch (err) {
+            console.error(chalk.red(`Error: ${err instanceof Error ? err.message : err}`));
           }
-        } catch (err) {
-          console.error(chalk.red(`Error: ${err instanceof Error ? err.message : err}`));
-        }
-      };
+        };
 
-      render();
-      const timer = setInterval(render, intervalSec * 1000);
+        render();
+        const timer = setInterval(render, intervalSec * 1000);
 
-      process.on("SIGINT", () => {
-        clearInterval(timer);
-        console.log("\n" + chalk.dim("Monitor stopped."));
-        process.exit(0);
-      });
+        process.on("SIGINT", () => {
+          clearInterval(timer);
+          console.log("\n" + chalk.dim("Monitor stopped."));
+          process.exit(0);
+        });
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   // ─── ANALYTICS ────────────────────────────────────────────────────────────────
@@ -183,6 +203,7 @@ export function registerSyncCommands(program: Command, output: (data: unknown, f
     .option("--period <period>", "Time period (e.g. 30d, 7d, 90d)", "30d")
     .action((opts: { provider?: string; period: string }) => {
       try {
+        failIfSelfHostedLocalOnly("emails analytics", "Use self-hosted server-side analytics/reporting instead of local sent-log analytics.");
         let providerId = opts.provider;
         if (providerId) {
           providerId = resolveId("providers", providerId);

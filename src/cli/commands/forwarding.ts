@@ -7,7 +7,16 @@ import {
   removeForwardingRule,
   setForwardingRuleEnabled,
 } from "../../db/forwarding.js";
+import { getEmailsMode } from "../../lib/mode.js";
 import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
+
+function failIfSelfHostedForwarding(command: string): void {
+  if (getEmailsMode() !== "self_hosted") return;
+  throw new Error(
+    `\`${command}\` manages local app-level forwarding rules and is unavailable in self_hosted API-only mode. ` +
+      "Forwarding must run on an API-backed self-hosted route; until that exists, use provider-native forwarding or set EMAILS_MODE=local intentionally for a local SQLite inbox.",
+  );
+}
 
 function formatRule(rule: ReturnType<typeof createForwardingRule>): string {
   const state = rule.enabled ? chalk.green("enabled") : chalk.dim("disabled");
@@ -27,6 +36,7 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
     .option("--disabled", "Create the rule disabled")
     .action((source: string, target: string, opts: { provider?: string; from?: string; disabled?: boolean }) => {
       try {
+        failIfSelfHostedForwarding("emails forwarding add");
         const providerId = opts.provider ? resolveId("providers", opts.provider) : null;
         const rule = createForwardingRule({
           source_address: source,
@@ -56,6 +66,7 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
     .option("--verbose", "Show expanded list hints")
     .action((opts: { source?: string; enabled?: boolean; disabled?: boolean; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
+        failIfSelfHostedForwarding("emails forwarding list");
         const page = parseCliListPage(opts);
         const enabled = opts.enabled ? true : opts.disabled ? false : undefined;
         const rules = listForwardingRules({ source_address: opts.source, enabled, ...page });
@@ -86,6 +97,7 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
     .description("Enable a forwarding rule")
     .action((id: string) => {
       try {
+        failIfSelfHostedForwarding("emails forwarding enable");
         const rule = setForwardingRuleEnabled(resolveId("forwarding_rules", id), true);
         output(rule, chalk.green(`✓ enabled ${rule.source_address} -> ${rule.target_address}`));
       } catch (e) {
@@ -98,6 +110,7 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
     .description("Disable a forwarding rule")
     .action((id: string) => {
       try {
+        failIfSelfHostedForwarding("emails forwarding disable");
         const rule = setForwardingRuleEnabled(resolveId("forwarding_rules", id), false);
         output(rule, chalk.yellow(`disabled ${rule.source_address} -> ${rule.target_address}`));
       } catch (e) {
@@ -110,6 +123,7 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
     .description("Remove a forwarding rule")
     .action((id: string) => {
       try {
+        failIfSelfHostedForwarding("emails forwarding remove");
         const resolved = resolveId("forwarding_rules", id);
         const rule = getForwardingRule(resolved);
         if (!rule) return handleError(new Error(`Forwarding rule not found: ${id}`));
@@ -129,6 +143,7 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
     .option("--backfill", "Also forward matching mail received before the rule was created")
     .action(async (opts: { provider?: string; from?: string; limit?: string; backfill?: boolean }) => {
       try {
+        failIfSelfHostedForwarding("emails forwarding run");
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const { processForwardingRules } = await import("../../lib/forwarding.js");
         const result = await processForwardingRules({
@@ -148,6 +163,7 @@ export function registerForwardingCommands(program: Command, output: (data: unkn
     .description("Explain forwarding options for a source address")
     .action(async (source: string) => {
       try {
+        failIfSelfHostedForwarding("emails forwarding explain");
         const domain = source.split("@")[1]?.toLowerCase();
         const { inspectPublicMx, ownerLabel } = await import("../../lib/mx-ownership.js");
         const mx = domain ? await inspectPublicMx(domain) : null;

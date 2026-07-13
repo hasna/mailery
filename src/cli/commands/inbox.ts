@@ -179,6 +179,23 @@ async function runAutoPull(opts: { s3?: boolean; limit?: number }) {
   return autoPull(opts);
 }
 
+function failIfSelfHostedLocalIngestion(command: string): void {
+  if (resolveEmailsMode().mode !== "self_hosted") return;
+  throw new Error(
+    `\`emails inbox ${command}\` is unavailable in self_hosted mode because it starts local ingestion or listeners. ` +
+    "Production ingestion belongs to the self_hosted API/worker. Run the self-hosted worker/service ingestion path, or set EMAILS_MODE=local for explicit OSS local-mode ingestion.",
+  );
+}
+
+function failIfSelfHostedLocalInboxControl(command: string, reason: string): void {
+  if (resolveEmailsMode().mode !== "self_hosted") return;
+  throw new Error(
+    `\`emails inbox ${command}\` is unavailable in self_hosted API-only mode because it ${reason}. ` +
+    "Provision SES/SNS/SQS in the operator environment, then run `emails-serve ingest-worker` on the self-hosted server with EMAILS_INGEST_QUEUE_URL, EMAILS_INGEST_S3_BUCKET, and EMAILS_DATABASE_URL. " +
+    "Use API-backed `emails inbox sync-status`, `emails inbox mailboxes`, or `emails inbox sources` for client status; set EMAILS_MODE=local only for explicit local-mode realtime/S3 control.",
+  );
+}
+
 interface CodeOptions {
   from?: string;
   subject?: string;
@@ -415,7 +432,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
           process.exitCode = 1;
           return;
         }
-        output(email, formatEmailDetail(email));
+        output(email, formatEmailDetail(email, { mode: ds.mode }));
       } catch (e) { handleError(e); }
     });
 
@@ -532,6 +549,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Explain local routing, recipient ownership, and source readiness for an inbound email")
     .action((emailId: string) => {
       try {
+        failIfSelfHostedLocalInboxControl("explain", "reads local SQLite routing metadata and address/domain readiness");
         const db = getDatabase();
         const fullId = resolveInboundEmailId(emailId);
         const email = getInboundEmailSummary(fullId, db);
@@ -721,6 +739,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("List configured S3 ingestion sources")
     .action(async () => {
       try {
+        failIfSelfHostedLocalInboxControl("source list", "reads local S3 source config");
         const { listS3Sources } = await import("../../lib/s3-sync.js");
         const sources = listS3Sources();
         output(sources, formatSourceList(sources));
@@ -741,6 +760,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--no-live-sync", "Register source but disable live sync")
     .action(async (opts: { bucket: string; prefix?: string; region?: string; provider?: string; name?: string; status?: string; liveSync?: boolean }) => {
       try {
+        failIfSelfHostedLocalInboxControl("source add-s3", "writes local S3 source config");
         const [{ addInboundBucket }, { registerS3Source }] = await Promise.all([
           import("../../lib/config.js"),
           import("../../lib/s3-sync.js"),
@@ -770,6 +790,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Retire an S3 source without deleting provider rows or mail")
     .action(async (sourceRef: string) => {
       try {
+        failIfSelfHostedLocalInboxControl("source retire", "writes local S3 source config");
         const { retireS3Source } = await import("../../lib/s3-sync.js");
         const retired = retireS3Source(sourceRef);
         output(retired, chalk.green(`✓ Retired S3 source ${retired.id}`));
@@ -796,7 +817,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
         if (!opts.keepUnread && !msg.is_read) { await ds.setRead(fullId, true); msg.is_read = true; }
         const body = await ds.getMessageBody(msg);
         const detail = seamMessageDetail(msg, body);
-        output(detail, formatEmailDetail(detail));
+        output(detail, formatEmailDetail(detail, { mode: ds.mode }));
       } catch (e) {
         handleError(e);
       }
@@ -978,6 +999,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--force", "Allow syncing a retired or disabled S3 source")
     .action(async (opts: { source?: string; bucket?: string; prefix?: string; region?: string; provider?: string; limit: string; profile?: string; force?: boolean }) => {
       try {
+        failIfSelfHostedLocalIngestion("sync-s3");
         const { getInboundConfig } = await import("../../lib/config.js");
         const inbound = getInboundConfig();
         const profile = opts.profile ?? inbound.profile;
@@ -1021,6 +1043,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--profile <profile>", "AWS profile")
     .action(async (domain: string, opts: { ruleSet: string; rule?: string; region?: string; profile?: string }) => {
       try {
+        failIfSelfHostedLocalInboxControl("setup-realtime", "wires local AWS realtime ingestion and writes local CLI config");
         const { getInboundConfig, loadConfig, saveConfig } = await import("../../lib/config.js");
         const inbound = getInboundConfig();
         const profile = opts.profile ?? inbound.profile;
@@ -1053,6 +1076,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .description("Show real-time inbound queue, bucket, and sync health")
     .action(async () => {
       try {
+        failIfSelfHostedLocalInboxControl("realtime-status", "reads local realtime config and local SQLite inbox counters");
         const { loadConfig, getInboundBuckets } = await import("../../lib/config.js");
         const config = loadConfig();
         const db = getDatabase();
@@ -1096,6 +1120,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--all-buckets", "When a notification arrives, sync every configured inbound S3 bucket")
     .action(async (opts: { queueUrl?: string; bucket?: string; prefix?: string; region?: string; provider?: string; profile?: string; once?: boolean; allBuckets?: boolean }) => {
       try {
+        failIfSelfHostedLocalIngestion("watch");
         const { getInboundConfig, loadConfig, saveConfig } = await import("../../lib/config.js");
         const inbound = getInboundConfig();
         const config = loadConfig();
@@ -1161,6 +1186,7 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .option("--provider <id>", "Associate received emails with this provider ID")
     .action(async (opts: { port?: string; provider?: string }) => {
       try {
+        failIfSelfHostedLocalIngestion("listen");
         const port = parseInt(opts.port ?? "2525", 10);
         const { resolveId } = await import("../utils.js");
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
@@ -1180,6 +1206,9 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action(async (id: string) => {
       try {
         const ds = resolveMailDataSource();
+        if (ds.mode === "self_hosted") {
+          throw new Error("`emails inbox open` is unavailable in self_hosted mode because it writes a rendered HTML file locally. Use `emails inbox read <id>` for API-only terminal output until the self-hosted API exposes a safe browser-view endpoint.");
+        }
         const resolvedId = await resolveMailId(ds, id);
         const msg = await ds.getMessage(resolvedId);
         if (!msg) { console.error(chalk.red(`Email not found: ${id}`)); process.exit(1); }
@@ -1326,6 +1355,7 @@ function formatAttachmentDetailList(emailId: string, attachments: AttachmentDeta
 
 function formatEmailDetail(
   email: { id: string; from_address: string; subject: string; received_at: string; text_body?: string | null; html_body?: string | null; to_addresses: string[]; cc_addresses: string[]; is_read?: boolean; is_starred?: boolean; is_archived?: boolean; label_ids?: string[]; attachments?: AttMeta[]; attachment_paths?: AttPath[] },
+  opts: { mode?: MailDataSource["mode"] } = {},
 ): string {
   const flags = [
     email.is_read === false ? "unread" : "read",
@@ -1346,7 +1376,10 @@ function formatEmailDetail(
   if (atts.length > 0) {
     lines.push(chalk.yellow(`  📎 Attachments (${atts.length}):`));
     for (const a of atts) {
-      const loc = a.location ? `  ${a.location_type === "local" ? chalk.cyan(a.location) : chalk.blue(a.location)}` : chalk.dim("  (run: emails inbox sync to download)");
+      const missingLocation = opts.mode === "self_hosted"
+        ? "  (metadata only; no local download in self_hosted mode)"
+        : "  (run: emails inbox sync to download)";
+      const loc = a.location ? `  ${a.location_type === "local" ? chalk.cyan(a.location) : chalk.blue(a.location)}` : chalk.dim(missingLocation);
       lines.push(`     ${a.filename.padEnd(44)} ${chalk.dim(`${formatAttachmentSize(a.size)} · ${a.content_type}`)}${loc}`);
       if (a.file_url) lines.push(`     ${chalk.dim("link:")} ${a.file_url}`);
     }

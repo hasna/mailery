@@ -43,6 +43,27 @@ function normalizeDnsProvider(value: string | undefined): string {
   handleError(new Error(`Invalid DNS provider '${value}'. Use manual, cloudflare, or route53.`));
 }
 
+function selfHostedLocalOnly(command: string): void {
+  if (!isSelfHostedMode()) return;
+  handleError(new Error(
+    `\`${command}\` is local-mode-only and unavailable in self_hosted API-only mode. ` +
+      "Use the self-hosted server/operator API/workers for domain provisioning and lifecycle changes, " +
+      "or set EMAILS_MODE=local intentionally to use local SQLite/config state.",
+  ));
+}
+
+function resolveSelfHostedDomainId(ref: string): string {
+  const exact = getDomain(ref);
+  if (exact) return exact.id;
+  const matches = listDomains(undefined, undefined, { limit: 1000 })
+    .filter((domain) => domain.id.startsWith(ref));
+  if (matches.length === 1) return matches[0]!.id;
+  if (matches.length > 1) {
+    handleError(new Error(`Domain ID is ambiguous in self_hosted mode: ${matches.map((domain) => domain.id.slice(0, 8)).join(", ")}`));
+  }
+  handleError(new Error(`Domain not found: ${ref}`));
+}
+
 function fallbackDomainDnsRecords(domain: string, provider: Provider): DnsRecord[] {
   const records = [generateSpfRecord(domain), generateDmarcRecord(domain)];
   if (provider.type === "sandbox") return records;
@@ -152,9 +173,13 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   const listDomainsAction = (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
     try {
-      const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
       const page = parseCliListPage(opts);
-      const domains = listDomains(providerId, getDatabase(), page);
+      const providerId = isSelfHostedMode()
+        ? opts.provider
+        : opts.provider ? resolveId("providers", opts.provider) : undefined;
+      const domains = isSelfHostedMode()
+        ? listDomains(providerId, undefined, page)
+        : listDomains(providerId, getDatabase(), page);
       if (domains.length === 0) {
         output([], chalk.dim("No domains configured."));
         return;
@@ -183,6 +208,12 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   const listLifecycleAction = (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
     try {
+      // Self-hosted has no local lifecycle/provisioning tables; read domains via
+      // the /v1 API (same path as `domain list`) instead of hard-blocking.
+      if (isSelfHostedMode()) {
+        listDomainsAction(opts);
+        return;
+      }
       const db = getDatabase();
       const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
       const page = parseCliListPage(opts);
@@ -202,6 +233,23 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   const statusLifecycleAction = (domainOrId: string | undefined, opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
     try {
+      // Self-hosted: no local lifecycle data. List via the /v1 API, or render the
+      // one matching domain's API record, instead of hard-blocking.
+      if (isSelfHostedMode()) {
+        if (!domainOrId) {
+          listDomainsAction(opts);
+          return;
+        }
+        const match = listDomains(undefined, undefined, { limit: 1000 })
+          .find((d) => d.id === domainOrId || d.id.startsWith(domainOrId) || d.domain.toLowerCase() === domainOrId.toLowerCase());
+        if (!match) {
+          handleError(new Error(`Domain not found: ${domainOrId}`));
+          return;
+        }
+        output(match, `${chalk.bold(`\nDomain ${match.domain}`)}\n  ID:   ${match.id.slice(0, 8)}\n  DNS:  DKIM:${colorDnsStatus(match.dkim_status)} SPF:${colorDnsStatus(match.spf_status)} DMARC:${colorDnsStatus(match.dmarc_status)}\n  ${chalk.dim("Full lifecycle readiness requires local mode or the operator API.")}\n`);
+        return;
+      }
+      selfHostedLocalOnly(domainOrId ? "emails domains status" : "emails domains list");
       if (!domainOrId) {
         listLifecycleAction(opts);
         return;
@@ -221,15 +269,13 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     commandPrefix: "domain" | "domains",
   ) => {
     try {
-      const db = getDatabase();
-
       // Self-hosted (self_hosted) mode: the domain is created directly on the app's
       // self_hosted HTTP API (<API_URL>/v1/domains). Providers are a local-only concept
       // (the self_hosted API exposes no /v1/providers), so we do NOT resolve a local
       // provider row or call a provider adapter — `--provider` is passed through
       // as a label. This makes `domain add` a real self_hosted write, not a local one.
       if (isSelfHostedMode()) {
-        const existing = getDomainByName(opts.provider, domain, db);
+        const existing = getDomainByName(opts.provider, domain);
         const selfHostedMode = resolveEmailsMode();
         const selfHostedDomainType = normalizeDomainType(opts.domainType) ?? "self_hosted";
         if (opts.dryRun) {
@@ -259,6 +305,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
         return;
       }
 
+      const db = getDatabase();
       const providerId = resolveId("providers", opts.provider);
       const provider = getProvider(providerId, db);
       if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
@@ -315,6 +362,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     commandPrefix: "domain" | "domains",
   ) => {
     try {
+      selfHostedLocalOnly(`emails ${commandPrefix} connect`);
       const db = getDatabase();
       const providerId = resolveId("providers", opts.provider);
       const provider = getProvider(providerId, db);
@@ -411,6 +459,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   const enableInboundAction = (domainOrId: string, opts: { provider?: string; force?: boolean }) => {
     try {
+      selfHostedLocalOnly("emails domains enable-inbound");
       const db = getDatabase();
       const domain = resolveDomainRecord(domainOrId, opts, db);
       const summary = buildDomainLifecycleSummary(domain, { db });
@@ -435,6 +484,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   const enableOutboundAction = (domainOrId: string, opts: { provider?: string; force?: boolean }) => {
     try {
+      selfHostedLocalOnly("emails domains enable-outbound");
       const db = getDatabase();
       const domain = resolveDomainRecord(domainOrId, opts, db);
       const dnsReady = domain.dkim_status === "verified" && domain.spf_status === "verified";
@@ -463,6 +513,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   const disableOutboundAction = (domainOrId: string, opts: { provider?: string }) => {
     try {
+      selfHostedLocalOnly("emails domains disable-outbound");
       const db = getDatabase();
       const domain = resolveDomainRecord(domainOrId, opts, db);
       const updated = updateDomainReadiness(domain.id, {
@@ -478,6 +529,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   const dnsAction = async (domain: string, opts: { provider?: string }) => {
     try {
+      selfHostedLocalOnly("emails domain dns");
       let providerId: string | undefined;
       if (opts.provider) {
         providerId = resolveId("providers", opts.provider);
@@ -514,6 +566,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   const verifyAction = async (domain: string, opts: { provider?: string }) => {
     try {
+      selfHostedLocalOnly("emails domain verify");
       const db = getDatabase();
       const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
       const found = providerId ? getDomainByName(providerId, domain, db) : findDomainsByName(domain, db)[0];
@@ -562,6 +615,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
 
   const checkAction = async (domain: string, opts: { provider?: string }) => {
     try {
+      selfHostedLocalOnly("emails domain check");
       const { checkDomainAuthentication, formatDnsCheck } = await import("../../lib/dns-check.js");
       const { inspectPublicMx, ownerLabel, requiresMxSwitchConfirmation, formatMxRecords } = await import("../../lib/mx-ownership.js");
 
@@ -770,6 +824,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--force-mx-switch", "Allow SES inbound setup even when public root MX belongs to another provider")
     .action(async (domain: string, opts: { provider: string; inbound?: boolean; bucket?: string; region?: string; catchAll?: string; sync?: boolean; forceMxSwitch?: boolean }) => {
       try {
+        selfHostedLocalOnly("emails domain adopt");
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
         const provider = getProvider(providerId);
@@ -916,6 +971,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--verbose", "Show per-domain issues and first fix command")
     .action((opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
+        selfHostedLocalOnly("emails domain status");
         const db = getDatabase();
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const page = parseCliListPage(opts);
@@ -1004,6 +1060,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--verbose", "Show expanded list hints")
     .action((opts: { receive?: boolean; send?: boolean; provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
+        selfHostedLocalOnly("emails domain usable");
         const db = getDatabase();
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const page = parseCliListPage(opts);
@@ -1066,6 +1123,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--yes", "Skip confirmation prompt")
     .action(async (domainName: string, opts: { toProvider: string; fromProvider?: string; dryRun?: boolean; yes?: boolean }) => {
       try {
+        selfHostedLocalOnly("emails domain move-provider");
         const db = getDatabase();
         const toProviderId = resolveId("providers", opts.toProvider);
         const toProvider = getProvider(toProviderId);
@@ -1153,6 +1211,15 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--yes", "Skip confirmation prompt")
     .action(async (id: string, opts: { yes?: boolean }) => {
       try {
+        if (isSelfHostedMode()) {
+          const resolvedId = resolveSelfHostedDomainId(id);
+          const domain = getDomain(resolvedId);
+          if (!domain) handleError(new Error(`Domain not found: ${id}`));
+          await confirmDestructiveAction(`Remove domain ${domain.domain}?`, opts.yes);
+          deleteDomain(resolvedId);
+          console.log(chalk.green(`✓ Domain removed: ${domain.domain}`));
+          return;
+        }
         const resolvedId = resolveId("domains", id);
         const domain = getDomain(resolvedId);
         if (!domain) handleError(new Error(`Domain not found: ${id}`));
@@ -1190,6 +1257,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       forceMxSwitch?: boolean;
     }) => {
       try {
+        selfHostedLocalOnly("emails domain setup-cloudflare");
         const providerId = resolveId("providers", opts.provider);
         const provider = getProvider(providerId);
         if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
@@ -1270,6 +1338,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       forceMxSwitch?: boolean;
     }) => {
       try {
+        selfHostedLocalOnly("emails domain setup-brandsight");
         const providerId = resolveId("providers", opts.provider);
         const provider = getProvider(providerId);
         if (!provider) handleError(new Error(`Provider not found: ${opts.provider}`));
@@ -1353,6 +1422,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--provider <id>", "Provider ID to associate")
     .action((domain: string, opts: { target: number; startDate?: string; provider?: string }) => {
       try {
+        selfHostedLocalOnly("emails domain warm");
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const schedule = createWarmingSchedule({
           domain,
@@ -1374,6 +1444,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .description("Show warming schedule status for a domain")
     .action((domain: string) => {
       try {
+        selfHostedLocalOnly("emails domain warm-status");
         const schedule = getWarmingSchedule(domain);
         if (!schedule) {
           console.log(chalk.yellow(`No warming schedule found for ${domain}`));
@@ -1394,6 +1465,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .option("--verbose", "Show expanded list hints")
     .action((opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
+        selfHostedLocalOnly("emails domain warm-list");
         const page = parseCliListPage(opts);
         const schedules = listWarmingSchedules(opts.status, undefined, page);
         if (schedules.length === 0) {
@@ -1444,6 +1516,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .description("Pause a domain warming schedule")
     .action((domain: string) => {
       try {
+        selfHostedLocalOnly("emails domain warm-pause");
         const updated = updateWarmingStatus(domain, "paused");
         if (!updated) {
           console.log(chalk.yellow(`No warming schedule found for ${domain}`));
@@ -1460,6 +1533,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .description("Resume a paused domain warming schedule")
     .action((domain: string) => {
       try {
+        selfHostedLocalOnly("emails domain warm-resume");
         const updated = updateWarmingStatus(domain, "active");
         if (!updated) {
           console.log(chalk.yellow(`No warming schedule found for ${domain}`));
@@ -1476,6 +1550,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
     .description("Mark a domain warming schedule as completed")
     .action((domain: string) => {
       try {
+        selfHostedLocalOnly("emails domain warm-complete");
         const updated = updateWarmingStatus(domain, "completed");
         if (!updated) {
           console.log(chalk.yellow(`No warming schedule found for ${domain}`));
@@ -1603,6 +1678,7 @@ export function registerDomainCommands(program: Command, output: (data: unknown,
       country: string; zip: string; org?: string; years: string; skipBuy?: boolean;
     }) => {
       try {
+        selfHostedLocalOnly("emails domain setup");
         const { r53CheckAvailability, r53RegisterDomain, r53CreateHostedZone, r53FindHostedZoneByDomain, r53UpsertRecords } = await import("@hasna/domains");
         const providerId = resolveId("providers", opts.provider);
         const provider = getProvider(providerId);

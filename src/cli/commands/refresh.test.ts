@@ -14,6 +14,27 @@ mock.module("../tui/autopull.js", () => ({
 const { registerRefreshCommand } = await import("./refresh.js");
 const { Command } = await import("commander");
 const originalHome = process.env["HOME"];
+const MODE_ENV_KEYS = [
+  "EMAILS_MODE",
+  "HASNA_EMAILS_MODE",
+  "EMAILS_SELF_HOSTED_URL",
+  "EMAILS_SELF_HOSTED_API_KEY",
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+  "HASNA_MAILERY_ENV_FILE",
+  "HASNA_EMAILS_DB_PATH",
+] as const;
+let originalEnv: Partial<Record<typeof MODE_ENV_KEYS[number], string | undefined>> = {};
 let tmpHome = "";
 
 async function runAsync(args: string[]) {
@@ -32,6 +53,11 @@ async function runAsync(args: string[]) {
 }
 
 beforeEach(() => {
+  originalEnv = {};
+  for (const key of MODE_ENV_KEYS) {
+    originalEnv[key] = process.env[key];
+    delete process.env[key];
+  }
   process.env["EMAILS_DB_PATH"] = ":memory:";
   tmpHome = mkdtempSync(join(tmpdir(), "emails-refresh-source-"));
   process.env["HOME"] = tmpHome;
@@ -43,6 +69,12 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  for (const key of MODE_ENV_KEYS) {
+    const value = originalEnv[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  originalEnv = {};
   process.exitCode = 0;
   if (originalHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = originalHome;

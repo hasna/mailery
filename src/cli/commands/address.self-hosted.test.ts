@@ -11,7 +11,7 @@
 // so the real transport path is exercised.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerAddressCommands } from "./address.js";
@@ -104,6 +104,40 @@ async function runAddressCommand(args: string[]) {
   return { data, out: out.join("\n") };
 }
 
+async function runAddressCommandExpectingExit(args: string[]) {
+  const originalExit = process.exit;
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = ((message?: unknown) => { errors.push(String(message ?? "")); }) as typeof console.error;
+  process.exit = ((code?: number) => {
+    throw new Error(`process.exit:${code ?? 0}`);
+  }) as typeof process.exit;
+  try {
+    await runAddressCommand(args);
+    throw new Error("Expected command to exit");
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e), stderr: errors.join("\n") };
+  } finally {
+    process.exit = originalExit;
+    console.error = originalError;
+  }
+}
+
+async function withTempHome<T>(prefix: string, fn: (tmpHome: string) => Promise<T>): Promise<T> {
+  const originalHome = process.env["HOME"];
+  const tmpHome = mkdtempSync(join(tmpdir(), prefix));
+  process.env["HOME"] = tmpHome;
+  try {
+    return await fn(tmpHome);
+  } finally {
+    closeDatabase();
+    resetDatabase();
+    if (originalHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = originalHome;
+    rmSync(tmpHome, { recursive: true, force: true });
+  }
+}
+
 describe("address CLI — selfHosted (self_hosted) routing", () => {
   beforeEach(async () => {
     await fetch(`${baseOrigin}/v1/__reset`, { method: "POST" });
@@ -117,6 +151,8 @@ describe("address CLI — selfHosted (self_hosted) routing", () => {
     delete process.env["EMAILS_MODE"];
     delete process.env["EMAILS_SELF_HOSTED_URL"];
     delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
+    delete process.env["EMAILS_DB_PATH"];
+    delete process.env["HASNA_EMAILS_DB_PATH"];
     resetSelfHostedConfigCache();
     closeDatabase();
   });
@@ -128,6 +164,51 @@ describe("address CLI — selfHosted (self_hosted) routing", () => {
     const { data } = await runAddressCommand(["addresses"]);
     const addresses = data as Array<{ email: string }>;
     expect(addresses.map((a) => a.email).sort()).toEqual(["selfHosted-a@example.com", "selfHosted-b@example.com"]);
+  });
+
+  it("API-backed address list does not create a default local DB under HOME", async () => {
+    await withTempHome("emails-address-self-hosted-api-", async (tmpHome) => {
+      await fetch(`${baseOrigin}/v1/__reset`, { method: "POST" });
+      closeDatabase();
+      resetDatabase();
+      delete process.env["EMAILS_DB_PATH"];
+      delete process.env["HASNA_EMAILS_DB_PATH"];
+      process.env["EMAILS_MODE"] = "self_hosted";
+      process.env["EMAILS_SELF_HOSTED_URL"] = baseOrigin;
+      process.env["EMAILS_SELF_HOSTED_API_KEY"] = API_KEY;
+      resetSelfHostedConfigCache();
+
+      await seedCloudAddress("selfHosted-api@example.com");
+      const { data } = await runAddressCommand(["addresses"]);
+
+      expect((data as Array<{ email: string }>).map((a) => a.email)).toEqual(["selfHosted-api@example.com"]);
+      expect(existsSync(join(tmpHome, ".hasna", "emails", "emails.db"))).toBe(false);
+    });
+  });
+
+  it("blocks local address lifecycle commands before creating a default local DB", async () => {
+    await withTempHome("emails-address-self-hosted-local-only-", async (tmpHome) => {
+      closeDatabase();
+      resetDatabase();
+      delete process.env["EMAILS_DB_PATH"];
+      delete process.env["HASNA_EMAILS_DB_PATH"];
+      process.env["EMAILS_MODE"] = "self_hosted";
+      process.env["EMAILS_SELF_HOSTED_URL"] = baseOrigin;
+      process.env["EMAILS_SELF_HOSTED_API_KEY"] = API_KEY;
+      resetSelfHostedConfigCache();
+
+      for (const args of [
+        ["address", "provision", "agent@example.com", "--provider", "ses-provider"],
+        ["address", "owner", "agent@example.com"],
+        ["address", "quota", "addr123", "10"],
+      ]) {
+        const result = await runAddressCommandExpectingExit(args);
+        expect(result.error).toBe("process.exit:1");
+        expect(result.stderr).toContain("self_hosted API-only mode");
+        expect(result.stderr).toContain("self-hosted server/operator API/workers");
+        expect(existsSync(join(tmpHome, ".hasna", "emails", "emails.db"))).toBe(false);
+      }
+    });
   });
 
   it("does NOT return local addresses when flipped to selfHosted", async () => {

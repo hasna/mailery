@@ -4,7 +4,16 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getClaudeMcpInstallCommand, getClaudeMcpRemoveCommand, getCodexMcpConfig, getGeminiMcpConfig } from "../../lib/mcp-install.js";
+import { getEmailsMode } from "../../lib/mode.js";
 import { handleError } from "../utils.js";
+
+function failIfSelfHostedLocalServe(command: string): void {
+  if (getEmailsMode() !== "self_hosted") return;
+  throw new Error(
+    `\`${command}\` starts local HTTP/webhook/SMTP listeners and is unavailable in self_hosted API-only mode. ` +
+      "Use the operator `emails-serve` binary for the self-hosted service, or set EMAILS_MODE=local intentionally for the local dashboard/listeners.",
+  );
+}
 
 export function registerServeCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   // ─── SERVE ────────────────────────────────────────────────────────────────────
@@ -19,6 +28,7 @@ export function registerServeCommands(program: Command, output: (data: unknown, 
     .option("--provider <id>", "Provider ID for inbound/webhook listeners")
     .option("--webhook-secret <secret>", "Resend webhook signing secret (whsec_...) for signature verification")
     .action(async (opts: { port?: string; host?: string; webhookPort?: string; smtpPort?: string; all?: boolean; provider?: string; webhookSecret?: string }) => {
+      failIfSelfHostedLocalServe("emails serve");
       const { startServer } = await import("../../server/serve.js");
       const port = parseInt(opts.port ?? "3900", 10);
       const host = opts.host ?? "127.0.0.1";

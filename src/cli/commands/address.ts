@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
-import { createAddress, findAddressesByEmail, listAddressEmails, deleteAddress, getAddress, getAddressByEmail } from "../../db/addresses.js";
+import { createAddress, findAddressesByEmail, listAddressEmails, listAddresses, deleteAddress, getAddress, getAddressByEmail } from "../../db/addresses.js";
 import { getDomainByName } from "../../db/domains.js";
 import { suspendAddress, activateAddress, setAddressQuota, countSendsTodayByAddress } from "../../db/address-lifecycle.js";
 import { getProvider } from "../../db/providers.js";
@@ -22,11 +22,75 @@ import {
 
 type ReceiveStrategy = "ses-s3" | "cf-routing" | "resend-webhook";
 
+function selfHostedLocalOnly(command: string): void {
+  if (!isSelfHostedMode()) return;
+  handleError(new Error(
+    `\`${command}\` is local-mode-only and unavailable in self_hosted API-only mode. ` +
+      "Use the self-hosted server/operator API/workers for address lifecycle changes, " +
+      "or set EMAILS_MODE=local intentionally to use local SQLite/config state.",
+  ));
+}
+
+function resolveSelfHostedAddressId(ref: string): string {
+  const exact = getAddress(ref);
+  if (exact) return exact.id;
+  const matches = listAddresses(undefined, undefined, { limit: 1000 })
+    .filter((address) => address.id.startsWith(ref));
+  if (matches.length === 1) return matches[0]!.id;
+  if (matches.length > 1) {
+    handleError(new Error(`Address ID is ambiguous in self_hosted mode: ${matches.map((address) => address.id.slice(0, 8)).join(", ")}`));
+  }
+  handleError(new Error(`Address not found: ${ref}`));
+}
+
 export function registerAddressCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const addressCmd = program.command("address").description("Manage sender email addresses");
 
   const listAddressesAction = (opts: { provider?: string; limit?: string; offset?: string; verbose?: boolean }) => {
     try {
+      if (isSelfHostedMode()) {
+        const page = parseCliListPage(opts);
+        const addresses = listAddresses(opts.provider, undefined, page).map((address) => ({
+          ...address,
+          provider_name: null,
+          owner: null,
+          administrator: null,
+        }));
+        if (addresses.length === 0) {
+          output([], chalk.dim("No addresses configured."));
+          return;
+        }
+        const lines: string[] = [chalk.bold("\nAddresses:")];
+        lines.push(tableRow(
+          [chalk.bold("ID"), 8],
+          [chalk.bold("Email"), 36],
+          [chalk.bold("Provider"), 16],
+          [chalk.bold("State"), 10],
+          [chalk.bold("Owner"), 18],
+        ));
+        for (const a of addresses) {
+          const state = `${a.verified ? "verified" : "pending"}/${a.status}`;
+          lines.push(tableRow(
+            [chalk.cyan(a.id.slice(0, 8)), 8],
+            [truncate(a.email, 36), 36],
+            [truncate(a.provider_id || "self_hosted", 16), 16],
+            [state, 10],
+            ["-", 18],
+          ));
+        }
+        lines.push("");
+        lines.push(formatListHint({
+          shown: addresses.length,
+          limit: page.limit,
+          offset: page.offset,
+          noun: "address",
+          detailCommand: "use the self-hosted operator API for address lifecycle details",
+          verbose: opts.verbose || isCliVerboseOutput(),
+        }));
+        output(addresses, lines.join("\n"));
+        return;
+      }
+
       const db = getDatabase();
       const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
       const page = parseCliListPage(opts);
@@ -157,6 +221,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Show owner and administering agent for an address")
     .action((ref: string) => {
       try {
+        selfHostedLocalOnly("emails address owner");
         const detail = getAddressOwnershipDetail(ref);
         const owner = detail.address.owner;
         const administrator = detail.address.administrator;
@@ -188,6 +253,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--administrator <name-or-id>", "Administering agent name, ID, or ID prefix")
     .action((ref: string, opts: { owner: string; administrator?: string }) => {
       try {
+        selfHostedLocalOnly("emails address set-owner");
         const detail = setAddressOwnerByRef(ref, opts.owner, opts.administrator);
         const owner = detail.address.owner!;
         const administrator = detail.address.administrator!;
@@ -207,6 +273,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--yes", "Skip confirmation prompt")
     .action(async (ref: string, opts: { owner: string; administrator?: string; reason: string; actor?: string; yes?: boolean }) => {
       try {
+        selfHostedLocalOnly("emails address transfer-owner");
         const before = getAddressOwnershipDetail(ref);
         await confirmDestructiveAction(`Transfer owner for ${before.address.email} to ${opts.owner}?`, opts.yes);
         const detail = transferAddressOwnerByRef(ref, opts.owner, opts.administrator, { actor: opts.actor, reason: opts.reason });
@@ -226,6 +293,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--yes", "Skip confirmation prompt")
     .action(async (ref: string, opts: { reason: string; actor?: string; yes?: boolean }) => {
       try {
+        selfHostedLocalOnly("emails address unassign-owner");
         const before = getAddressOwnershipDetail(ref);
         await confirmDestructiveAction(`Clear owner/admin assignment for ${before.address.email}?`, opts.yes);
         const detail = unassignAddressOwnerByRef(ref, { actor: opts.actor, reason: opts.reason });
@@ -241,6 +309,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--limit <n>", "Maximum events to show", "20")
     .action((ref: string, opts: { limit: string }) => {
       try {
+        selfHostedLocalOnly("emails address owner-history");
         const limit = Math.max(1, Math.min(100, parseInt(opts.limit, 10) || 20));
         const detail = getAddressOwnershipHistoryByRef(ref, limit);
         const lines = [chalk.bold(`\nOwnership history: ${detail.address.email}`)];
@@ -267,9 +336,10 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .requiredOption("--domain <domain>", "Domain name")
     .action((opts: { domain: string }) => {
       try {
-        const db = getDatabase();
         const domain = opts.domain.trim().toLowerCase();
-        const exists = listAddressEmails(undefined, db);
+        const exists = isSelfHostedMode()
+          ? listAddresses(undefined, undefined, { limit: 1000 }).map((address) => address.email)
+          : listAddressEmails(undefined, getDatabase());
         const suggestions = suggestAddressLocalParts(domain, exists);
         output({ domain, suggestions }, suggestions.length ? suggestions.join("\n") : chalk.dim(`No obvious suggestions left for ${domain}.`));
       } catch (e) {
@@ -305,6 +375,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
       bucket?: string;
     }) => {
       try {
+        selfHostedLocalOnly("emails address provision");
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
         const provider = getProvider(providerId);
@@ -446,6 +517,15 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .option("--yes", "Skip confirmation prompt")
     .action(async (id: string, opts: { yes?: boolean }) => {
       try {
+        if (isSelfHostedMode()) {
+          const resolvedId = resolveSelfHostedAddressId(id);
+          const addr = getAddress(resolvedId);
+          if (!addr) handleError(new Error(`Address not found: ${id}`));
+          await confirmDestructiveAction(`Remove sender address ${addr.email}?`, opts.yes);
+          deleteAddress(resolvedId);
+          console.log(chalk.green(`✓ Address removed: ${addr.email}`));
+          return;
+        }
         const resolvedId = resolveId("addresses", id);
         const addr = getAddress(resolvedId);
         if (!addr) handleError(new Error(`Address not found: ${id}`));
@@ -462,6 +542,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Suspend a sender address (blocks sending until reactivated)")
     .action((id: string) => {
       try {
+        selfHostedLocalOnly("emails address suspend");
         const resolvedId = resolveId("addresses", id);
         if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
         const a = suspendAddress(resolvedId);
@@ -476,6 +557,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Reactivate a suspended sender address")
     .action((id: string) => {
       try {
+        selfHostedLocalOnly("emails address activate");
         const resolvedId = resolveId("addresses", id);
         if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
         const a = activateAddress(resolvedId);
@@ -490,6 +572,7 @@ export function registerAddressCommands(program: Command, output: (data: unknown
     .description("Set a daily send quota for an address (use 'none' to clear)")
     .action((id: string, perDay: string) => {
       try {
+        selfHostedLocalOnly("emails address quota");
         const resolvedId = resolveId("addresses", id);
         if (!getAddress(resolvedId)) handleError(new Error(`Address not found: ${id}`));
         const quota = /^(none|null|unlimited|0?)$/i.test(perDay) && perDay !== "0"

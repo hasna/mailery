@@ -6,6 +6,15 @@ import { truncate, formatDate } from "../../lib/format.js";
 import { handleError, parseCliPage, resolveId } from "../utils.js";
 import { openLocalTarget } from "../../lib/local-actions.js";
 import { readableMessageText, renderReadableEmailDocument } from "../tui/format.js";
+import { getEmailsMode } from "../../lib/mode.js";
+
+function failIfSelfHostedLocalInbound(command: string): void {
+  if (getEmailsMode() !== "self_hosted") return;
+  throw new Error(
+    `\`${command}\` is local-mode-only and unavailable in self_hosted API-only mode. ` +
+      "Use API-backed `emails inbox ...` commands, or set EMAILS_MODE=local intentionally to read a local SQLite store.",
+  );
+}
 
 export function registerInboundCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const inboundCmd = program.command("inbound").description("Receive and inspect inbound emails");
@@ -16,15 +25,20 @@ export function registerInboundCommands(program: Command, output: (data: unknown
     .option("--port <port>", "SMTP port to listen on", "2525")
     .option("--provider <id>", "Associate received emails with this provider ID")
     .action(async (opts: { port?: string; provider?: string }) => {
-      const { createSmtpServer } = await import("../../lib/inbound.js");
-      const port = parseInt(opts.port ?? "2525", 10);
-      const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
-      console.log(chalk.green(`✓ SMTP listener started on port ${port}`));
-      if (providerId) console.log(chalk.dim(`  Provider: ${providerId}`));
-      console.log(chalk.dim("  Press Ctrl+C to stop\n"));
-      createSmtpServer(port, providerId);
-      // Keep process alive
-      process.stdin.resume();
+      try {
+        failIfSelfHostedLocalInbound("emails inbound listen");
+        const { createSmtpServer } = await import("../../lib/inbound.js");
+        const port = parseInt(opts.port ?? "2525", 10);
+        const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
+        console.log(chalk.green(`✓ SMTP listener started on port ${port}`));
+        if (providerId) console.log(chalk.dim(`  Provider: ${providerId}`));
+        console.log(chalk.dim("  Press Ctrl+C to stop\n"));
+        createSmtpServer(port, providerId);
+        // Keep process alive
+        process.stdin.resume();
+      } catch (e) {
+        handleError(e);
+      }
     });
 
   inboundCmd
@@ -35,6 +49,7 @@ export function registerInboundCommands(program: Command, output: (data: unknown
     .option("--offset <n>", "Skip first N emails", "0")
     .action((opts: { provider?: string; limit?: string; offset?: string }) => {
       try {
+        failIfSelfHostedLocalInbound("emails inbound list");
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const page = parseCliPage(opts, 20);
         const emails = listInboundEmailSummaries({ provider_id: providerId, limit: page.limit, offset: page.offset });
@@ -59,6 +74,7 @@ export function registerInboundCommands(program: Command, output: (data: unknown
     .description("Show full inbound email details")
     .action((id: string) => {
       try {
+        failIfSelfHostedLocalInbound("emails inbound show");
         const db = getDatabase();
         const resolvedId = resolvePartialId(db, "inbound_emails", id);
         if (!resolvedId) handleError(new Error(`Inbound email not found: ${id}`));
@@ -88,6 +104,9 @@ export function registerInboundCommands(program: Command, output: (data: unknown
     .description("Open a readable local HTML view of an inbound email")
     .action(async (id: string) => {
       try {
+        if (getEmailsMode() === "self_hosted") {
+          throw new Error("`emails inbound open` is unavailable in self_hosted mode because it writes a rendered HTML file locally. Use `emails inbox read <id>` for API-only terminal output.");
+        }
         const db = getDatabase();
         const resolvedId = resolvePartialId(db, "inbound_emails", id);
         if (!resolvedId) handleError(new Error(`Inbound email not found: ${id}`));
@@ -124,6 +143,7 @@ export function registerInboundCommands(program: Command, output: (data: unknown
     .option("--provider <id>", "Only clear emails for a specific provider")
     .action((opts: { provider?: string }) => {
       try {
+        failIfSelfHostedLocalInbound("emails inbound clear");
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const db = getDatabase();
         const count = clearInboundEmails(providerId, db);
@@ -139,6 +159,7 @@ export function registerInboundCommands(program: Command, output: (data: unknown
     .option("--provider <id>", "Filter by provider ID")
     .action((opts: { provider?: string }) => {
       try {
+        failIfSelfHostedLocalInbound("emails inbound count");
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const db = getDatabase();
         const count = getReceivedInboundCount(providerId, db);

@@ -5,6 +5,7 @@ import chalk from "../../lib/chalk-lite.js";
 import { getDataDir, getDatabase } from "../../db/database.js";
 import { getProvisioningWorkSummary } from "../../db/provisioning.js";
 import { handleError } from "../utils.js";
+import { getEmailsMode } from "../../lib/mode.js";
 
 type LogComponent = "daemon" | "sync" | "inbound" | "scheduler" | "nightly";
 
@@ -16,7 +17,16 @@ const LOG_FILES: Record<LogComponent, string[]> = {
   nightly: ["nightly-sync.log"],
 };
 
+function failIfSelfHostedLocalDaemon(command: string): void {
+  if (getEmailsMode() !== "self_hosted") return;
+  throw new Error(
+    `\`${command}\` is local daemon/log diagnostics only and is disabled in self_hosted API-only mode. ` +
+      "Use the operator service /health or /ready probes, or set EMAILS_MODE=local intentionally to inspect local daemon state.",
+  );
+}
+
 async function daemonStatus() {
+  failIfSelfHostedLocalDaemon("emails daemon status");
   const db = getDatabase();
   const { getEmailSystemStatusForRuntime } = await import("../../lib/agent-context.js");
   const now = new Date().toISOString();
@@ -85,6 +95,7 @@ export function registerDaemonCommands(program: Command, output: (data: unknown,
     .description("Show restart guidance for configured email background workers")
     .action(async () => {
       try {
+        failIfSelfHostedLocalDaemon("emails daemon restart");
         const status = await daemonStatus();
         const result = {
           managed_process: false,
@@ -110,6 +121,7 @@ export function registerDaemonCommands(program: Command, output: (data: unknown,
     .option("--lines <n>", "Lines to show from each file", "80")
     .action((opts: { component: string; lines: string }) => {
       try {
+        failIfSelfHostedLocalDaemon("emails logs tail");
         const component = opts.component as LogComponent;
         if (!LOG_FILES[component]) handleError(new Error(`Unknown log component: ${opts.component}`));
         const result = readTail(component, parseInt(opts.lines, 10) || 80);

@@ -19,13 +19,59 @@ import {
 } from "./data.js";
 import { setConfigValue } from "../../lib/config.js";
 import { registerS3Source } from "../../lib/s3-sync.js";
-import { mkdtempSync, rmSync } from "fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { resetSelfHostedConfigCache } from "../../db/self-hosted-store.js";
 
 let providerId: string;
 const originalHome = process.env["HOME"];
+const ORIGINAL_PATH = process.env["PATH"];
+const ISOLATED_ENV_KEYS = [
+  "EMAILS_MODE",
+  "HASNA_EMAILS_MODE",
+  "EMAILS_DB_PATH",
+  "HASNA_EMAILS_DB_PATH",
+  "EMAILS_SELF_HOSTED_URL",
+  "EMAILS_SELF_HOSTED_API_KEY",
+  "EMAILS_CLIENT_ENV_SECRET",
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+  "HASNA_MAILERY_ENV_FILE",
+] as const;
+const ORIGINAL_ENV = new Map<string, string | undefined>(ISOLATED_ENV_KEYS.map((key) => [key, process.env[key]]));
 let tmpHome: string | null = null;
+const extraTempDirs: string[] = [];
+
+function resetIsolatedEnv(): void {
+  for (const key of ISOLATED_ENV_KEYS) delete process.env[key];
+  if (ORIGINAL_PATH === undefined) delete process.env["PATH"];
+  else process.env["PATH"] = ORIGINAL_PATH;
+  for (const dir of extraTempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  resetSelfHostedConfigCache();
+}
+
+function restoreIsolatedEnv(): void {
+  for (const key of ISOLATED_ENV_KEYS) {
+    const value = ORIGINAL_ENV.get(key);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  if (ORIGINAL_PATH === undefined) delete process.env["PATH"];
+  else process.env["PATH"] = ORIGINAL_PATH;
+  for (const dir of extraTempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  resetSelfHostedConfigCache();
+}
 
 function seed(subject: string, opts: { read?: boolean; star?: boolean; archived?: boolean; to?: string[]; labels?: string[] } = {}) {
   const e = storeInboundEmail({
@@ -39,16 +85,50 @@ function seed(subject: string, opts: { read?: boolean; star?: boolean; archived?
   return e;
 }
 
+function defaultDbPath(): string {
+  if (!tmpHome) throw new Error("tmpHome not initialized");
+  return join(tmpHome, ".hasna", "emails", "emails.db");
+}
+
+function defaultConfigPath(): string {
+  if (!tmpHome) throw new Error("tmpHome not initialized");
+  return join(tmpHome, ".hasna", "emails", "config.json");
+}
+
+function installFakeSelfHostedCurl(): void {
+  const dir = mkdtempSync(join(tmpdir(), "emails-tui-curl-"));
+  extraTempDirs.push(dir);
+  const bin = join(dir, "curl");
+  writeFileSync(bin, `#!/bin/sh
+CONFIG="$(cat)"
+case "$CONFIG" in
+  *"/domains"*)
+    printf '%s\\n200' '{"domains":[{"id":"domain-1","domain":"example.com","provider":"self_hosted","verified":true,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}]}'
+    ;;
+  *"/addresses"*)
+    printf '%s\\n200' '{"addresses":[{"id":"address-1","email":"ops@example.com","display_name":"Ops","status":"active","verified":true,"created_at":"2026-01-02T00:00:00.000Z","updated_at":"2026-01-02T00:00:00.000Z"},{"id":"address-2","email":"other@example.net","status":"active","verified":false,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z"}]}'
+    ;;
+  *)
+    printf '%s\\n404' '{"error":"not found"}'
+    ;;
+esac
+`);
+  chmodSync(bin, 0o700);
+  process.env["PATH"] = `${dir}:${ORIGINAL_PATH ?? ""}`;
+}
+
 beforeEach(() => {
+  resetIsolatedEnv();
   tmpHome = mkdtempSync(join(tmpdir(), "emails-tui-data-"));
   process.env["HOME"] = tmpHome;
+  process.env["EMAILS_MODE"] = "local";
   process.env["EMAILS_DB_PATH"] = ":memory:";
   resetDatabase();
   providerId = createProvider({ name: "sandbox", type: "sandbox", active: true }).id;
 });
 afterEach(() => {
   closeDatabase();
-  delete process.env["EMAILS_DB_PATH"];
+  restoreIsolatedEnv();
   if (originalHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = originalHome;
   if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
@@ -1178,6 +1258,48 @@ describe("tui data — mailbox scopes and ingestion sources", () => {
     expect(sources.some((s) => s.domain === "elyratelier.com")).toBe(false);
     expect(queries.filter((sql) => sql.includes("FROM providers")).join("\n"))
       .not.toMatch(/\b(api_key|access_key|secret_key|oauth_client_id|oauth_client_secret|oauth_refresh_token|oauth_access_token|oauth_token_expiry)\b/);
+  });
+
+  it("keeps self_hosted TUI metadata helpers off the local SQLite store", () => {
+    closeDatabase();
+    resetDatabase();
+    delete process.env["EMAILS_DB_PATH"];
+    process.env["EMAILS_MODE"] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "http://127.0.0.1:3900";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
+    resetSelfHostedConfigCache();
+    installFakeSelfHostedCurl();
+
+    const addresses = listInboxAddresses();
+    expect(addresses.map((choice) => choice.address).filter(Boolean)).toContain("ops@example.com");
+    expect(listInboxAddresses({ search: "ops" }).map((choice) => choice.address)).toEqual(["ops@example.com"]);
+    expect(addressChoiceByAddress("ops@example.com")).toMatchObject({
+      address: "ops@example.com",
+      configured: true,
+    });
+    expect(addressChoiceByAddress("unknown@example.com")).toMatchObject({
+      address: "unknown@example.com",
+      configured: false,
+      observed: false,
+    });
+    expect(defaultFromAddress()).toBe("ops@example.com");
+    expect(defaultFromAddress({ source: { domain: "example.com" } })).toBe("ops@example.com");
+
+    const domains = listDomainSummaries();
+    expect(domains).toHaveLength(1);
+    expect(domains[0]).toMatchObject({
+      domain: "example.com",
+      provider: "self_hosted",
+      addresses: 1,
+      total: 0,
+    });
+
+    const sources = listSources();
+    expect(sources).toEqual([{ id: "all", label: "Self-hosted Emails [self_hosted, metadata-only]", providerId: undefined }]);
+    expect(getSettings()).toMatchObject({ autoPull: false, defaultMailbox: "inbox", defaultFrom: null });
+    expect(() => setSetting("theme", "dark")).toThrow("self_hosted API-only mode");
+    expect(existsSync(defaultDbPath())).toBe(false);
+    expect(existsSync(defaultConfigPath())).toBe(false);
   });
 
   it("badges legacy and orphaned ingestion sources while keeping their mail visible", () => {

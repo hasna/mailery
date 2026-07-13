@@ -5,6 +5,29 @@ import { createProvider } from "../../db/providers.js";
 import { storeSandboxEmail } from "../../db/sandbox.js";
 import { registerSandboxCommands } from "./sandbox.js";
 
+const LEGACY_MODE_ENV_KEYS = [
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+] as const;
+
+function clearModeEnv(): void {
+  delete process.env["EMAILS_MODE"];
+  delete process.env["HASNA_EMAILS_MODE"];
+  delete process.env["EMAILS_SELF_HOSTED_URL"];
+  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
+  for (const key of LEGACY_MODE_ENV_KEYS) delete process.env[key];
+}
+
 async function runSandboxCommand(args: string[]) {
   const program = new Command();
   program.exitOverride();
@@ -27,6 +50,25 @@ async function runSandboxCommand(args: string[]) {
   return { data, formatted: formatted.join("\n"), consoleOutput: logs.join("\n") };
 }
 
+async function runSandboxCommandExpectingExit(args: string[]) {
+  const originalExit = process.exit;
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = ((message?: unknown) => { errors.push(String(message ?? "")); }) as typeof console.error;
+  process.exit = ((code?: number) => {
+    throw new Error(`process.exit:${code ?? 0}`);
+  }) as typeof process.exit;
+  try {
+    await runSandboxCommand(args);
+    throw new Error("Expected command to exit");
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e), stderr: errors.join("\n") };
+  } finally {
+    process.exit = originalExit;
+    console.error = originalError;
+  }
+}
+
 function seedSandboxEmail() {
   const provider = createProvider({ name: "sandbox", type: "sandbox" });
   const email = storeSandboxEmail({
@@ -47,12 +89,14 @@ function seedSandboxEmail() {
 
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
+  clearModeEnv();
   resetDatabase();
 });
 
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  clearModeEnv();
 });
 
 describe("sandbox CLI commands", () => {
@@ -80,4 +124,31 @@ describe("sandbox CLI commands", () => {
     expect(shown.consoleOutput).not.toContain("<strong>");
     expect(shown.consoleOutput).not.toContain("&amp;");
   });
+
+  it("fails closed in self_hosted mode before rendering a local body file", async () => {
+    process.env["EMAILS_MODE"] = "self_hosted";
+
+    const result = await runSandboxCommandExpectingExit(["sandbox", "open", "abc123"]);
+
+    expect(result.error).toBe("process.exit:1");
+    expect(result.stderr).toContain("unavailable in self_hosted mode");
+  });
+
+  for (const args of [
+    ["sandbox", "list"],
+    ["sandbox", "show", "abc123"],
+    ["sandbox", "clear"],
+    ["sandbox", "count"],
+  ]) {
+    it(`fails closed for emails ${args.join(" ")}`, async () => {
+      process.env["EMAILS_MODE"] = "self_hosted";
+
+      const result = await runSandboxCommandExpectingExit(args);
+
+      expect(result.error).toBe("process.exit:1");
+      expect(result.stderr).toContain("self_hosted API-only mode");
+      expect(result.stderr).toContain("emails inbox");
+      expect(result.stderr).toContain("EMAILS_MODE=local");
+    });
+  }
 });

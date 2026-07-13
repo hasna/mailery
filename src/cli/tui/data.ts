@@ -22,7 +22,7 @@ import { getEmailContent } from "../../db/email-content.js";
 import { getEmailThreading, getThreadMessages, setInboundThreadId } from "../../db/threads.js";
 import { getLatestActiveProviderId, listProviderSummaries, listProviderNamesByIds } from "../../db/providers.js";
 import { listDomains } from "../../db/domains.js";
-import { findAddressesByEmail, getPreferredActiveAddressEmail, listActiveAddressCountsByDomains } from "../../db/addresses.js";
+import { findAddressesByEmail, getPreferredActiveAddressEmail, listAddresses, listActiveAddressCountsByDomains } from "../../db/addresses.js";
 import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../../db/provisioning.js";
 import { getInboundBuckets, loadConfig, saveConfig } from "../../lib/config.js";
 import { assessDomainReadiness } from "../../lib/domain-readiness.js";
@@ -86,6 +86,18 @@ function appendWhereCondition(clause: SqlClause, condition: string, params: stri
 
 function isDatabase(value: unknown): value is Database {
   return typeof (value as { query?: unknown } | undefined)?.query === "function";
+}
+
+function isSelfHostedTuiMode(): boolean {
+  const explicitMode = process.env["EMAILS_MODE"]?.trim() || process.env["HASNA_EMAILS_MODE"]?.trim();
+  if (explicitMode === "self_hosted") return true;
+  if (explicitMode === "local") return false;
+  if (!process.env["EMAILS_CLIENT_ENV_SECRET"]?.trim()) return false;
+  try {
+    return resolveEmailsMode().mode === "self_hosted";
+  } catch (error) {
+    throw error;
+  }
 }
 
 function pageFromOptions(opts: { limit?: number; offset?: number } | undefined, fallbackLimit: number): { limit: number; offset: number } | undefined {
@@ -622,6 +634,29 @@ function countColumn(row: { count?: unknown } | null): number {
   return countValue(row?.count);
 }
 
+function emptyMailboxCounts(): MailboxCounts {
+  return { inbox: 0, unread: 0, starred: 0, sent: 0, archived: 0, spam: 0, trash: 0 };
+}
+
+function selfHostedMailboxSourceSummaries(opts?: ListMailboxSourcesOptions): MailboxSourceSummary[] {
+  const source: MailboxSourceSummary = {
+    id: "all",
+    label: "Self-hosted Emails",
+    kind: "all",
+    badges: ["self_hosted", "metadata-only"],
+    counts: emptyMailboxCounts(),
+    total: 0,
+    unread: 0,
+    latestReceivedAt: null,
+  };
+  const q = opts?.search?.trim().toLowerCase();
+  if (q) {
+    const haystack = [source.id, source.label, source.kind, ...source.badges].join(" ").toLowerCase();
+    if (!haystack.includes(q)) return [];
+  }
+  return [source].slice(0, positiveInt(opts?.limit, 100));
+}
+
 function sourceMessageCount(source: MailboxSource | undefined, db: Database): number {
   const normalized = mailboxSourceFromRef(source);
   const inbound = inboundSourceClause(normalized);
@@ -682,6 +717,9 @@ function orphanedProviderIds(db: Database): string[] {
 export function listMailboxSources(db?: Database): MailboxSourceSummary[];
 export function listMailboxSources(opts?: ListMailboxSourcesOptions, db?: Database): MailboxSourceSummary[];
 export function listMailboxSources(optsOrDb?: ListMailboxSourcesOptions | Database, maybeDb?: Database): MailboxSourceSummary[] {
+  if (!isDatabase(optsOrDb) && !maybeDb && isSelfHostedTuiMode()) {
+    return selfHostedMailboxSourceSummaries(optsOrDb);
+  }
   const d = isDatabase(optsOrDb) ? optsOrDb : maybeDb || getDatabase();
   const opts = isDatabase(optsOrDb) ? undefined : optsOrDb;
   const inboundBuckets = getInboundBuckets();
@@ -1255,6 +1293,20 @@ export interface ComposeInput {
 
 /** Pick the best configured sender for a new TUI compose. */
 export function defaultFromAddress(opts?: { source?: MailboxSource; fallback?: string }, db?: Database): string {
+  if (!db && isSelfHostedTuiMode()) {
+    if (opts?.source?.address) return opts.source.address;
+    if (opts?.fallback) return opts.fallback;
+    try {
+      const domain = opts?.source?.domain?.toLowerCase();
+      const candidates = listAddresses(undefined, undefined, { limit: 200 })
+        .map((address) => extractEmail(address.email))
+        .filter((address): address is string => !!address)
+        .filter((address) => !domain || address.endsWith(`@${domain}`));
+      return candidates[0] ?? "";
+    } catch {
+      return "";
+    }
+  }
   const d = db || getDatabase();
   if (opts?.source?.address) return opts.source.address;
   const domain = opts?.source?.domain?.toLowerCase();
@@ -1449,6 +1501,44 @@ export interface ListDomainSummaryOptions {
 export function listDomainSummaries(db?: Database): DomainSummary[];
 export function listDomainSummaries(opts?: ListDomainSummaryOptions, db?: Database): DomainSummary[];
 export function listDomainSummaries(optsOrDb?: ListDomainSummaryOptions | Database, maybeDb?: Database): DomainSummary[] {
+  if (!isDatabase(optsOrDb) && !maybeDb && isSelfHostedTuiMode()) {
+    const opts = optsOrDb;
+    const page = pageFromOptions(opts, 50);
+    try {
+      const domains = listDomains(undefined, undefined, page);
+      const addresses = listAddresses(undefined, undefined, { limit: 1000 });
+      const addressCountByDomain = new Map<string, number>();
+      for (const item of addresses) {
+        const address = extractEmail(item.email);
+        const domain = address?.split("@")[1];
+        if (!domain || (item.status ?? "active") !== "active") continue;
+        addressCountByDomain.set(domain, (addressCountByDomain.get(domain) ?? 0) + 1);
+      }
+      const mode = resolveEmailsMode();
+      return domains
+        .map((domain) => {
+          const key = domain.domain.toLowerCase();
+          return {
+            domain: domain.domain,
+            provider: domain.provider_id || "self_hosted",
+            addresses: addressCountByDomain.get(key) ?? 0,
+            inbox: 0,
+            unread: 0,
+            sent: 0,
+            archived: 0,
+            total: 0,
+            readiness: assessDomainReadiness(domain, null, {
+              mode: mode.mode,
+              source_of_truth: domain.source_of_truth,
+              inbound_status: domain.inbound_status,
+            }).state,
+          };
+        })
+        .sort((a, b) => a.domain.localeCompare(b.domain));
+    } catch {
+      return [];
+    }
+  }
   const d = isDatabase(optsOrDb) ? optsOrDb : maybeDb || getDatabase();
   const opts = isDatabase(optsOrDb) ? undefined : optsOrDb;
   const page = pageFromOptions(opts, 50);
@@ -1625,6 +1715,36 @@ function listObservedInboxAddresses(db: Database, opts?: ListInboxAddressOptions
 export function listInboxAddresses(db?: Database): InboxAddressChoice[];
 export function listInboxAddresses(opts?: ListInboxAddressOptions, db?: Database): InboxAddressChoice[];
 export function listInboxAddresses(optsOrDb?: ListInboxAddressOptions | Database, maybeDb?: Database): InboxAddressChoice[] {
+  if (!isDatabase(optsOrDb) && !maybeDb && isSelfHostedTuiMode()) {
+    const opts = optsOrDb;
+    try {
+      const limit = opts ? positiveInt(opts.limit, 200) : 200;
+      const q = opts?.search?.trim().toLowerCase();
+      const choices = listAddresses(undefined, undefined, { limit: Math.max(limit, 200) })
+        .filter((item) => (item.status ?? "active") === "active")
+        .map((item): InboxAddressChoice | null => {
+          const address = extractEmail(item.email);
+          if (!address) return null;
+          return {
+            id: `a:${address}`,
+            label: item.display_name ? `${item.display_name} <${address}>` : address,
+            address,
+            domain: address.split("@")[1],
+            providerId: item.provider_id || undefined,
+            provider: item.provider_id || undefined,
+            receiveStatus: item.verified ? "ready" : "pending",
+            configured: true,
+            observed: false,
+          };
+        })
+        .filter((item): item is InboxAddressChoice => item !== null)
+        .filter((item) => !q || [item.address, item.label, item.domain].some((value) => String(value ?? "").toLowerCase().includes(q)))
+        .slice(0, limit);
+      return opts?.search?.trim() ? choices : [ALL_ADDRESSES, ...choices];
+    } catch {
+      return opts?.search?.trim() ? [] : [ALL_ADDRESSES];
+    }
+  }
   const d = isDatabase(optsOrDb) ? optsOrDb : maybeDb || getDatabase();
   const opts = isDatabase(optsOrDb) ? undefined : optsOrDb;
   const byAddress = new Map<string, InboxAddressChoice>();
@@ -1662,6 +1782,18 @@ export function listInboxAddresses(optsOrDb?: ListInboxAddressOptions | Database
 export function addressChoiceByAddress(address: string | null | undefined, db?: Database): InboxAddressChoice {
   const normalized = extractEmail(address);
   if (!normalized) return ALL_ADDRESSES;
+  if (!db && isSelfHostedTuiMode()) {
+    return listInboxAddresses({ search: normalized, limit: 20 })
+      .find((choice) => choice.address?.toLowerCase() === normalized)
+      ?? {
+        id: `a:${normalized}`,
+        label: normalized,
+        address: normalized,
+        domain: normalized.split("@")[1],
+        configured: false,
+        observed: false,
+      };
+  }
   const d = db || getDatabase();
   const configured = d
     .query("SELECT id, email, provider_id FROM addresses WHERE email = ? COLLATE NOCASE AND COALESCE(status, 'active') = 'active' LIMIT 1")
@@ -1707,6 +1839,13 @@ export interface InboxSource { id: string; label: string; providerId?: string; d
 
 /** The selectable ingestion sources. Providers remain credentials/capabilities. */
 export function listSources(db?: Database): InboxSource[] {
+  if (!db && isSelfHostedTuiMode()) {
+    return selfHostedMailboxSourceSummaries().map((source) => ({
+      id: source.id,
+      label: source.badges.length ? `${source.label} [${source.badges.join(", ")}]` : source.label,
+      providerId: source.providerId,
+    }));
+  }
   const d = db || getDatabase();
   return listMailboxSources(d).map((source) => ({
     id: source.id,
@@ -1726,7 +1865,17 @@ export interface TuiSettings {
   theme: TuiThemeMode;
 }
 
+const DEFAULT_TUI_SETTINGS: TuiSettings = {
+  autoPull: false,
+  dimRead: false,
+  defaultMailbox: "inbox",
+  defaultAddress: null,
+  defaultFrom: null,
+  theme: "light",
+};
+
 export function getSettings(): TuiSettings {
+  if (isSelfHostedTuiMode()) return { ...DEFAULT_TUI_SETTINGS };
   const c = loadConfig();
   return {
     autoPull: c["tui_autopull"] === true,
@@ -1739,6 +1888,9 @@ export function getSettings(): TuiSettings {
 }
 
 export function setSetting<K extends keyof TuiSettings>(key: K, value: TuiSettings[K]): void {
+  if (isSelfHostedTuiMode()) {
+    throw new Error("TUI settings write local config and are disabled in self_hosted API-only mode.");
+  }
   const c = loadConfig();
   const map: Record<keyof TuiSettings, string> = {
     autoPull: "tui_autopull",

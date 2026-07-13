@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
 import { createAddress, listAddresses } from "../../db/addresses.js";
 import { createDomain, listDomains } from "../../db/domains.js";
 import { createProvider } from "../../db/providers.js";
 import { getDomainProvisioning, setAddressProvisioning, setDomainProvisioning } from "../../db/provisioning.js";
 import { registerProvisionCommands, type ProvisionCommandDeps } from "./provision.js";
+import { resetSelfHostedConfigCache } from "../../db/self-hosted-store.js";
 
 async function runProvisionCommand(args: string[], deps?: ProvisionCommandDeps) {
   const program = new Command();
@@ -20,14 +24,67 @@ async function runProvisionCommand(args: string[], deps?: ProvisionCommandDeps) 
   return { data, out: out.join("\n") };
 }
 
+async function runProvisionCommandExpectingExit(args: string[], deps?: ProvisionCommandDeps) {
+  const originalExit = process.exit;
+  const originalError = console.error;
+  const errors: string[] = [];
+  console.error = ((message?: unknown) => { errors.push(String(message ?? "")); }) as typeof console.error;
+  process.exit = ((code?: number) => {
+    throw new Error(`process.exit:${code ?? 0}`);
+  }) as typeof process.exit;
+  try {
+    await runProvisionCommand(args, deps);
+    throw new Error("Expected command to exit");
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e), stderr: errors.join("\n") };
+  } finally {
+    process.exit = originalExit;
+    console.error = originalError;
+  }
+}
+
+async function withTempHome<T>(prefix: string, fn: (tmpHome: string) => Promise<T>): Promise<T> {
+  const originalHome = process.env["HOME"];
+  const tmpHome = mkdtempSync(join(tmpdir(), prefix));
+  process.env["HOME"] = tmpHome;
+  try {
+    return await fn(tmpHome);
+  } finally {
+    closeDatabase();
+    resetDatabase();
+    if (originalHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = originalHome;
+    rmSync(tmpHome, { recursive: true, force: true });
+  }
+}
+
+function enableSelfHostedMode(): void {
+  process.env["EMAILS_MODE"] = "self_hosted";
+  process.env["EMAILS_SELF_HOSTED_URL"] = "http://127.0.0.1:9";
+  process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
+  resetSelfHostedConfigCache();
+}
+
+function clearModeEnv(): void {
+  delete process.env["EMAILS_MODE"];
+  delete process.env["HASNA_EMAILS_MODE"];
+  delete process.env["EMAILS_SELF_HOSTED_URL"];
+  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
+  resetSelfHostedConfigCache();
+}
+
 beforeEach(() => {
   process.env["EMAILS_DB_PATH"] = ":memory:";
+  delete process.env["HASNA_EMAILS_DB_PATH"];
+  clearModeEnv();
   resetDatabase();
 });
 
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  delete process.env["HASNA_EMAILS_DB_PATH"];
+  clearModeEnv();
 });
 
 describe("provision command dry-runs", () => {
@@ -148,5 +205,45 @@ describe("provision retry", () => {
     const provisioning = getDomainProvisioning(domain.id);
     expect(provisioning?.last_error).toBeNull();
     expect(new Date(provisioning?.next_check_at ?? 0).getTime()).toBeLessThan(Date.now() + 5000);
+  });
+});
+
+describe("provision self_hosted local lifecycle guards", () => {
+  it("blocks local provisioning commands before creating the default local DB", async () => {
+    await withTempHome("emails-provision-self-hosted-", async (tmpHome) => {
+      closeDatabase();
+      resetDatabase();
+      delete process.env["EMAILS_DB_PATH"];
+      delete process.env["HASNA_EMAILS_DB_PATH"];
+      enableSelfHostedMode();
+
+      for (const args of [
+        ["provision", "status"],
+        ["provision", "roundtrip", "--domain", "example.com", "--provider", "ses-provider"],
+        ["provision", "up", "example.com", "--provider", "ses-provider"],
+      ]) {
+        const result = await runProvisionCommandExpectingExit(args);
+        expect(result.error).toBe("process.exit:1");
+        expect(result.stderr).toContain("self_hosted API-only mode");
+        expect(result.stderr).toContain("self-hosted server/operator API/workers");
+        expect(existsSync(join(tmpHome, ".hasna", "emails", "emails.db"))).toBe(false);
+      }
+    });
+  });
+
+  it("keeps explicit local mode on the local provisioning store", async () => {
+    await withTempHome("emails-provision-local-", async (tmpHome) => {
+      closeDatabase();
+      resetDatabase();
+      delete process.env["EMAILS_DB_PATH"];
+      delete process.env["HASNA_EMAILS_DB_PATH"];
+      process.env["EMAILS_MODE"] = "local";
+      resetSelfHostedConfigCache();
+
+      const result = await runProvisionCommand(["provision", "status"]);
+
+      expect(result.out).toContain("No provisioned domains.");
+      expect(existsSync(join(tmpHome, ".hasna", "emails", "emails.db"))).toBe(true);
+    });
   });
 });

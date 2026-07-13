@@ -1,11 +1,12 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { loadConfig, saveConfig, getConfigValue, setConfigValue } from "../../lib/config.js";
+import { assertLocalConfigAccessAllowed, assertLocalConfigModeValueAllowed } from "../../lib/mode.js";
 import { redactSecrets } from "../../lib/redaction.js";
 import { formatListHint, handleError, isCliVerboseOutput, parseCliPage, summarizeCliValue } from "../utils.js";
 
 const KNOWN_KEYS: { key: string; description: string; example: string }[] = [
-  { key: "emails_mode", description: "Emails mode: local | self_hosted", example: "self_hosted" },
+  { key: "emails_mode", description: "Local config mode: local only; self_hosted uses env/client-env", example: "local" },
   { key: "default_provider", description: "Default provider ID used when --provider is not specified", example: "abc12345" },
   { key: "failover-providers", description: "Comma-separated provider IDs used as failover for send()", example: "abc12345,def67890" },
   { key: "attachment_storage", description: "Where to store inbound attachments: local | s3 | none", example: "local" },
@@ -37,8 +38,10 @@ export function registerConfigCommands(program: Command, output: (data: unknown,
     .description("Set a config value")
     .action((key: string, value: string) => {
       try {
+        assertLocalConfigAccessAllowed("emails config set");
         let parsed: unknown;
         try { parsed = JSON.parse(value); } catch { parsed = value; }
+        assertLocalConfigModeValueAllowed(key, parsed);
         setConfigValue(key, parsed);
         console.log(chalk.green(`✓ ${key} = ${JSON.stringify(redactConfigEntry(key, parsed))}`));
       } catch (e) { handleError(e); }
@@ -49,6 +52,7 @@ export function registerConfigCommands(program: Command, output: (data: unknown,
     .description("Get a config value")
     .action((key: string) => {
       try {
+        assertLocalConfigAccessAllowed("emails config get");
         const value = getConfigValue(key);
         if (value === undefined) { console.log(chalk.dim(`${key} is not set`)); }
         else { console.log(`${key} = ${JSON.stringify(redactConfigEntry(key, value))}`); }
@@ -60,6 +64,7 @@ export function registerConfigCommands(program: Command, output: (data: unknown,
     .description("Remove a config value")
     .action((key: string) => {
       try {
+        assertLocalConfigAccessAllowed("emails config unset");
         const config = loadConfig();
         if (!(key in config)) {
           console.log(chalk.dim(`${key} is not set`));
@@ -79,6 +84,7 @@ export function registerConfigCommands(program: Command, output: (data: unknown,
     .option("--verbose", "Show full redacted values instead of compact summaries")
     .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
+        assertLocalConfigAccessAllowed("emails config list");
         const config = loadConfig();
         const keys = Object.keys(config).sort();
         if (keys.length === 0) { output({}, chalk.dim("No config values set. Run 'emails config keys' to see available keys.")); return; }

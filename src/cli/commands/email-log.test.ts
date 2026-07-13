@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { Command } from "commander";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../../db/database.js";
@@ -9,7 +9,9 @@ import { storeEmailContent } from "../../db/email-content.js";
 import { storeInboundEmail } from "../../db/inbound.js";
 import { createProvider } from "../../db/providers.js";
 import { createAddress, markVerified } from "../../db/addresses.js";
+import { resetSelfHostedConfigCache } from "../../db/self-hosted-store.js";
 import { setConfigValue } from "../../lib/config.js";
+import { resetMailDataSource } from "../../lib/mail-data-source.js";
 import { registerEmailLogCommands } from "./email-log.js";
 
 function setupDb() {
@@ -67,13 +69,144 @@ async function runEmailLogCommand(args: string[]) {
   return { data, formatted, consoleOutput: consoleLines.join("\n") };
 }
 
+async function runEmailLogCommandExpectingExit(args: string[]): Promise<string> {
+  const errors: string[] = [];
+  const originalError = console.error;
+  const originalExit = process.exit;
+  const errorSpy = mock((msg: unknown) => {
+    errors.push(String(msg));
+  });
+  const exitSpy = mock((code?: number) => {
+    throw new Error(`exit:${code ?? 0}`);
+  });
+  (console as unknown as { error: typeof errorSpy }).error = errorSpy;
+  (process as unknown as { exit: typeof exitSpy }).exit = exitSpy;
+  try {
+    await expect(runEmailLogCommand(args)).rejects.toThrow("exit:1");
+  } finally {
+    (console as unknown as { error: typeof originalError }).error = originalError;
+    (process as unknown as { exit: typeof originalExit }).exit = originalExit;
+  }
+  return errors.join("\n");
+}
+
+async function withTempHome<T>(prefix: string, fn: (tmpHome: string) => Promise<T>): Promise<T> {
+  const originalHome = process.env["HOME"];
+  const tmpHome = mkdtempSync(join(tmpdir(), prefix));
+  process.env["HOME"] = tmpHome;
+  try {
+    return await fn(tmpHome);
+  } finally {
+    if (originalHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = originalHome;
+    rmSync(tmpHome, { recursive: true, force: true });
+  }
+}
+
+type SelfHostedRow = {
+  id: string;
+  direction: "inbound" | "outbound";
+  from_addr: string;
+  to_addrs: string[];
+  cc_addrs?: string[];
+  subject: string;
+  body_text?: string | null;
+  body_html?: string | null;
+  received_at: string;
+  is_read?: boolean;
+  is_starred?: boolean;
+  labels?: string[];
+  attachments?: Array<{ filename: string; content_type: string; size: number }>;
+};
+
+const originalFetch = globalThis.fetch;
+const MODE_ENV_KEYS = [
+  "EMAILS_MODE",
+  "HASNA_EMAILS_MODE",
+  "EMAILS_SELF_HOSTED_URL",
+  "EMAILS_SELF_HOSTED_API_KEY",
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+  "HASNA_MAILERY_ENV_FILE",
+] as const;
+let originalModeEnv: Partial<Record<typeof MODE_ENV_KEYS[number], string>> = {};
+
+function enableSelfHostedMode(rows: SelfHostedRow[]): { requests: string[] } {
+  process.env["EMAILS_MODE"] = "self_hosted";
+  process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example.test";
+  process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-api-key";
+  resetSelfHostedConfigCache();
+  resetMailDataSource();
+  const requests: string[] = [];
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const target = new URL(String(url));
+    const method = (init?.method ?? "GET").toUpperCase();
+    requests.push(`${method} ${target.pathname}${target.search}`);
+    if (init?.headers && (init.headers as Record<string, string>)["Authorization"] !== "Bearer test-api-key") {
+      return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+    }
+    if (method === "GET" && target.pathname === "/v1/messages") {
+      let filtered = [...rows].sort((a, b) => b.received_at.localeCompare(a.received_at));
+      const direction = target.searchParams.get("direction");
+      if (direction) filtered = filtered.filter((row) => row.direction === direction);
+      const search = target.searchParams.get("search")?.toLowerCase();
+      if (search) {
+        filtered = filtered.filter((row) =>
+          [row.from_addr, row.to_addrs.join(" "), row.subject, row.body_text ?? ""]
+            .join(" ")
+            .toLowerCase()
+            .includes(search),
+        );
+      }
+      const since = target.searchParams.get("since");
+      if (since) filtered = filtered.filter((row) => Date.parse(row.received_at) >= Date.parse(since));
+      const limit = Number(target.searchParams.get("limit") ?? "500");
+      const offset = Number(target.searchParams.get("offset") ?? "0");
+      return new Response(JSON.stringify({ messages: filtered.slice(offset, offset + limit) }), { status: 200 });
+    }
+    const messageMatch = target.pathname.match(/^\/v1\/messages\/([^/]+)$/);
+    if (method === "GET" && messageMatch) {
+      const id = decodeURIComponent(messageMatch[1]!);
+      const row = rows.find((candidate) => candidate.id === id);
+      return row
+        ? new Response(JSON.stringify({ message: row }), { status: 200 })
+        : new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+    }
+    return new Response(JSON.stringify({ error: "unexpected" }), { status: 500 });
+  }) as typeof fetch;
+  return { requests };
+}
+
 beforeEach(() => {
+  originalModeEnv = {};
+  for (const key of MODE_ENV_KEYS) {
+    originalModeEnv[key] = process.env[key];
+    delete process.env[key];
+  }
   setupDb();
 });
 
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
+  for (const key of MODE_ENV_KEYS) {
+    const value = originalModeEnv[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  globalThis.fetch = originalFetch;
+  resetSelfHostedConfigCache();
+  resetMailDataSource();
 });
 
 describe("email log list and search commands", () => {
@@ -135,6 +268,107 @@ describe("email log list and search commands", () => {
     expect(rows[0]).not.toHaveProperty("idempotency_key");
     expect(JSON.stringify(rows)).not.toContain("search-secret");
   });
+
+  it("routes self_hosted sent lists through the API and ignores local sent rows", async () => {
+    const { requests } = enableSelfHostedMode([
+      {
+        id: "srv-out-1",
+        direction: "outbound",
+        from_addr: "server@example.com",
+        to_addrs: ["remote@example.com"],
+        subject: "Server sent subject",
+        body_text: "server body must not appear in list JSON",
+        received_at: "2026-01-02T00:00:00.000Z",
+        is_read: true,
+      },
+    ]);
+
+    const { data, formatted } = await runEmailLogCommand(["email", "list"]);
+    const rows = data as Array<Record<string, unknown>>;
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: "srv-out-1", subject: "Server sent subject" });
+    expect(JSON.stringify(rows)).not.toContain("server body");
+    expect(JSON.stringify(rows)).not.toContain("Original subject");
+    expect(formatted).toContain("Self-hosted sent mail");
+    expect(requests.some((request) => request.startsWith("GET /v1/messages?"))).toBe(true);
+    expect(requests.join("\n")).toContain("direction=outbound");
+  });
+
+  it("routes top-level self_hosted search through the API instead of local sent search", async () => {
+    const { requests } = enableSelfHostedMode([
+      {
+        id: "srv-out-2",
+        direction: "outbound",
+        from_addr: "server@example.com",
+        to_addrs: ["remote@example.com"],
+        subject: "Server searchable subject",
+        received_at: "2026-01-03T00:00:00.000Z",
+        is_read: true,
+      },
+    ]);
+
+    const { data } = await runEmailLogCommand(["search", "Original"]);
+
+    expect(data).toEqual([]);
+    expect(requests.join("\n")).toContain("direction=outbound");
+    expect(requests.join("\n")).toContain("search=Original");
+  });
+
+  it("fails closed for unsupported local sent-log filters in self_hosted mode", async () => {
+    enableSelfHostedMode([]);
+    const errors = await runEmailLogCommandExpectingExit(["log", "--provider", "local-provider"]);
+
+    expect(errors).toContain("does not support local sent-log filter(s): --provider");
+  });
+
+  it("fails closed on legacy storage_mode config before reading the local sent log", async () => {
+    await withTempHome("emails-log-legacy-mode-", async () => {
+      setConfigValue("storage_mode", "remote");
+
+      const errors = await runEmailLogCommandExpectingExit(["log"]);
+
+      expect(errors).toContain("config key 'storage_mode' value 'remote'");
+      expect(errors).toContain("removed hosted/legacy runtime");
+    });
+  });
+
+  it("fails closed on legacy storage_mode config before local export", async () => {
+    await withTempHome("emails-export-legacy-mode-", async () => {
+      setConfigValue("storage_mode", "remote");
+
+      const errors = await runEmailLogCommandExpectingExit(["export", "emails"]);
+
+      expect(errors).toContain("config key 'storage_mode' value 'remote'");
+      expect(errors).toContain("removed hosted/legacy runtime");
+    });
+  });
+});
+
+describe("self_hosted local-only command guards", () => {
+  it("fails test/export/webhook commands before opening the default local store", async () => {
+    await withTempHome("emails-self-hosted-local-only-", async (tmpHome) => {
+      closeDatabase();
+      resetDatabase();
+      delete process.env["EMAILS_DB_PATH"];
+      const { requests } = enableSelfHostedMode([]);
+
+      for (const { args, command, detail } of [
+        { args: ["test"], command: "emails test", detail: "Use `emails send" },
+        { args: ["export", "emails"], command: "emails export", detail: "server-side export/reporting" },
+        { args: ["export", "events"], command: "emails export", detail: "server-side export/reporting" },
+        { args: ["webhook", "listen", "--port", "19877"], command: "emails webhook listen", detail: "self-hosted server" },
+      ]) {
+        const errors = await runEmailLogCommandExpectingExit(args);
+        expect(errors).toContain(command);
+        expect(errors).toContain("self_hosted API-only mode");
+        expect(errors).toContain(detail);
+        expect(existsSync(join(tmpHome, ".hasna"))).toBe(false);
+      }
+
+      expect(requests).toEqual([]);
+    });
+  });
 });
 
 describe("email show command", () => {
@@ -148,9 +382,54 @@ describe("email show command", () => {
     expect(consoleOutput).toContain("Hello there & welcome");
     expect(consoleOutput).not.toContain("<strong>");
   });
+
+  it("routes self_hosted show through the API and does not read local sent content", async () => {
+    const db = getDatabase();
+    const sent = db.query("SELECT id FROM emails LIMIT 1").get() as { id: string };
+    storeEmailContent(sent.id, { text: "local body must not appear" }, db);
+    const { requests } = enableSelfHostedMode([
+      {
+        id: "srv-show-1",
+        direction: "outbound",
+        from_addr: "server@example.com",
+        to_addrs: ["remote@example.com"],
+        cc_addrs: [],
+        subject: "Server show subject",
+        body_text: "server show body",
+        received_at: "2026-01-04T00:00:00.000Z",
+        is_read: true,
+      },
+    ]);
+
+    const { data, formatted } = await runEmailLogCommand(["email", "show", "srv-show-1"]);
+    const shown = data as Record<string, unknown>;
+
+    expect(shown).toMatchObject({ id: "srv-show-1", subject: "Server show subject" });
+    expect(formatted).toContain("server show body");
+    expect(formatted).not.toContain("local body must not appear");
+    expect(requests.join("\n")).toContain("GET /v1/messages?limit=500&offset=0");
+    expect(requests.join("\n")).toContain("GET /v1/messages/srv-show-1");
+  });
+
+  it("fails self_hosted show against a local-only id instead of falling back to SQLite", async () => {
+    const sent = getDatabase().query("SELECT id FROM emails LIMIT 1").get() as { id: string };
+    enableSelfHostedMode([]);
+    const errors = await runEmailLogCommandExpectingExit(["show", sent.id]);
+
+    expect(errors).toContain(`Email not found: ${sent.id}`);
+  });
 });
 
 describe("email log reply commands", () => {
+  it("fails local-only reply lookup in self_hosted mode before reading local replies", async () => {
+    const sent = getDatabase().query("SELECT id FROM emails LIMIT 1").get() as { id: string };
+    enableSelfHostedMode([]);
+    const errors = await runEmailLogCommandExpectingExit(["replies", sent.id]);
+
+    expect(errors).toContain("local sent-log-only");
+    expect(errors).toContain("self_hosted API-only mode");
+  });
+
   it("returns bounded summary replies without body or header payloads", async () => {
     const sent = getDatabase().query("SELECT id FROM emails LIMIT 1").get() as { id: string };
     seedReply(sent.id, 0);

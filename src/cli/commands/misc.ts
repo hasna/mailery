@@ -9,6 +9,7 @@ import { getTemplate, renderTemplate } from "../../db/templates.js";
 import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { truncate } from "../../lib/format.js";
 import { createSentEmailLedger } from "../../lib/sent-ledger.js";
+import { getEmailsMode } from "../../lib/mode.js";
 import {
   getDueEnrollments, advanceEnrollment, getStepAtIndex,
 } from "../../db/sequences.js";
@@ -36,6 +37,22 @@ interface SchedulerTickCache {
   templates: Map<string, Template | null>;
   fromAddresses: Map<string, string | null>;
   defaultProvider?: Provider | null;
+}
+
+function failIfSelfHostedLocalAutomation(command: string): void {
+  if (getEmailsMode() !== "self_hosted") return;
+  throw new Error(
+    `\`${command}\` is local scheduler/automation storage only and is disabled in self_hosted API-only mode. ` +
+      "Use the self-hosted server automation APIs when they are available, or set EMAILS_MODE=local intentionally to use the local SQLite scheduler.",
+  );
+}
+
+function failIfSelfHostedLocalDiagnostics(command: string): void {
+  if (getEmailsMode() !== "self_hosted") return;
+  throw new Error(
+    `\`${command}\` is local diagnostics only and is disabled in self_hosted API-only mode. ` +
+      "Use self-hosted /health or /ready probes against the operator service, or set EMAILS_MODE=local intentionally to inspect a local store.",
+  );
 }
 
 async function sendWithFailoverLazy(providerId: string, options: SendEmailOptions, db: Database) {
@@ -192,6 +209,7 @@ async function processDueSequenceEnrollments(cache: SchedulerTickCache, log: Sch
 }
 
 export async function runSchedulerTick(opts: SchedulerTickOptions = {}): Promise<SchedulerTickResult> {
+  failIfSelfHostedLocalAutomation("emails schedule run");
   const cache = schedulerCache(getDatabase());
   const log = opts.log ?? (() => {});
   return {
@@ -216,6 +234,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .option("--verbose", "Show expanded list hints")
     .action((opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
+        failIfSelfHostedLocalAutomation("emails scheduled list");
         const status = opts.status as "pending" | "sent" | "cancelled" | "failed" | undefined;
         const page = parseCliListPage(opts);
         const emails = listScheduledEmailSummaries({
@@ -254,6 +273,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .description("Cancel a scheduled email")
     .action((id: string) => {
       try {
+        failIfSelfHostedLocalAutomation("emails scheduled cancel");
         const db = getDatabase();
         const resolvedId = resolvePartialId(db, "scheduled_emails", id);
         if (!resolvedId) handleError(new Error(`Scheduled email not found: ${id}`));
@@ -275,6 +295,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .option("--verbose", "Show expanded list hints")
     .action((opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
+        failIfSelfHostedLocalAutomation("emails schedule list");
         const status = opts.status as "pending" | "sent" | "cancelled" | "failed" | undefined;
         const page = parseCliListPage(opts);
         const emails = listScheduledEmailSummaries({
@@ -305,6 +326,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .description("Cancel a scheduled email")
     .action((id: string) => {
       try {
+        failIfSelfHostedLocalAutomation("emails schedule cancel");
         const db = getDatabase();
         const resolvedId = resolvePartialId(db, "scheduled_emails", id);
         if (!resolvedId) handleError(new Error(`Scheduled email not found: ${id}`));
@@ -319,6 +341,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .option("--interval <duration>", "Poll interval (e.g. 30s, 1m)", "30s")
     .action(async (opts: { interval?: string }) => {
       try {
+        failIfSelfHostedLocalAutomation("emails schedule run");
         const interval = parseDuration(opts.interval || "30s");
         console.log(chalk.blue(`Scheduler running. Polling every ${opts.interval || "30s"}. Press Ctrl+C to stop.`));
         while (true) {
@@ -335,6 +358,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .option("--interval <duration>", "Poll interval (e.g. 30s, 1m, 5m)", "30s")
     .action(async (opts: { interval?: string }) => {
       try {
+        failIfSelfHostedLocalAutomation("emails scheduler");
         const interval = parseDuration(opts.interval || "30s");
         console.log(chalk.blue(`Scheduler started. Polling every ${opts.interval || "30s"}...`));
         while (true) {
@@ -357,6 +381,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .option("--force", "Send even to suppressed contacts")
     .action(async (opts: { csv: string; template: string; from: string; provider?: string; force?: boolean }) => {
       try {
+        failIfSelfHostedLocalAutomation("emails batch");
         const db = getDatabase();
 
         let providerId: string;
@@ -427,6 +452,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .option("--live", "Validate provider credentials with live provider API calls")
     .action(async (opts: { live?: boolean }) => {
       try {
+        failIfSelfHostedLocalDiagnostics("emails doctor");
         const { runDiagnostics, formatDiagnostics } = await import("../../lib/doctor.js");
         const checks = await runDiagnostics(undefined, { liveProviderChecks: opts.live === true });
         output(checks, formatDiagnostics(checks));
@@ -440,6 +466,7 @@ export function registerMiscCommands(program: Command, output: (data: unknown, f
     .description("Diagnose why inbound mail may not be reaching a local address")
     .action(async (address: string) => {
       try {
+        failIfSelfHostedLocalDiagnostics("emails doctor delivery");
         const { diagnoseInboundDeliveryLive, formatDeliveryDoctorReport } = await import("../../lib/delivery-doctor.js");
         const report = await diagnoseInboundDeliveryLive(address);
         output(report, formatDeliveryDoctorReport(report));

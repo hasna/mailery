@@ -12,6 +12,26 @@ import { createWarmingSchedule } from "../../db/warming.js";
 import { registerS3Source } from "../../lib/s3-sync.js";
 import { registerDomainCommands } from "./domain.js";
 
+const MODE_ENV_KEYS = [
+  "EMAILS_MODE",
+  "HASNA_EMAILS_MODE",
+  "EMAILS_SELF_HOSTED_URL",
+  "EMAILS_SELF_HOSTED_API_KEY",
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+  "HASNA_MAILERY_ENV_FILE",
+] as const;
+
 const mockR53CheckAvailability = mock(async (domain: string) => ({
   domain,
   available: true,
@@ -40,6 +60,8 @@ mock.module("@hasna/domains", () => ({
   r53UpsertRecords: mockR53UpsertRecords,
 }));
 
+let savedModeEnv: Partial<Record<(typeof MODE_ENV_KEYS)[number], string | undefined>> = {};
+
 async function runDomainCommand(args: string[]) {
   const program = new Command();
   program.exitOverride();
@@ -54,6 +76,11 @@ async function runDomainCommand(args: string[]) {
 }
 
 beforeEach(() => {
+  savedModeEnv = {};
+  for (const key of MODE_ENV_KEYS) {
+    savedModeEnv[key] = process.env[key];
+    delete process.env[key];
+  }
   process.env["EMAILS_DB_PATH"] = ":memory:";
   process.env["EMAILS_MODE"] = "local";
   resetDatabase();
@@ -86,7 +113,12 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
-  delete process.env["EMAILS_MODE"];
+  for (const key of MODE_ENV_KEYS) {
+    const value = savedModeEnv[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  savedModeEnv = {};
 });
 
 describe("domain add command", () => {

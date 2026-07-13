@@ -15,8 +15,18 @@ import {
 import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage, resolveId } from "../utils.js";
 import { normalizeRoute53RegistrationContact } from "../../lib/route53-contact.js";
 import type { MxAssessment } from "../../lib/mx-ownership.js";
+import { isSelfHostedMode } from "../../db/self-hosted-store.js";
 
 type ReceiveStrategy = "ses-s3" | "cf-routing" | "resend-webhook";
+
+function selfHostedLocalOnly(command: string): void {
+  if (!isSelfHostedMode()) return;
+  handleError(new Error(
+    `\`${command}\` is local-mode-only and unavailable in self_hosted API-only mode. ` +
+      "Use the self-hosted server/operator API/workers for provisioning and lifecycle reconciliation, " +
+      "or set EMAILS_MODE=local intentionally to use local SQLite/config provisioning state.",
+  ));
+}
 
 export interface ProvisionCommandDeps {
   inspectMx?: (domain: string) => Promise<MxAssessment>;
@@ -33,6 +43,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .option("--offset <n>", "Number of domains to skip", "0")
     .option("--verbose", "Show all address provisioning rows per domain")
     .action((domainName: string | undefined, opts: { limit?: string; offset?: string; verbose?: boolean }) => {
+      selfHostedLocalOnly("emails provision status");
       const db = getDatabase();
       const page = parseCliListPage(opts);
       const verbose = opts.verbose || isCliVerboseOutput();
@@ -85,6 +96,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .option("--bucket <name>", "Inbound S3 bucket for receive validation (defaults to config inbound_s3_bucket)")
     .action(async (email: string, opts: { provider: string; domain?: string; receive: string; forwardTo?: string; owner?: string; administrator?: string; dryRun?: boolean; wait?: boolean; timeout: string; interval: string; bucket?: string }) => {
       try {
+        selfHostedLocalOnly("emails provision address");
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
         const provider = getProvider(providerId);
@@ -188,6 +200,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .option("--timeout <sec>", "Max seconds to wait for verification", "600")
     .action(async (domain: string, opts: { provider: string; send: string; addMx?: boolean; forceMxSwitch?: boolean; mailFrom?: string; dryRun?: boolean; wait?: boolean; timeout: string }) => {
       try {
+        selfHostedLocalOnly("emails provision domain");
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
         const provider = getProvider(providerId);
@@ -296,6 +309,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .option("--purchase-profile <profile>", "AWS profile for the purchase (defaults to the current AWS_PROFILE or ambient credentials)")
     .action(async (domain: string, opts: { provider: string; addresses: string; bucket?: string; addMx?: boolean; forceMxSwitch?: boolean; count: string; timeout: string; test?: boolean; buyIfNeeded?: boolean; purchaseProfile?: string }) => {
       try {
+        selfHostedLocalOnly("emails provision up");
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
         const provider = getProvider(providerId);
@@ -462,6 +476,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .option("--throttle <ms>", "Delay between sends (SES sandbox = 1100)", "1100")
     .action(async (opts: { domain: string; provider: string; addresses: string; count: string; bucket?: string; profile?: string; pollAttempts: string; pollInterval: string; throttle: string }) => {
       try {
+        selfHostedLocalOnly("emails provision roundtrip");
         const { getInboundConfig: _gic } = await import("../../lib/config.js");
         const _profile = opts.profile ?? _gic().profile;
         if (_profile) process.env["AWS_PROFILE"] = _profile;
@@ -539,6 +554,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .option("--max-ticks <n>", "Stop after N ticks (default: unlimited)")
     .action(async (opts: { provider: string; bucket?: string; addMx?: boolean; forceMxSwitch?: boolean; once?: boolean; interval: string; maxTicks?: string }) => {
       try {
+        selfHostedLocalOnly("emails provision daemon");
         const db = getDatabase();
         const providerId = resolveId("providers", opts.provider);
         const provider = getProvider(providerId);
@@ -578,6 +594,7 @@ export function registerProvisionCommands(program: Command, output: (data: unkno
     .description("Re-queue a domain for the provisioning daemon (clear error, check now)")
     .option("--provider <id>", "Provider ID")
     .action((domain: string, opts: { provider?: string }) => {
+      selfHostedLocalOnly("emails provision retry");
       const db = getDatabase();
       const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
       const rec = providerId ? getDomainByName(providerId, domain, db) : findDomainsByName(domain, db)[0];

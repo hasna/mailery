@@ -5,6 +5,15 @@ import { getDatabase, resolvePartialId } from "../../db/database.js";
 import { confirmDestructiveAction, handleError, parseCliPage, resolveId } from "../utils.js";
 import { readableMessageText, renderReadableEmailDocument } from "../tui/format.js";
 import { openLocalTarget } from "../../lib/local-actions.js";
+import { getEmailsMode } from "../../lib/mode.js";
+
+function failIfSelfHostedLocalSandbox(command: string): void {
+  if (getEmailsMode() !== "self_hosted") return;
+  throw new Error(
+    `\`${command}\` is local-mode-only and unavailable in self_hosted API-only mode. ` +
+      "Use API-backed `emails inbox ...` commands where applicable, or set EMAILS_MODE=local intentionally to read a local sandbox store.",
+  );
+}
 
 export function registerSandboxCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const sandboxCmd = program.command("sandbox").description("Inspect emails captured by sandbox providers");
@@ -17,6 +26,7 @@ export function registerSandboxCommands(program: Command, output: (data: unknown
     .option("--offset <n>", "Skip first N emails", "0")
     .action((opts: { provider?: string; limit?: string; offset?: string }) => {
       try {
+        failIfSelfHostedLocalSandbox("emails sandbox list");
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const page = parseCliPage(opts, 20);
         const emails = listSandboxEmailSummaries(providerId, page.limit, page.offset);
@@ -46,6 +56,7 @@ export function registerSandboxCommands(program: Command, output: (data: unknown
     .description("Show full sandbox email details")
     .action((id: string) => {
       try {
+        failIfSelfHostedLocalSandbox("emails sandbox show");
         const db = getDatabase();
         const resolvedId = resolvePartialId(db, "sandbox_emails", id);
         if (!resolvedId) handleError(new Error(`Sandbox email not found: ${id}`));
@@ -78,6 +89,9 @@ export function registerSandboxCommands(program: Command, output: (data: unknown
     .description("Open HTML content of a sandbox email in the browser")
     .action(async (id: string) => {
       try {
+        if (getEmailsMode() === "self_hosted") {
+          throw new Error("`emails sandbox open` is unavailable in self_hosted mode because it writes a rendered HTML file locally. Use API-backed self_hosted inbox commands or run with EMAILS_MODE=local against an explicit local store.");
+        }
         const db = getDatabase();
         const resolvedId = resolvePartialId(db, "sandbox_emails", id);
         if (!resolvedId) handleError(new Error(`Sandbox email not found: ${id}`));
@@ -115,6 +129,7 @@ export function registerSandboxCommands(program: Command, output: (data: unknown
     .option("--yes", "Skip confirmation prompt")
     .action(async (opts: { provider?: string; yes?: boolean }) => {
       try {
+        failIfSelfHostedLocalSandbox("emails sandbox clear");
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const target = providerId ? `for provider ${providerId}` : "for all providers";
         await confirmDestructiveAction(`Clear sandbox emails ${target}?`, opts.yes);
@@ -132,6 +147,7 @@ export function registerSandboxCommands(program: Command, output: (data: unknown
     .option("--provider <id>", "Filter by provider ID")
     .action((opts: { provider?: string }) => {
       try {
+        failIfSelfHostedLocalSandbox("emails sandbox count");
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const db = getDatabase();
         const count = getSandboxCount(providerId, db);

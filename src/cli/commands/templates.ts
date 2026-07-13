@@ -7,6 +7,15 @@ import { createTemplate, listTemplateSummaries, getTemplate, deleteTemplate, ren
 import { truncate } from "../../lib/format.js";
 import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage } from "../utils.js";
 import { openLocalTarget } from "../../lib/local-actions.js";
+import { getEmailsMode } from "../../lib/mode.js";
+
+function failIfSelfHostedLocalTemplate(command: string): void {
+  if (getEmailsMode() !== "self_hosted") return;
+  throw new Error(
+    `\`${command}\` is local template storage only and is disabled in self_hosted API-only mode. ` +
+      "Use an API-backed template endpoint when available, or set EMAILS_MODE=local intentionally to manage local SQLite templates.",
+  );
+}
 
 export function registerTemplateCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const templateCmd = program.command("template").description("Manage email templates");
@@ -21,6 +30,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
     .option("--text-file <path>", "Read text template from file")
     .action((name: string, opts: { subject: string; html?: string; text?: string; htmlFile?: string; textFile?: string }) => {
       try {
+        failIfSelfHostedLocalTemplate("emails template add");
         let htmlTemplate = opts.html;
         let textTemplate = opts.text;
 
@@ -51,6 +61,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
     .option("--verbose", "Show expanded list hints")
     .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
+        failIfSelfHostedLocalTemplate("emails template list");
         const page = parseCliListPage(opts);
         const templates = listTemplateSummaries(undefined, page);
         if (templates.length === 0) {
@@ -83,6 +94,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
     .description("Show template details")
     .action((name: string) => {
       try {
+        failIfSelfHostedLocalTemplate("emails template show");
         const template = getTemplate(name);
         if (!template) handleError(new Error(`Template not found: ${name}`));
         console.log(chalk.bold(`\nTemplate: ${template!.name}`));
@@ -106,6 +118,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
     .description("Remove a template")
     .action((name: string) => {
       try {
+        failIfSelfHostedLocalTemplate("emails template remove");
         const deleted = deleteTemplate(name);
         if (!deleted) handleError(new Error(`Template not found: ${name}`));
         console.log(chalk.green(`✓ Template removed: ${name}`));
@@ -120,6 +133,7 @@ export function registerTemplateCommands(program: Command, output: (data: unknow
     .option("--open", "Open rendered HTML in browser")
     .action((templateName: string, opts: { vars?: string; open?: boolean }) => {
       try {
+        failIfSelfHostedLocalTemplate("emails preview");
         const template = getTemplate(templateName);
         if (!template) handleError(new Error(`Template not found: ${templateName}`));
         const vars: Record<string, string> = opts.vars ? JSON.parse(opts.vars) : {};

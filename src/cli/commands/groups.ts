@@ -2,7 +2,32 @@ import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { createGroup, getGroupByName, listGroups, deleteGroup, addMember, removeMember, listMemberSummaries, getMemberCount, getMemberCounts } from "../../db/groups.js";
 import { truncate } from "../../lib/format.js";
+import { isSelfHostedMode } from "../../db/self-hosted-store.js";
+import { resolveEmailsMode } from "../../lib/mode.js";
 import { confirmDestructiveAction, formatListHint, handleError, isCliVerboseOutput, parseCliListPage, parseCliPage } from "../utils.js";
+
+function isSelfHostedRuntimeMode(): boolean {
+  return resolveEmailsMode().mode === "self_hosted";
+}
+
+function assertSelfHostedApiRouteReady(command: string): boolean {
+  if (!isSelfHostedRuntimeMode()) return false;
+  if (!isSelfHostedMode()) {
+    throw new Error(
+      `\`${command}\` is API-backed in self_hosted mode and requires EMAILS_MODE=self_hosted with ` +
+        "EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY. Set EMAILS_MODE=local intentionally to use local SQLite group state.",
+    );
+  }
+  return true;
+}
+
+function assertGroupMemberStateAllowed(command: string, reason: string): void {
+  if (!isSelfHostedRuntimeMode()) return;
+  throw new Error(
+    `\`${command}\` is disabled in self_hosted API-only mode because it ${reason}. ` +
+      "Use the self-hosted Emails API for server-owned group member state, or set EMAILS_MODE=local intentionally to use local SQLite group members.",
+  );
+}
 
 export function registerGroupCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const groupCmd = program.command("group").description("Manage recipient groups");
@@ -13,6 +38,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .option("--description <text>", "Group description")
     .action((name: string, opts: { description?: string }) => {
       try {
+        assertSelfHostedApiRouteReady("emails group create");
         const group = createGroup(name, opts.description);
         console.log(chalk.green(`✓ Group created: ${group.name} (${group.id.slice(0, 8)})`));
       } catch (e) {
@@ -28,23 +54,26 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .option("--verbose", "Show group descriptions inline")
     .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
+        const selfHosted = assertSelfHostedApiRouteReady("emails group list");
         const page = parseCliListPage(opts);
         const groups = listGroups(undefined, page);
         if (groups.length === 0) {
           output([], chalk.dim("No groups configured. Use 'emails group create' to add one."));
           return;
         }
-        const counts = getMemberCounts(groups.map((group) => group.id));
-        const result = groups.map((group) => ({
-          ...group,
-          member_count: counts.get(group.id) ?? 0,
-        }));
+        const counts = selfHosted ? null : getMemberCounts(groups.map((group) => group.id));
+        const result = selfHosted
+          ? groups
+          : groups.map((group) => ({
+              ...group,
+              member_count: counts!.get(group.id) ?? 0,
+            }));
         const lines: string[] = [chalk.bold("\nGroups:")];
         const verbose = opts.verbose || isCliVerboseOutput();
         for (const g of groups) {
-          const count = counts.get(g.id) ?? 0;
+          const count = selfHosted ? chalk.dim("members: API-only") : `${counts!.get(g.id) ?? 0} members`;
           const desc = verbose && g.description ? chalk.dim(` — ${truncate(g.description, 80)}`) : "";
-          lines.push(`  ${chalk.cyan(g.id.slice(0, 8))}  ${g.name}  (${count} members)${desc}`);
+          lines.push(`  ${chalk.cyan(g.id.slice(0, 8))}  ${g.name}  (${count})${desc}`);
         }
         lines.push("");
         lines.push(formatListHint({
@@ -68,6 +97,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .option("--offset <n>", "Number of members to skip", "0")
     .action((name: string, opts: { limit?: string; offset?: string }) => {
       try {
+        assertGroupMemberStateAllowed("emails group show", "reads local group member counts and member rows");
         const group = getGroupByName(name);
         if (!group) handleError(new Error(`Group not found: ${name}`));
         const page = parseCliPage(opts);
@@ -99,6 +129,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .option("--verbose", "Show expanded list hints")
     .action((name: string, opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
+        assertGroupMemberStateAllowed("emails group members", "reads local group member rows");
         const group = getGroupByName(name);
         if (!group) handleError(new Error(`Group not found: ${name}`));
         const page = parseCliListPage(opts);
@@ -133,6 +164,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .option("--name <displayName>", "Display name for the member(s)")
     .action((name: string, emails: string[], opts: { name?: string }) => {
       try {
+        assertGroupMemberStateAllowed("emails group add", "writes local group member rows");
         const group = getGroupByName(name);
         if (!group) handleError(new Error(`Group not found: ${name}`));
         for (const email of emails) {
@@ -149,6 +181,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .description("Remove a member from a group")
     .action((name: string, email: string) => {
       try {
+        assertGroupMemberStateAllowed("emails group remove-member", "writes local group member rows");
         const group = getGroupByName(name);
         if (!group) handleError(new Error(`Group not found: ${name}`));
         const removed = removeMember(group!.id, email);
@@ -165,6 +198,7 @@ export function registerGroupCommands(program: Command, output: (data: unknown, 
     .option("--yes", "Skip confirmation prompt")
     .action(async (name: string, opts: { yes?: boolean }) => {
       try {
+        assertSelfHostedApiRouteReady("emails group delete");
         const group = getGroupByName(name);
         if (!group) handleError(new Error(`Group not found: ${name}`));
         await confirmDestructiveAction(`Delete group ${name}?`, opts.yes);

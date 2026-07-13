@@ -5,6 +5,16 @@
 import type { Command } from "commander";
 import chalk from "../../lib/chalk-lite.js";
 import { handleError } from "../utils.js";
+import { isSelfHostedMode } from "../../db/self-hosted-store.js";
+
+function selfHostedLocalOnly(command: string): void {
+  if (!isSelfHostedMode()) return;
+  handleError(new Error(
+    `\`${command}\` is local-mode-only and unavailable in self_hosted API-only mode. ` +
+      "Use the self-hosted server/operator API/workers for inbound AWS setup, " +
+      "or set EMAILS_MODE=local intentionally to write local SQLite/config state.",
+  ));
+}
 
 export function registerAwsCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const awsCmd = program.command("aws").description("AWS infrastructure setup for email (S3, SES receipt rules)");
@@ -26,6 +36,7 @@ export function registerAwsCommands(program: Command, output: (data: unknown, fo
 	      prefix?: string; catchAll?: boolean; profile?: string; provider?: string;
 	    }) => {
       try {
+        selfHostedLocalOnly("emails aws setup-inbound");
         const { getInboundConfig } = await import("../../lib/config.js");
         const inbound = getInboundConfig();
 	        const profile = opts.profile ?? inbound.profile;

@@ -14,10 +14,13 @@ import { getPreferredActiveAddressEmail } from "../../db/addresses.js";
 import { getDatabase, resolvePartialId, resolvePartialIdOrThrow } from "../../db/database.js";
 import { getDefaultProviderId } from "../../lib/config.js";
 import { colorStatus } from "../../lib/format.js";
+import { resolveMailDataSource, type MailDataSource } from "../../lib/mail-data-source.js";
+import { resolveEmailsMode } from "../../lib/mode.js";
 import { createSentEmailLedger } from "../../lib/sent-ledger.js";
 import { handleError, parseCliPositiveIntOption, parseCliNonNegativeIntOption, resolveId } from "../utils.js";
 import { listReplies, listReplySummaries, getReplyCount } from "../../db/inbound.js";
 import type { InboundEmail, InboundEmailSummary } from "../../db/inbound.js";
+import type { MessageBody, TuiMessage } from "../tui/data.js";
 import { readableMessageText } from "../tui/format.js";
 
 const MAX_EMAIL_EXPORT_LIMIT = 10000;
@@ -29,11 +32,194 @@ interface ReplyPageOpts {
   offset?: string;
 }
 
+interface SentLogPageOpts {
+  provider?: string;
+  status?: string;
+  from?: string;
+  since?: string;
+  limit?: string;
+  offset?: string;
+}
+
+interface SelfHostedEmailSummary {
+  id: string;
+  kind: "inbound" | "sent";
+  from_address: string;
+  to_addresses: string[];
+  subject: string;
+  date: string;
+  is_read: boolean;
+  is_starred: boolean;
+  labels: string[];
+  attachments: number;
+}
+
+interface SelfHostedEmailDetail extends SelfHostedEmailSummary {
+  cc_addresses: string[];
+  text_body: string | null;
+  html_body: string | null;
+  flags: string[];
+}
+
 function parseReplyPage(opts: ReplyPageOpts): { limit: number; offset: number } {
   return {
     limit: parseCliPositiveIntOption(opts.limit, DEFAULT_REPLY_LIMIT, MAX_REPLY_LIMIT),
     offset: parseCliNonNegativeIntOption(opts.offset),
   };
+}
+
+function resolveSelfHostedDataSource(): MailDataSource | null {
+  const resolution = resolveEmailsMode();
+  if (resolution.mode !== "self_hosted") return null;
+  return resolveMailDataSource({ mode: resolution.mode });
+}
+
+function selfHostedLocalOnly(command: string, alternative: string): void {
+  const ds = resolveSelfHostedDataSource();
+  if (!ds) return;
+  handleError(new Error(
+    `\`${command}\` is local sent-log-only and is disabled in self_hosted API-only mode. ` +
+      alternative,
+  ));
+}
+
+function assertSupportedSelfHostedSentFilters(command: string, opts: SentLogPageOpts): void {
+  const unsupported = [
+    opts.provider ? "--provider" : null,
+    opts.status ? "--status" : null,
+    opts.from ? "--from" : null,
+  ].filter(Boolean);
+  if (unsupported.length === 0) return;
+  handleError(new Error(
+    `\`${command}\` in self_hosted mode is API-backed and does not support local sent-log filter(s): ${unsupported.join(", ")}. ` +
+      "Use `emails inbox search` for mailbox search, or retry without those filters.",
+  ));
+}
+
+function splitRecipients(value: string): string[] {
+  return value.split(",").map((entry) => entry.trim()).filter(Boolean);
+}
+
+function toSelfHostedSummary(msg: TuiMessage): SelfHostedEmailSummary {
+  return {
+    id: msg.id,
+    kind: msg.kind,
+    from_address: msg.from,
+    to_addresses: splitRecipients(msg.to),
+    subject: msg.subject,
+    date: msg.date,
+    is_read: msg.is_read,
+    is_starred: msg.is_starred,
+    labels: msg.labels,
+    attachments: msg.attachments,
+  };
+}
+
+function toSelfHostedDetail(msg: TuiMessage, body: MessageBody | null): SelfHostedEmailDetail {
+  const labels = msg.is_read
+    ? msg.labels.filter((label) => label.trim().toLowerCase() !== "unread")
+    : msg.labels;
+  const flags = [
+    msg.is_read ? "read" : "unread",
+    msg.is_starred ? "starred" : null,
+    ...labels,
+    ...(body?.flags ?? []),
+  ].filter((flag, index, list): flag is string => Boolean(flag) && list.indexOf(flag) === index);
+  return {
+    ...toSelfHostedSummary({ ...msg, labels }),
+    from_address: body?.from ?? msg.from,
+    to_addresses: splitRecipients(body?.to ?? msg.to),
+    cc_addresses: splitRecipients(body?.cc ?? ""),
+    subject: body?.subject ?? msg.subject,
+    date: body?.date ?? msg.date,
+    text_body: body?.text ?? null,
+    html_body: body?.html ?? null,
+    flags,
+  };
+}
+
+function formatSelfHostedSummaries(rows: SelfHostedEmailSummary[], title: string): string {
+  if (rows.length === 0) return chalk.dim(`${title}: no messages found.`);
+  const lines: string[] = [];
+  lines.push(chalk.bold(`\n${title} (${rows.length})`));
+  lines.push(chalk.bold(`${"Date".padEnd(20)}  ${"From".padEnd(30)}  ${"To".padEnd(30)}  Subject`));
+  lines.push(chalk.dim("─".repeat(116)));
+  for (const row of rows) {
+    const date = row.date ? new Date(row.date).toLocaleString().slice(0, 20) : "";
+    const from = row.from_address.length > 30 ? row.from_address.slice(0, 27) + "..." : row.from_address;
+    const toRaw = row.to_addresses[0] ?? "";
+    const to = toRaw.length > 30 ? toRaw.slice(0, 27) + "..." : toRaw;
+    const subject = row.subject.length > 44 ? row.subject.slice(0, 41) + "..." : row.subject;
+    lines.push(`${date.padEnd(20)}  ${from.padEnd(30)}  ${to.padEnd(30)}  ${subject}`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function formatSelfHostedDetail(email: SelfHostedEmailDetail): string {
+  const lines: string[] = [
+    chalk.bold(`\nEmail: ${email.id}`),
+    `  ${chalk.dim("Subject:")}  ${email.subject}`,
+    `  ${chalk.dim("From:")}     ${email.from_address}`,
+    `  ${chalk.dim("To:")}       ${email.to_addresses.join(", ")}`,
+  ];
+  if (email.cc_addresses.length > 0) lines.push(`  ${chalk.dim("CC:")}       ${email.cc_addresses.join(", ")}`);
+  lines.push(`  ${chalk.dim("Kind:")}     ${email.kind}`);
+  lines.push(`  ${chalk.dim("Date:")}     ${email.date}`);
+  if (email.flags.length > 0) lines.push(`  ${chalk.dim("Flags:")}    ${email.flags.join(", ")}`);
+  if (email.attachments > 0) lines.push(`  ${chalk.dim("Attach:")}   ${email.attachments}`);
+  const body = readableMessageText(email.text_body, email.html_body);
+  if (body) {
+    lines.push(chalk.bold("\n  Body:"));
+    lines.push(body.split("\n").map((line: string) => `    ${line}`).join("\n"));
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+async function selfHostedSentList(
+  ds: MailDataSource,
+  opts: SentLogPageOpts,
+  output: (data: unknown, formatted: string) => void,
+  command: string,
+): Promise<void> {
+  assertSupportedSelfHostedSentFilters(command, opts);
+  const rows = await ds.listMailbox("sent", {
+    limit: parseCliPositiveIntOption(opts.limit, 20),
+    offset: parseCliNonNegativeIntOption(opts.offset),
+    since: opts.since,
+  });
+  const summaries = rows.map(toSelfHostedSummary);
+  output(summaries, formatSelfHostedSummaries(summaries, "Self-hosted sent mail"));
+}
+
+async function selfHostedSentSearch(
+  ds: MailDataSource,
+  query: string,
+  opts: { since?: string; limit?: string; offset?: string },
+  output: (data: unknown, formatted: string) => void,
+): Promise<void> {
+  const rows = await ds.listMailbox("sent", {
+    search: query,
+    since: opts.since,
+    limit: parseCliPositiveIntOption(opts.limit, 20),
+    offset: parseCliNonNegativeIntOption(opts.offset),
+  });
+  const summaries = rows.map(toSelfHostedSummary);
+  output(summaries, formatSelfHostedSummaries(summaries, `Self-hosted sent search "${query}"`));
+}
+
+async function selfHostedShow(
+  ds: MailDataSource,
+  id: string,
+  output: (data: unknown, formatted: string) => void,
+): Promise<void> {
+  const resolvedId = await ds.resolveId(id);
+  const msg = await ds.getMessage(resolvedId);
+  if (!msg) handleError(new Error(`Email not found: ${id}`));
+  const body = await ds.getMessageBody(msg);
+  const detail = toSelfHostedDetail(msg, body);
+  output(detail, formatSelfHostedDetail(detail));
 }
 
 function replyPagePayload<T extends InboundEmail | InboundEmailSummary>(
@@ -84,8 +270,10 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--since <date>", "Show emails since date (ISO 8601)")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N emails", "0")
-    .action((opts: { provider?: string; status?: string; from?: string; since?: string; limit?: string; offset?: string }) => {
+    .action(async (opts: SentLogPageOpts) => {
       try {
+        const ds = resolveSelfHostedDataSource();
+        if (ds) return await selfHostedSentList(ds, opts, output, "emails email list");
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const limit = parseCliPositiveIntOption(opts.limit, 20);
         const offset = parseCliNonNegativeIntOption(opts.offset);
@@ -113,8 +301,10 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--since <date>", "Show emails since date")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N results", "0")
-    .action((query: string, opts: { since?: string; limit?: string; offset?: string }) => {
+    .action(async (query: string, opts: { since?: string; limit?: string; offset?: string }) => {
       try {
+        const ds = resolveSelfHostedDataSource();
+        if (ds) return await selfHostedSentSearch(ds, query, opts, output);
         const emails = searchEmails(query, {
           since: opts.since,
           limit: parseCliPositiveIntOption(opts.limit, 20),
@@ -134,9 +324,11 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
   emailCmd
     .command("show <id>")
     .description("Show full details and body of a sent email")
-    .action((id: string) => {
+    .action(async (id: string) => {
       // Re-use existing show logic
       try {
+        const ds = resolveSelfHostedDataSource();
+        if (ds) return await selfHostedShow(ds, id, output);
         const db = getDatabase();
         const resolvedId = resolveEmailId(id, db);
         if (!resolvedId) handleError(new Error(`Email not found: ${id}`));
@@ -165,6 +357,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--offset <n>", "Skip first N replies", "0")
     .action((id: string, opts: ReplyPageOpts) => {
       try {
+        selfHostedLocalOnly("emails email replies", "Use `emails show <id>` for an API-backed message read, or run this command with EMAILS_MODE=local against an explicit local store.");
         const db = getDatabase();
         const resolvedId = resolveId("emails", id);
         const { limit, offset } = parseReplyPage(opts);
@@ -184,6 +377,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--offset <n>", "Skip first N fallback replies", "0")
     .action(async (id: string, opts: ReplyPageOpts) => {
       try {
+        selfHostedLocalOnly("emails email thread", "Use `emails show <id>` for an API-backed message read, or run this command with EMAILS_MODE=local against an explicit local store.");
         const db = getDatabase();
         const { getEmailThreading, getThreadMessages } = await import("../../db/threads.js");
         const { getInboundEmail } = await import("../../db/inbound.js");
@@ -251,8 +445,10 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--since <date>", "Show emails since date (ISO 8601)")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N emails", "0")
-    .action((opts: { provider?: string; status?: string; from?: string; since?: string; limit?: string; offset?: string }) => {
+    .action(async (opts: SentLogPageOpts) => {
       try {
+        const ds = resolveSelfHostedDataSource();
+        if (ds) return await selfHostedSentList(ds, opts, output, "emails log");
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;
         const limit = parseCliPositiveIntOption(opts.limit, 20);
         const offset = parseCliNonNegativeIntOption(opts.offset);
@@ -284,8 +480,10 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--since <date>", "Show emails since date (ISO 8601)")
     .option("--limit <n>", "Max results", "20")
     .option("--offset <n>", "Skip first N results", "0")
-    .action((query: string, opts: { since?: string; limit?: string; offset?: string }) => {
+    .action(async (query: string, opts: { since?: string; limit?: string; offset?: string }) => {
       try {
+        const ds = resolveSelfHostedDataSource();
+        if (ds) return await selfHostedSentSearch(ds, query, opts, output);
         const limit = parseCliPositiveIntOption(opts.limit, 20);
         const emails = searchEmails(query, { since: opts.since, limit, offset: parseCliNonNegativeIntOption(opts.offset) });
         if (emails.length === 0) {
@@ -316,8 +514,10 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
 
   // ─── SHOW EMAIL ──────────────────────────────────────────────────────────────
   program.command("show <id>").description("Show full email details including body content")
-    .action((id: string) => {
+    .action(async (id: string) => {
       try {
+        const ds = resolveSelfHostedDataSource();
+        if (ds) return await selfHostedShow(ds, id, output);
         const db = getDatabase();
         const resolvedId = resolveEmailId(id, db);
         if (!resolvedId) handleError(new Error(`Email not found: ${id}`));
@@ -364,6 +564,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--offset <n>", "Skip first N replies", "0")
     .action((id: string, opts: ReplyPageOpts) => {
       try {
+        selfHostedLocalOnly("emails replies", "Use `emails show <id>` for an API-backed message read, or run this command with EMAILS_MODE=local against an explicit local store.");
         const db = getDatabase();
         const resolvedId = resolveId("emails", id);
         const { limit, offset } = parseReplyPage(opts);
@@ -382,6 +583,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--offset <n>", "Skip first N replies", "0")
     .action((id: string, opts: ReplyPageOpts) => {
       try {
+        selfHostedLocalOnly("emails conversation", "Use `emails show <id>` for an API-backed message read, or run this command with EMAILS_MODE=local against an explicit local store.");
         const db = getDatabase();
         const resolvedId = resolveId("emails", id);
         const emailRecord = getEmail(resolvedId, db);
@@ -426,6 +628,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--to <email>", "Recipient email address")
     .action(async (providerId?: string, opts?: { to?: string }) => {
       try {
+        selfHostedLocalOnly("emails test", "Use `emails send --from ... --to ... --subject ... --body ...` so self_hosted mode sends through the API.");
         const db = getDatabase();
         let resolvedProviderId: string;
         if (providerId) { resolvedProviderId = resolveId("providers", providerId); }
@@ -478,6 +681,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--output <file>", "Write to file instead of stdout")
     .action((type: string, opts: { provider?: string; from?: string; since?: string; until?: string; limit?: string; offset?: string; format?: string; output?: string }) => {
       try {
+        selfHostedLocalOnly("emails export", "Use self-hosted server-side export/reporting, or run this command with EMAILS_MODE=local against an explicit local store.");
         if (type !== "emails" && type !== "events") {
           handleError(new Error("Export type must be 'emails' or 'events'"));
         }
@@ -520,6 +724,7 @@ export function registerEmailLogCommands(program: Command, output: (data: unknow
     .option("--provider <id>", "Provider ID to associate events with")
     .action(async (opts: { port?: string; provider?: string }) => {
       try {
+        selfHostedLocalOnly("emails webhook listen", "Run inbound/event ingestion on the self-hosted server instead of this local CLI listener.");
         const { createWebhookServer } = await import("../../lib/webhook.js");
         const port = parseInt(opts.port ?? "9877", 10);
         const providerId = opts.provider ? resolveId("providers", opts.provider) : undefined;

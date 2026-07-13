@@ -3,6 +3,15 @@ import chalk from "../../lib/chalk-lite.js";
 import { createSendKey, listSendKeySummaries, revokeSendKey, getSendKey, canOwnerSendFrom } from "../../db/send-keys.js";
 import { getOwner, getOwnerByName, listAddressesByOwner, listOwnerNamesByIds } from "../../db/owners.js";
 import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage } from "../utils.js";
+import { getEmailsMode } from "../../lib/mode.js";
+
+function failIfSelfHostedLocalSendKey(command: string): void {
+  if (getEmailsMode() !== "self_hosted") return;
+  throw new Error(
+    `\`${command}\` is local send-key storage only and is disabled in self_hosted API-only mode. ` +
+      "Use a self-hosted operator API for send-key management when available, or set EMAILS_MODE=local intentionally to inspect local owner/send-key rows.",
+  );
+}
 
 export function registerSendKeyCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
   const cmd = program.command("sendkey").description("Scoped send keys — restrict an agent to sending from its own addresses");
@@ -13,6 +22,7 @@ export function registerSendKeyCommands(program: Command, output: (data: unknown
     .option("--label <label>", "A label to identify this key")
     .action((owner: string, opts: { label?: string }) => {
       try {
+        failIfSelfHostedLocalSendKey("emails sendkey create");
         const o = getOwnerByName(owner) ?? getOwner(owner);
         if (!o) return handleError(new Error(`Owner not found: ${owner}`));
         const { token, key } = createSendKey(o.id, opts.label);
@@ -37,6 +47,7 @@ export function registerSendKeyCommands(program: Command, output: (data: unknown
     .option("--verbose", "Show expanded list hints")
     .action((opts: { owner?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
+        failIfSelfHostedLocalSendKey("emails sendkey list");
         let ownerId: string | undefined;
         if (opts.owner) {
           const o = getOwnerByName(opts.owner) ?? getOwner(opts.owner);
@@ -70,6 +81,7 @@ export function registerSendKeyCommands(program: Command, output: (data: unknown
     .description("Revoke a send key by ID")
     .action((id: string) => {
       try {
+        failIfSelfHostedLocalSendKey("emails sendkey revoke");
         const k = getSendKey(id);
         if (!k) return handleError(new Error(`Send key not found: ${id}`));
         revokeSendKey(id);
@@ -82,6 +94,7 @@ export function registerSendKeyCommands(program: Command, output: (data: unknown
     .description("Check whether an owner is allowed to send from an address")
     .action((owner: string, from: string) => {
       try {
+        failIfSelfHostedLocalSendKey("emails sendkey check");
         const o = getOwnerByName(owner) ?? getOwner(owner);
         if (!o) return handleError(new Error(`Owner not found: ${owner}`));
         const ok = canOwnerSendFrom(o.id, from);

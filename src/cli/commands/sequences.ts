@@ -7,12 +7,37 @@ import {
   type EnrollmentStatus,
 } from "../../db/sequences.js";
 import { truncate } from "../../lib/format.js";
+import { isSelfHostedMode } from "../../db/self-hosted-store.js";
+import { resolveEmailsMode } from "../../lib/mode.js";
 import { formatListHint, handleError, isCliVerboseOutput, parseCliListPage } from "../utils.js";
 
 function parseEnrollmentStatus(value?: string): EnrollmentStatus | undefined {
   if (!value) return undefined;
   if (value === "active" || value === "completed" || value === "cancelled") return value;
   throw new Error("status must be active, completed, or cancelled");
+}
+
+function isSelfHostedRuntimeMode(): boolean {
+  return resolveEmailsMode().mode === "self_hosted";
+}
+
+function assertSelfHostedApiRouteReady(command: string): boolean {
+  if (!isSelfHostedRuntimeMode()) return false;
+  if (!isSelfHostedMode()) {
+    throw new Error(
+      `\`${command}\` is API-backed in self_hosted mode and requires EMAILS_MODE=self_hosted with ` +
+        "EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY. Set EMAILS_MODE=local intentionally to use local SQLite sequence state.",
+    );
+  }
+  return true;
+}
+
+function assertSequenceSubledgerAllowed(command: string, reason: string): void {
+  if (!isSelfHostedRuntimeMode()) return;
+  throw new Error(
+    `\`${command}\` is disabled in self_hosted API-only mode because it ${reason}. ` +
+      "Use the self-hosted Emails API for server-owned sequence step/enrollment state, or set EMAILS_MODE=local intentionally to use local SQLite sequence ledgers.",
+  );
 }
 
 export function registerSequenceCommands(program: Command, output: (data: unknown, formatted: string) => void): void {
@@ -25,6 +50,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .option("--description <text>", "Sequence description")
     .action((name: string, opts: { description?: string }) => {
       try {
+        assertSelfHostedApiRouteReady("emails sequence create");
         const seq = createSequence({ name, description: opts.description });
         console.log(chalk.green(`✓ Sequence created: ${seq.name} (${seq.id.slice(0, 8)})`));
       } catch (e) {
@@ -40,6 +66,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .option("--verbose", "Show sequence descriptions inline")
     .action((opts: { limit?: string; offset?: string; verbose?: boolean }) => {
       try {
+        assertSelfHostedApiRouteReady("emails sequence list");
         const page = parseCliListPage(opts);
         const seqs = listSequences(undefined, page);
         if (seqs.length === 0) {
@@ -73,6 +100,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .description("Show sequence details, steps, and enrollment count")
     .action((name: string) => {
       try {
+        assertSequenceSubledgerAllowed("emails sequence show", "reads local sequence steps and enrollment counts");
         const seq = getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
         const steps = listSteps(seq!.id);
@@ -103,6 +131,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .description("Pause a sequence (no new sends)")
     .action((name: string) => {
       try {
+        assertSelfHostedApiRouteReady("emails sequence pause");
         const seq = getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
         updateSequence(seq!.id, { status: "paused" });
@@ -117,6 +146,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .description("Archive a sequence")
     .action((name: string) => {
       try {
+        assertSelfHostedApiRouteReady("emails sequence archive");
         const seq = getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
         updateSequence(seq!.id, { status: "archived" });
@@ -132,6 +162,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .option("--provider <id>", "Provider ID to use for sending")
     .action((name: string, email: string, opts: { provider?: string }) => {
       try {
+        assertSequenceSubledgerAllowed("emails sequence enroll", "writes local sequence enrollment rows");
         const seq = getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
         const enrollment = enroll({ sequence_id: seq!.id, contact_email: email, provider_id: opts.provider });
@@ -149,6 +180,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .description("Unenroll a contact from a sequence")
     .action((name: string, email: string) => {
       try {
+        assertSequenceSubledgerAllowed("emails sequence unenroll", "writes local sequence enrollment rows");
         const seq = getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
         const removed = unenroll(seq!.id, email);
@@ -166,6 +198,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .option("--provider <id>", "Provider ID (uses default if not specified)")
     .action(async (name: string, opts: { csv: string; provider?: string }) => {
       try {
+        assertSequenceSubledgerAllowed("emails sequence enroll-bulk", "writes local sequence enrollment rows");
         const seq = getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
         const { parseCsv } = await import("../../lib/batch.js");
@@ -199,6 +232,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .option("--verbose", "Show expanded list hints")
     .action((name: string | undefined, opts: { status?: string; limit?: string; offset?: string; verbose?: boolean }) => {
       try {
+        assertSequenceSubledgerAllowed("emails sequence enrollments", "reads local sequence enrollment rows");
         const seq = name ? getSequence(name) : null;
         if (name && !seq) handleError(new Error(`Sequence not found: ${name}`));
         const page = parseCliListPage(opts);
@@ -245,6 +279,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .option("--subject <text>", "Subject override")
     .action((name: string, opts: { step: string; delay: string; template: string; from?: string; subject?: string }) => {
       try {
+        assertSequenceSubledgerAllowed("emails sequence step add", "writes local sequence step rows");
         const seq = getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
         const step = addStep({
@@ -266,6 +301,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .description("List steps in a sequence")
     .action((name: string) => {
       try {
+        assertSequenceSubledgerAllowed("emails sequence step list", "reads local sequence step rows");
         const seq = getSequence(name);
         if (!seq) handleError(new Error(`Sequence not found: ${name}`));
         const steps = listSteps(seq!.id);
@@ -289,6 +325,7 @@ export function registerSequenceCommands(program: Command, output: (data: unknow
     .description("Remove a step by ID")
     .action((stepId: string) => {
       try {
+        assertSequenceSubledgerAllowed("emails sequence step remove", "writes local sequence step rows");
         const removed = removeStep(stepId);
         if (!removed) handleError(new Error(`Step not found: ${stepId}`));
         console.log(chalk.green(`✓ Step removed: ${stepId}`));

@@ -52,12 +52,11 @@ export async function reconcileTick(
     now,
     pollIntervalSec: opts.pollIntervalSec,
     retryIntervalSec: opts.retryIntervalSec,
-    db: opts.db,
   };
 
   let budget = opts.maxPerTick ?? Infinity;
 
-  for (const { id } of claimDueDomains(now, opts.db)) {
+  for (const { id } of claimDueDomains(now)) {
     if (budget-- <= 0) break;
     summary.domainsProcessed++;
     try {
@@ -75,7 +74,7 @@ export async function reconcileTick(
     }
   }
 
-  for (const { id } of claimDueAddresses(now, opts.db)) {
+  for (const { id } of claimDueAddresses(now)) {
     if (budget-- <= 0) break;
     summary.addressesProcessed++;
     try {

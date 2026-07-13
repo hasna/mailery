@@ -1,6 +1,5 @@
 import type { DnsRecord, DnsStatus, Provider, SendEmailOptions, Stats } from "../types/index.js";
 import type { ProviderAdapter, RemoteAddress, RemoteDomain, RemoteEvent } from "./interface.js";
-import { getDatabase } from "../db/database.js";
 import { storeSandboxEmail, getSandboxCount } from "../db/sandbox.js";
 
 export class SandboxAdapter implements ProviderAdapter {
@@ -35,7 +34,6 @@ export class SandboxAdapter implements ProviderAdapter {
   }
 
   async sendEmail(opts: SendEmailOptions): Promise<string> {
-    const db = getDatabase();
     const email = storeSandboxEmail(
       {
         provider_id: this.provider.id,
@@ -50,7 +48,6 @@ export class SandboxAdapter implements ProviderAdapter {
         attachments: opts.attachments ?? [],
         headers: {},
       },
-      db,
     );
     const toStr = Array.isArray(opts.to) ? opts.to.join(", ") : opts.to;
     if (process.env["EMAILS_JSON_OUTPUT"] !== "1") {
@@ -64,8 +61,7 @@ export class SandboxAdapter implements ProviderAdapter {
   }
 
   async getStats(_period?: string): Promise<Stats> {
-    const db = getDatabase();
-    const count = getSandboxCount(this.provider.id, db);
+    const count = getSandboxCount(this.provider.id);
     return {
       provider_id: this.provider.id,
       period: "all",

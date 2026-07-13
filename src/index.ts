@@ -141,8 +141,9 @@ export {
   clearSandboxEmails, getSandboxCount,
 } from "./db/sandbox.js";
 
-// Database utilities
-export { getDatabase, closeDatabase, resetDatabase, runInTransaction, uuid, now, resolvePartialId } from "./db/database.js";
+// Runtime utilities (self-hosted-only; local SQLite database.ts is removed)
+export { uuid, now } from "./db/runtime.js";
+export { resolveResourceId, resolveResourceIdOrThrow, listResourceIdMatches } from "./db/self-hosted-store.js";
 
 // Lib functions
 export { getLocalStats, formatStatsTable } from "./lib/stats.js";

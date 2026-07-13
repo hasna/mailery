@@ -1,12 +1,15 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getDatabase, type Database } from "../db/database.js";
+import { listAddresses } from "../db/addresses.js";
 import { listDomains } from "../db/domains.js";
 import { listAddressProvisioningByIds, listDomainProvisioningByIds, listReadyAddressCountsByDomains } from "../db/provisioning.js";
 import { countValue } from "../db/scalars.js";
+import { isSelfHostedMode } from "../db/self-hosted-store.js";
 import { assessDomainReadiness } from "../lib/domain-readiness.js";
 import { domainInboundReadinessSignals } from "../lib/domain-inbound-evidence.js";
 import { loadConfig } from "../lib/config.js";
 import { resolveEmailsMode } from "../lib/mode.js";
+import { resolveMailDataSource } from "../lib/mail-data-source.js";
 import { listMailboxSources, listMailboxStatus } from "../cli/tui/data.js";
 
 const RECENT_ERROR_LIMIT_PER_COMPONENT = 50;
@@ -34,6 +37,22 @@ function countAddresses(db: Database): number {
   return countValue(row?.count);
 }
 
+function selfHostedSelected(): boolean {
+  try {
+    return isSelfHostedMode();
+  } catch {
+    return process.env["EMAILS_MODE"]?.trim() === "self_hosted"
+      || process.env["HASNA_EMAILS_MODE"]?.trim() === "self_hosted";
+  }
+}
+
+function selfHostedApiStatus(error?: unknown): Record<string, unknown> {
+  return {
+    available: error === undefined,
+    error: error instanceof Error ? error.message : (error === undefined ? null : String(error)),
+  };
+}
+
 export function domainsResourcePayload(db: Database = getDatabase()): Record<string, unknown> {
   const domainRows = listDomains(undefined, db, { limit: DOMAIN_RESOURCE_LIMIT + 1, offset: 0 });
   const truncated = domainRows.length > DOMAIN_RESOURCE_LIMIT;
@@ -59,8 +78,51 @@ export function domainsResourcePayload(db: Database = getDatabase()): Record<str
     total: countDomains(db),
     limit: DOMAIN_RESOURCE_LIMIT,
     truncated,
+    mode: "local",
+    source: "local_sqlite",
     cli_equivalent: `emails domain status --limit ${DOMAIN_RESOURCE_LIMIT} --json`,
   };
+}
+
+export function domainsResourcePayloadForRuntime(db?: Database): Record<string, unknown> {
+  if (!selfHostedSelected()) return domainsResourcePayload(db ?? getDatabase());
+
+  try {
+    const mode = resolveEmailsMode();
+    const domainRows = listDomains(undefined, undefined, { limit: DOMAIN_RESOURCE_LIMIT + 1, offset: 0 });
+    const truncated = domainRows.length > DOMAIN_RESOURCE_LIMIT;
+    const domains = domainRows.slice(0, DOMAIN_RESOURCE_LIMIT).map((domain) => ({
+      ...domain,
+      provisioning: null,
+      readiness: assessDomainReadiness(domain, null, {
+        ...domainInboundReadinessSignals(domain, mode),
+        ready_addresses: 0,
+      }),
+    }));
+    return {
+      domains,
+      total: null,
+      total_source: "unavailable_without_api_count",
+      limit: DOMAIN_RESOURCE_LIMIT,
+      truncated,
+      mode: "self_hosted",
+      source: "self_hosted_api",
+      api: selfHostedApiStatus(),
+      cli_equivalent: `emails domain status --limit ${DOMAIN_RESOURCE_LIMIT} --json`,
+    };
+  } catch (error) {
+    return {
+      domains: [],
+      total: 0,
+      limit: DOMAIN_RESOURCE_LIMIT,
+      truncated: false,
+      mode: "self_hosted",
+      source: "self_hosted_api",
+      api: selfHostedApiStatus(error),
+      note: "Self-hosted API domain resource data is unavailable; no local database or config state was read.",
+      cli_equivalent: `emails domain status --limit ${DOMAIN_RESOURCE_LIMIT} --json`,
+    };
+  }
 }
 
 export async function addressesResourcePayload(db: Database = getDatabase()): Promise<Record<string, unknown>> {
@@ -78,11 +140,52 @@ export async function addressesResourcePayload(db: Database = getDatabase()): Pr
     total: countAddresses(db),
     limit: ADDRESS_RESOURCE_LIMIT,
     truncated,
+    mode: "local",
+    source: "local_sqlite",
     cli_equivalent: `emails address list --limit ${ADDRESS_RESOURCE_LIMIT} --json`,
   };
 }
 
-export async function agentContextResourcePayload(db: Database = getDatabase()): Promise<Record<string, unknown>> {
+export async function addressesResourcePayloadForRuntime(db?: Database): Promise<Record<string, unknown>> {
+  if (!selfHostedSelected()) return await addressesResourcePayload(db ?? getDatabase());
+
+  try {
+    const addressRows = listAddresses(undefined, undefined, { limit: ADDRESS_RESOURCE_LIMIT + 1, offset: 0 });
+    const truncated = addressRows.length > ADDRESS_RESOURCE_LIMIT;
+    const addresses = addressRows.slice(0, ADDRESS_RESOURCE_LIMIT).map((address) => ({
+      ...address,
+      provider_name: null,
+      owner: null,
+      administrator: null,
+      provisioning: null,
+    }));
+    return {
+      addresses,
+      total: null,
+      total_source: "unavailable_without_api_count",
+      limit: ADDRESS_RESOURCE_LIMIT,
+      truncated,
+      mode: "self_hosted",
+      source: "self_hosted_api",
+      api: selfHostedApiStatus(),
+      cli_equivalent: `emails address list --limit ${ADDRESS_RESOURCE_LIMIT} --json`,
+    };
+  } catch (error) {
+    return {
+      addresses: [],
+      total: 0,
+      limit: ADDRESS_RESOURCE_LIMIT,
+      truncated: false,
+      mode: "self_hosted",
+      source: "self_hosted_api",
+      api: selfHostedApiStatus(error),
+      note: "Self-hosted API address resource data is unavailable; no local database or config state was read.",
+      cli_equivalent: `emails address list --limit ${ADDRESS_RESOURCE_LIMIT} --json`,
+    };
+  }
+}
+
+export async function agentContextResourcePayload(db?: Database): Promise<Record<string, unknown>> {
   const { getAgentContextForRuntime } = await import("../lib/agent-context.js");
   const context = await getAgentContextForRuntime(db);
   const status = context["status"] as Record<string, unknown>;
@@ -146,8 +249,13 @@ export function mailboxesResourcePayload(db: Database = getDatabase()): Record<s
   };
 }
 
-export async function mailboxesResourcePayloadForRuntime(db: Database = getDatabase()): Promise<Record<string, unknown>> {
-  return mailboxesResourcePayload(db);
+export async function mailboxesResourcePayloadForRuntime(db?: Database): Promise<Record<string, unknown>> {
+  const ds = resolveMailDataSource();
+  if (ds.mode === "local" && db) return mailboxesResourcePayload(db);
+  return {
+    ...(await ds.listMailboxStatus()),
+    cli_equivalent: "emails inbox mailboxes --json",
+  };
 }
 
 export function sourcesResourcePayload(db: Database = getDatabase()): Record<string, unknown> {
@@ -157,8 +265,13 @@ export function sourcesResourcePayload(db: Database = getDatabase()): Record<str
   };
 }
 
-export async function sourcesResourcePayloadForRuntime(db: Database = getDatabase()): Promise<Record<string, unknown>> {
-  return sourcesResourcePayload(db);
+export async function sourcesResourcePayloadForRuntime(db?: Database): Promise<Record<string, unknown>> {
+  const ds = resolveMailDataSource();
+  if (ds.mode === "local" && db) return sourcesResourcePayload(db);
+  return {
+    sources: await ds.listMailboxSources({ limit: 100 }),
+    cli_equivalent: "emails inbox sources --json",
+  };
 }
 
 interface FailedDomainProvisioningRow {
@@ -219,6 +332,31 @@ export function recentErrorsResourcePayload(db: Database = getDatabase()): Recor
       domain_provisioning: domainErrorsTruncated,
       address_provisioning: addressErrorsTruncated,
     },
+    mode: "local",
+    source: "local_sqlite",
+    cli_equivalent: "emails status --json",
+  };
+}
+
+export function recentErrorsResourcePayloadForRuntime(db?: Database): Record<string, unknown> {
+  if (!selfHostedSelected()) return recentErrorsResourcePayload(db ?? getDatabase());
+  return {
+    errors: [],
+    truncated: false,
+    limits: {
+      per_component: RECENT_ERROR_LIMIT_PER_COMPONENT,
+    },
+    truncated_components: {
+      domain_provisioning: false,
+      address_provisioning: false,
+    },
+    mode: "self_hosted",
+    source: "self_hosted_api",
+    api: {
+      available: false,
+      error: null,
+    },
+    note: "No self-hosted API endpoint currently exposes provisioning/realtime error history; no local database or config state was read.",
     cli_equivalent: "emails status --json",
   };
 }
@@ -320,7 +458,7 @@ export function registerEmailResources(server: McpServer): void {
       mimeType: "application/json",
     },
     async () => {
-      return jsonResource("emails://domains", domainsResourcePayload());
+      return jsonResource("emails://domains", domainsResourcePayloadForRuntime());
     },
   );
 
@@ -333,7 +471,7 @@ export function registerEmailResources(server: McpServer): void {
       mimeType: "application/json",
     },
     async () => {
-      return jsonResource("emails://addresses", await addressesResourcePayload());
+      return jsonResource("emails://addresses", await addressesResourcePayloadForRuntime());
     },
   );
 
@@ -346,7 +484,7 @@ export function registerEmailResources(server: McpServer): void {
       mimeType: "application/json",
     },
     async () => {
-      return jsonResource("emails://recent-errors", recentErrorsResourcePayload());
+      return jsonResource("emails://recent-errors", recentErrorsResourcePayloadForRuntime());
     },
   );
 }

@@ -14,6 +14,15 @@ const MAX_MCP_PROVISION_WAIT_SECONDS = 300;
 const MAX_MCP_PROVISION_INTERVAL_SECONDS = 60;
 const MAX_DOMAIN_REGISTRATION_YEARS = 10;
 
+async function assertLocalStateAllowed(toolName: string, reason: string): Promise<void> {
+  const { getEmailsMode } = await import("../../lib/mode.js");
+  if (getEmailsMode() !== "self_hosted") return;
+  throw new Error(
+    `MCP tool ${toolName} is disabled in self_hosted API-only mode because ${reason}. ` +
+      "Use the self-hosted Emails API for server-owned state, or set EMAILS_MODE=local only for an explicit local store.",
+  );
+}
+
 export function registerInfrastructureTools(server: McpServer): void {
   // ─── DOMAIN PURCHASING (via @hasna/domains / Route 53) ───────────────────────
 
@@ -101,6 +110,7 @@ export function registerInfrastructureTools(server: McpServer): void {
   },
   async ({ domain, provider_id, contact, duration_years, add_mx, force_mx_switch }) => {
     try {
+      await assertLocalStateAllowed("setup_domain_for_email", "it reads local provider config and writes local domain provisioning state");
       const {
         r53CheckAvailability, r53RegisterDomain, r53GetRegistrationStatus,
         r53UpdateNameservers, cfEnsureZone, pollRegistrationUntilDone,
@@ -201,6 +211,7 @@ export function registerInfrastructureTools(server: McpServer): void {
   },
   async ({ domain, provider_id, cloudflare_token, add_mx, mx_server, register_domain, force_mx_switch }) => {
     try {
+      await assertLocalStateAllowed("setup_cloudflare_dns", "it reads local provider config and may write local domain state");
       const provider = getProvider(resolveId("providers", provider_id));
       if (!provider) throw new ProviderNotFoundError(provider_id);
       if (add_mx) {
@@ -243,6 +254,7 @@ export function registerInfrastructureTools(server: McpServer): void {
   },
   async ({ bucket, prefix, region, provider_id, limit }) => {
     try {
+      await assertLocalStateAllowed("sync_s3_inbox", "it reads S3 objects and writes inbound messages into local SQLite");
       const { syncS3Inbox } = await import("../../lib/s3-sync.js");
       const result = await syncS3Inbox({ bucket, prefix, region, providerId: provider_id, limit: limit ?? 100 });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
@@ -282,6 +294,7 @@ export function registerInfrastructureTools(server: McpServer): void {
   { key: z.string().describe("Config key (e.g. attachment_storage, attachment_s3_bucket, default_provider)") },
   async ({ key }) => {
     try {
+      await assertLocalStateAllowed("get_config", "it reads local config");
       const value = getConfigValue(key);
       return { content: [{ type: "text", text: value === undefined ? `${key} is not set` : JSON.stringify({ [key]: value }, null, 2) }] };
     } catch (e) {
@@ -299,6 +312,7 @@ export function registerInfrastructureTools(server: McpServer): void {
   },
   async ({ key, value }) => {
     try {
+      await assertLocalStateAllowed("set_config", "it writes local config");
       let parsed: unknown;
       try { parsed = JSON.parse(value); } catch { parsed = value; }
       setConfigValue(key, parsed);
@@ -315,6 +329,7 @@ export function registerInfrastructureTools(server: McpServer): void {
   {},
   async () => {
     try {
+      await assertLocalStateAllowed("list_config", "it reads local config");
       const config = loadConfig();
       return { content: [{ type: "text", text: JSON.stringify(config, null, 2) }] };
     } catch (e) {
@@ -335,6 +350,7 @@ export function registerInfrastructureTools(server: McpServer): void {
   },
   async (params) => {
     try {
+      await assertLocalStateAllowed("send_feedback", "it writes feedback into local SQLite");
       const db = getDatabase();
       const pkg = require("../../package.json");
       db.run("INSERT INTO feedback (message, email, category, version) VALUES (?, ?, ?, ?)", [
@@ -361,6 +377,7 @@ export function registerInfrastructureTools(server: McpServer): void {
     },
     async ({ domain, provider_id, send_provider, add_mx, force_mx_switch }) => {
       try {
+        await assertLocalStateAllowed("provision_domain", "it reads local provider config and writes local provisioning state");
         const db = getDatabase();
         const resolvedProviderId = resolveId("providers", provider_id);
         const provider = getProvider(resolvedProviderId);
@@ -401,6 +418,7 @@ export function registerInfrastructureTools(server: McpServer): void {
     },
     async ({ email, provider_id, domain_id, receive_strategy, forward_to, owner, administrator, wait, timeout_seconds, interval_seconds, inbound_bucket }) => {
       try {
+        await assertLocalStateAllowed("provision_address", "it reads and writes local address/provisioning state");
         const db = getDatabase();
         const pid = resolveId("providers", provider_id);
         const provider = getProvider(pid);
@@ -481,6 +499,7 @@ export function registerInfrastructureTools(server: McpServer): void {
     },
     async ({ source_address, target_address, provider_id, from_address, enabled }) => {
       try {
+        await assertLocalStateAllowed("add_forwarding_rule", "it writes local forwarding state");
         const providerId = provider_id ? resolveId("providers", provider_id) : null;
         const { createForwardingRule } = await import("../../db/forwarding.js");
         const rule = createForwardingRule({
@@ -509,6 +528,7 @@ export function registerInfrastructureTools(server: McpServer): void {
     },
     async ({ source_address, enabled, limit, offset }) => {
       try {
+        await assertLocalStateAllowed("list_forwarding_rules", "it reads local forwarding state");
         const { listForwardingRules } = await import("../../db/forwarding.js");
         const rules = listForwardingRules({ source_address, enabled, limit: limit ?? 50, offset: offset ?? 0 });
         return { content: [{ type: "text" as const, text: JSON.stringify({
@@ -530,6 +550,7 @@ export function registerInfrastructureTools(server: McpServer): void {
     },
     async ({ provider_id, from_address, limit, backfill }) => {
       try {
+        await assertLocalStateAllowed("run_forwarding_rules", "it reads local inbound bodies and writes local send/forwarding state");
         const providerId = provider_id ? resolveId("providers", provider_id) : undefined;
         const { processForwardingRules } = await import("../../lib/forwarding.js");
         const result = await processForwardingRules({ providerId, fromAddress: from_address, limit: limit ?? 100, backfill });
@@ -551,6 +572,7 @@ export function registerInfrastructureTools(server: McpServer): void {
     },
     async ({ domain, limit, offset }) => {
       try {
+        await assertLocalStateAllowed("provision_status", "it reads local domain and address provisioning state");
         const db = getDatabase();
         const { findDomainsByName, listDomains } = await import("../../db/domains.js");
         const {

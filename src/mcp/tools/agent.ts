@@ -1,14 +1,18 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createAddress, findAddressesByEmail, getAddressByEmail } from "../../db/addresses.js";
-import { getDomainByName } from "../../db/domains.js";
-import { getAddressProvisioning, setAddressProvisioning } from "../../db/provisioning.js";
-import { getDatabase } from "../../db/database.js";
-import { getProvider } from "../../db/providers.js";
-import { formatError, resolveId } from "../helpers.js";
+import { formatError } from "../helpers.js";
 
 function json(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+}
+
+async function assertLocalStateAllowed(toolName: string, reason: string): Promise<void> {
+  const { getEmailsMode } = await import("../../lib/mode.js");
+  if (getEmailsMode() !== "self_hosted") return;
+  throw new Error(
+    `MCP tool ${toolName} is disabled in self_hosted API-only mode because ${reason}. ` +
+      "Use an API-backed self-hosted inbox preparation endpoint when it is available, or set EMAILS_MODE=local only for an explicit local store.",
+  );
 }
 
 export function registerAgentTools(server: McpServer): void {
@@ -26,10 +30,23 @@ export function registerAgentTools(server: McpServer): void {
     },
     async ({ email, provider_id, receive_strategy, forward_to, owner, administrator, create_missing }) => {
       try {
+        await assertLocalStateAllowed("prepare_inbox", "it reads and writes local address, provisioning, ownership, and delivery-diagnosis state");
         const [
+          { createAddress, findAddressesByEmail, getAddressByEmail },
+          { getDomainByName },
+          { getAddressProvisioning, setAddressProvisioning },
+          { getDatabase },
+          { getProvider },
+          { resolveId },
           { diagnoseInboundDelivery },
           { getAddressOwnershipDetail, setAddressOwnerByRef },
         ] = await Promise.all([
+          import("../../db/addresses.js"),
+          import("../../db/domains.js"),
+          import("../../db/provisioning.js"),
+          import("../../db/database.js"),
+          import("../../db/providers.js"),
+          import("../helpers.js"),
           import("../../lib/delivery-doctor.js"),
           import("../../lib/address-ownership.js"),
         ]);
@@ -134,8 +151,8 @@ export function registerAgentTools(server: McpServer): void {
     },
     async ({ goal }) => {
       try {
-        const { getNextEmailAction } = await import("../../lib/agent-context.js");
-        return json({ ...getNextEmailAction(goal), cli_equivalent: "emails status --json" });
+        const { getNextEmailActionForRuntime } = await import("../../lib/agent-context.js");
+        return json({ ...(await getNextEmailActionForRuntime(goal)), cli_equivalent: "emails status --json" });
       } catch (e) {
         return { content: [{ type: "text" as const, text: `Error: ${formatError(e)}` }], isError: true };
       }

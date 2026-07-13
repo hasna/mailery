@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, getDatabase, resetDatabase } from "../db/database.js";
@@ -9,28 +9,103 @@ import { createProvider } from "../db/providers.js";
 import { setAddressProvisioning, setDomainProvisioning } from "../db/provisioning.js";
 import {
   addressesResourcePayload,
+  addressesResourcePayloadForRuntime,
   agentContextResourcePayload,
   domainsResourcePayload,
+  domainsResourcePayloadForRuntime,
   mailboxesResourcePayload,
+  mailboxesResourcePayloadForRuntime,
   recentErrorsResourcePayload,
+  recentErrorsResourcePayloadForRuntime,
   sourcesResourcePayload,
+  sourcesResourcePayloadForRuntime,
 } from "./resources.js";
 import { storeInboundEmail } from "../db/inbound.js";
+import { resetMailDataSource } from "../lib/mail-data-source.js";
+import { resetSelfHostedConfigCache } from "../db/self-hosted-store.js";
 
 const RUNTIME_ENV = [
   "EMAILS_MODE",
   "HASNA_EMAILS_MODE",
-  "EMAILS_MODE",
+  "EMAILS_CLIENT_ENV_SECRET",
+  "EMAILS_SELF_HOSTED_URL",
+  "EMAILS_SELF_HOSTED_API_KEY",
+  "EMAILS_SELF_HOSTED_TIMEOUT_SECONDS",
+  "EMAILS_SELF_HOSTED_CONNECT_TIMEOUT_SECONDS",
+  "EMAILS_DB_PATH",
   "EMAILS_DATABASE_URL",
   "HASNA_EMAILS_DATABASE_URL",
   "HASNA_EMAILS_DB_PATH",
 ] as const;
 
+const LEGACY_HOSTED_ENV_KEYS = [
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+  "HASNA_MAILERY_ENV_FILE",
+] as const;
+
 let previousHome: string | undefined;
 let tempHome: string | undefined;
+let previousLegacyEnv: Partial<Record<typeof LEGACY_HOSTED_ENV_KEYS[number], string>> = {};
+
+function localDbPath(): string {
+  if (!tempHome) throw new Error("tempHome not initialized");
+  return join(tempHome, ".hasna", "emails", "emails.db");
+}
+
+function useSelfHostedStatusFetch(): () => void {
+  delete process.env["EMAILS_DB_PATH"];
+  process.env["EMAILS_MODE"] = "self_hosted";
+  process.env["EMAILS_SELF_HOSTED_URL"] = "https://emails.example/v1";
+  process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-key";
+  resetMailDataSource();
+  resetSelfHostedConfigCache();
+
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    const body = url.pathname.endsWith("/messages/counts")
+      ? {
+          counts: {
+            inbox: 3,
+            unread: 2,
+            starred: 0,
+            sent: 1,
+            archived: 1,
+            spam: 0,
+            trash: 0,
+            total: 5,
+            latest_received_at: "2026-07-08T19:50:52.000Z",
+          },
+        }
+      : { messages: [] };
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  return () => {
+    globalThis.fetch = previousFetch;
+    resetMailDataSource();
+    resetSelfHostedConfigCache();
+  };
+}
 
 beforeEach(() => {
   previousHome = process.env["HOME"];
+  previousLegacyEnv = {};
+  for (const key of LEGACY_HOSTED_ENV_KEYS) {
+    previousLegacyEnv[key] = process.env[key];
+    delete process.env[key];
+  }
   tempHome = mkdtempSync(join(tmpdir(), "emails-mcp-resources-test-home-"));
   process.env["HOME"] = tempHome;
   process.env["EMAILS_DB_PATH"] = ":memory:";
@@ -42,6 +117,13 @@ afterEach(() => {
   closeDatabase();
   delete process.env["EMAILS_DB_PATH"];
   for (const key of RUNTIME_ENV) delete process.env[key];
+  resetMailDataSource();
+  resetSelfHostedConfigCache();
+  for (const key of LEGACY_HOSTED_ENV_KEYS) {
+    const previous = previousLegacyEnv[key];
+    if (previous === undefined) delete process.env[key];
+    else process.env[key] = previous;
+  }
   if (previousHome === undefined) delete process.env["HOME"];
   else process.env["HOME"] = previousHome;
   if (tempHome) rmSync(tempHome, { recursive: true, force: true });
@@ -50,6 +132,72 @@ afterEach(() => {
 });
 
 describe("MCP resource payloads", () => {
+  it("routes domain, address, and recent-error resources through self-hosted mode without creating local SQLite", async () => {
+    closeDatabase();
+    resetDatabase();
+    delete process.env["EMAILS_DB_PATH"];
+    process.env["EMAILS_MODE"] = "self_hosted";
+    process.env["EMAILS_SELF_HOSTED_URL"] = "http://127.0.0.1:9";
+    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "resource-test-key";
+    process.env["EMAILS_SELF_HOSTED_TIMEOUT_SECONDS"] = "1";
+    process.env["EMAILS_SELF_HOSTED_CONNECT_TIMEOUT_SECONDS"] = "1";
+    resetSelfHostedConfigCache();
+
+    expect(existsSync(localDbPath())).toBe(false);
+
+    const domains = domainsResourcePayloadForRuntime() as {
+      domains: Array<{ id: string; domain: string }>;
+      mode: string;
+      source: string;
+    };
+    const addresses = await addressesResourcePayloadForRuntime() as {
+      addresses: Array<{ id: string; email: string }>;
+      mode: string;
+      source: string;
+    };
+    const recentErrors = recentErrorsResourcePayloadForRuntime() as {
+      errors: unknown[];
+      mode: string;
+      source: string;
+      note: string;
+    };
+
+    expect(existsSync(localDbPath())).toBe(false);
+    expect(domains.mode).toBe("self_hosted");
+    expect(domains.source).toBe("self_hosted_api");
+    expect(domains.domains).toEqual([]);
+    expect(addresses.mode).toBe("self_hosted");
+    expect(addresses.source).toBe("self_hosted_api");
+    expect(addresses.addresses).toEqual([]);
+    expect(recentErrors).toMatchObject({
+      errors: [],
+      mode: "self_hosted",
+      source: "self_hosted_api",
+    });
+    expect(recentErrors.note).toContain("no local database or config state was read");
+  });
+
+  it("routes runtime mailboxes and sources through the self-hosted API without creating local SQLite", async () => {
+    const restore = useSelfHostedStatusFetch();
+    try {
+      expect(existsSync(localDbPath())).toBe(false);
+
+      const mailboxes = await mailboxesResourcePayloadForRuntime() as { counts: { inbox: number; unread: number; sent: number } };
+      const sources = await sourcesResourcePayloadForRuntime() as { sources: Array<{ id: string; badges: string[]; total: number; unread: number }> };
+
+      expect(existsSync(localDbPath())).toBe(false);
+      expect(mailboxes.counts).toMatchObject({ inbox: 3, unread: 2, sent: 1 });
+      expect(sources.sources[0]).toMatchObject({
+        id: "self_hosted",
+        badges: ["self_hosted"],
+        total: 4,
+        unread: 2,
+      });
+    } finally {
+      restore();
+    }
+  });
+
   it("exposes mailbox and source resource payloads with legacy badges", () => {
     const provider = createProvider({ name: "Sandbox import", type: "sandbox" });
     storeInboundEmail({

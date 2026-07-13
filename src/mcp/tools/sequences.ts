@@ -14,6 +14,30 @@ async function toolError(error: unknown): Promise<ToolResult> {
   return { content: [{ type: "text", text: `Error: ${formatError(error)}` }], isError: true };
 }
 
+async function isSelfHostedRuntimeMode(): Promise<boolean> {
+  const { resolveEmailsMode } = await import("../../lib/mode.js");
+  return resolveEmailsMode().mode === "self_hosted";
+}
+
+async function assertSelfHostedApiRouteReady(toolName: string): Promise<void> {
+  if (!(await isSelfHostedRuntimeMode())) return;
+  const { isSelfHostedMode } = await import("../../db/self-hosted-store.js");
+  if (!isSelfHostedMode()) {
+    throw new Error(
+      `MCP tool ${toolName} is API-backed in self_hosted mode and requires EMAILS_MODE=self_hosted with ` +
+        "EMAILS_SELF_HOSTED_URL and EMAILS_SELF_HOSTED_API_KEY. Set EMAILS_MODE=local only for an explicit local sequence store.",
+    );
+  }
+}
+
+async function assertSequenceSubledgerAllowed(toolName: string, reason: string): Promise<void> {
+  if (!(await isSelfHostedRuntimeMode())) return;
+  throw new Error(
+    `MCP tool ${toolName} is disabled in self_hosted API-only mode because ${reason}. ` +
+      "Use the self-hosted Emails API for server-owned sequence state, or set EMAILS_MODE=local only for an explicit local sequence ledger.",
+  );
+}
+
 export function registerSequenceTools(server: McpServer): void {
 // ─── SEQUENCES ────────────────────────────────────────────────────────────────
 
@@ -26,6 +50,7 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ limit, offset }) => {
     try {
+      await assertSelfHostedApiRouteReady("list_sequences");
       const { listSequences } = await import("../../db/sequences.js");
       const sequences = listSequences(undefined, { limit: limit ?? 100, offset: offset ?? 0 });
       return { content: [{ type: "text", text: JSON.stringify(sequences, null, 2) }] };
@@ -44,6 +69,7 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ name, description }) => {
     try {
+      await assertSelfHostedApiRouteReady("create_sequence");
       const { createSequence } = await import("../../db/sequences.js");
       const sequence = createSequence({ name, description });
       return { content: [{ type: "text", text: JSON.stringify(sequence, null, 2) }] };
@@ -66,6 +92,7 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ sequence_id, step_number, delay_hours, template_name, from_address, subject_override }) => {
     try {
+      await assertSequenceSubledgerAllowed("add_sequence_step", "it writes local sequence step rows");
       const { getSequence, addStep } = await import("../../db/sequences.js");
       const seq = getSequence(sequence_id);
       if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
@@ -94,6 +121,7 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ sequence_id, contact_email, provider_id }) => {
     try {
+      await assertSequenceSubledgerAllowed("enroll_contact", "it writes local sequence enrollment rows");
       const { getSequence, enroll } = await import("../../db/sequences.js");
       const seq = getSequence(sequence_id);
       if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
@@ -114,6 +142,7 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ sequence_id, contact_email }) => {
     try {
+      await assertSequenceSubledgerAllowed("unenroll_contact", "it writes local sequence enrollment rows");
       const { getSequence, unenroll } = await import("../../db/sequences.js");
       const seq = getSequence(sequence_id);
       if (!seq) throw new Error(`Sequence not found: ${sequence_id}`);
@@ -136,6 +165,7 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ sequence_id, status, limit, offset }) => {
     try {
+      await assertSequenceSubledgerAllowed("list_enrollments", "it reads local sequence enrollment rows");
       const { getSequence, listEnrollments } = await import("../../db/sequences.js");
       let resolvedSequenceId: string | undefined;
       if (sequence_id) {
@@ -168,6 +198,7 @@ export function registerSequenceTools(server: McpServer): void {
   },
   async ({ email_id, limit, offset }) => {
     try {
+      await assertSequenceSubledgerAllowed("list_replies", "it reads local inbound reply tables and no API-backed replies implementation exists yet");
       const { getDatabase } = await import("../../db/database.js");
       const { listReplySummaries, getReplyCount } = await import("../../db/inbound.js");
       const { resolveId } = await import("../helpers.js");

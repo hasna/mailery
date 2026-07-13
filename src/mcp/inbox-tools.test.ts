@@ -10,7 +10,42 @@ const { runInboxTool } = await import("./tools/inbox-impl.js");
 // ─── Local harness (SqliteMailDataSource behind the seam) ──────────────────────
 
 const ORIGINAL_HOME = process.env["HOME"];
+const ISOLATED_ENV_KEYS = [
+  "EMAILS_MODE",
+  "HASNA_EMAILS_MODE",
+  "EMAILS_DB_PATH",
+  "HASNA_EMAILS_DB_PATH",
+  "EMAILS_SELF_HOSTED_URL",
+  "EMAILS_SELF_HOSTED_API_KEY",
+  "EMAILS_CLIENT_ENV_SECRET",
+  "MAILERY_MODE",
+  "HASNA_MAILERY_MODE",
+  "MAILERY_STORAGE_MODE",
+  "HASNA_MAILERY_STORAGE_MODE",
+  "EMAILS_STORAGE_MODE",
+  "HASNA_EMAILS_STORAGE_MODE",
+  "MAILERY_API_URL",
+  "MAILERY_API_KEY",
+  "MAILERY_CLOUD_API_URL",
+  "MAILERY_CLOUD_TOKEN",
+  "HASNA_MAILERY_API_URL",
+  "HASNA_MAILERY_API_KEY",
+  "HASNA_MAILERY_ENV_FILE",
+] as const;
+const ORIGINAL_ENV = new Map<string, string | undefined>(ISOLATED_ENV_KEYS.map((key) => [key, process.env[key]]));
 let tmpHome: string | null = null;
+
+function resetIsolatedEnv(): void {
+  for (const key of ISOLATED_ENV_KEYS) delete process.env[key];
+}
+
+function restoreIsolatedEnv(): void {
+  for (const key of ISOLATED_ENV_KEYS) {
+    const value = ORIGINAL_ENV.get(key);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
 
 function setupDb() {
   resetDatabase();
@@ -62,6 +97,7 @@ async function toolJson(name: Parameters<typeof runInboxTool>[0], input: Record<
 }
 
 beforeEach(() => {
+  resetIsolatedEnv();
   tmpHome = mkdtempSync(join(tmpdir(), "emails-mcp-inbox-"));
   process.env["HOME"] = tmpHome;
   process.env["EMAILS_MODE"] = "local";
@@ -70,8 +106,7 @@ beforeEach(() => {
 afterEach(() => {
   closeDatabase();
   resetMailDataSource();
-  delete process.env["EMAILS_DB_PATH"];
-  delete process.env["EMAILS_MODE"];
+  restoreIsolatedEnv();
   if (ORIGINAL_HOME === undefined) delete process.env["HOME"];
   else process.env["HOME"] = ORIGINAL_HOME;
   if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });

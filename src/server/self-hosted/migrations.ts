@@ -1179,6 +1179,398 @@ const PARITY_RESOURCE_SCHEMA_2 = defineMigration(
   `,
 );
 
+/**
+ * Fixed sentinel id of the DEFAULT tenant. Every pre-tenancy row and every
+ * pre-existing credential is backfilled to this tenant by 0012, so the
+ * currently-deployed single operator keeps working unchanged after tenancy
+ * lands. Exported for tests + the auth/store layers that resolve it.
+ */
+export const DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000001";
+
+/**
+ * 0012 — Multi-tenancy: identity tables + tenant_id on every data table +
+ * backfill into the default tenant. Design ref: docs/design/multi-tenancy-auth.md
+ * §3, §9 (the "0012_emails_tenancy_identity_and_backfill" migration).
+ *
+ * SAFETY POSTURE (this is additive, zero-downtime, and drift-aware):
+ *
+ *   - Idempotent. ADD COLUMN / CREATE TABLE / CREATE INDEX are all IF NOT EXISTS;
+ *     constraint/PK changes are discovered from the catalog and guarded, so a 2nd
+ *     run (or a run over a partially-migrated DB) is a clean no-op.
+ *
+ *   - Drift-aware. The PROD database is the drifted ad-hoc schema (see 0009). The
+ *     old per-table UNIQUE is NOT named consistently there — e.g. domains carries
+ *     `domains_provider_id_domain_key (provider_id, domain)`, not the fresh
+ *     `domains_domain_key (domain)`; group_members' `(group_id, email)` is a
+ *     PRIMARY KEY on prod but a plain UNIQUE on a fresh DB. So the composite-unique
+ *     swaps DISCOVER the old constraint by its exact column set via pg_constraint
+ *     (helper `emails_drop_unique`) rather than hard-coding names — mirroring the
+ *     0009 reconcile discipline.
+ *
+ *   - Transitional DEFAULT. tenant_id is added with a transitional DEFAULT of the
+ *     default tenant, THEN backfilled, THEN set NOT NULL. So an in-flight insert
+ *     from still-running old code during the deploy window lands in the default
+ *     tenant instead of erroring (the DEFAULT is dropped later, in 0013).
+ *
+ *   - Old-code ON CONFLICT preserved (zero-downtime). The shipped v1.0.0 store
+ *     (untouched in this phase) infers ON CONFLICT on exactly three single-column
+ *     uniques: messages(idempotency_key), messages(source_id), and
+ *     email_agent_settings(agent_key). Dropping those before the store is updated
+ *     (Phase 1) would crash the running server. So for those three we ADD the new
+ *     tenant-scoped unique and RETAIN the legacy single-column one transitionally;
+ *     0013 drops the legacy ones once the store uses the composite conflict target.
+ *     Every OTHER old unique (no ON CONFLICT dependency) IS swapped now.
+ *
+ *   - RLS is NOT enabled here (that is 0013, contingent on a separate NOBYPASSRLS
+ *     serving role — design §6 Layer 2). The identity tables are deliberately kept
+ *     OUT of SELF_HOSTED_RESOURCES (like send_key_secrets), so the generic
+ *     `SELECT *` resource layer can never reach a password_hash / token_hash.
+ */
+const TENANCY_IDENTITY_AND_BACKFILL = defineMigration(
+  "0012_emails_tenancy_identity_and_backfill",
+  `
+  -- 0. extension for case-insensitive, globally-unique user emails.
+  CREATE EXTENSION IF NOT EXISTS citext;
+
+  -- ---- drift-aware reconcile helpers (session-temp; mirror 0009) -------------
+
+  -- Add tenant_id to a data table: transitional DEFAULT -> backfill -> NOT NULL,
+  -- then FK to tenants(id) + a lookup index. Guarded on table existence and every
+  -- step is idempotent, so it is safe on fresh, drifted, and already-migrated DBs.
+  CREATE OR REPLACE FUNCTION pg_temp.emails_add_tenant(tbl text)
+  RETURNS void
+  LANGUAGE plpgsql
+  AS $fn$
+  DECLARE
+    fk_name  text := tbl || '_tenant_fk';
+    idx_name text := tbl || '_tenant_idx';
+  BEGIN
+    IF to_regclass('public.' || tbl) IS NULL THEN RETURN; END IF;
+    EXECUTE format('ALTER TABLE public.%I ADD COLUMN IF NOT EXISTS tenant_id uuid', tbl);
+    EXECUTE format('UPDATE public.%I SET tenant_id = %L WHERE tenant_id IS NULL', tbl, '${DEFAULT_TENANT_ID}');
+    EXECUTE format('ALTER TABLE public.%I ALTER COLUMN tenant_id SET DEFAULT %L', tbl, '${DEFAULT_TENANT_ID}');
+    EXECUTE format('ALTER TABLE public.%I ALTER COLUMN tenant_id SET NOT NULL', tbl);
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conrelid = ('public.' || tbl)::regclass AND conname = fk_name
+    ) THEN
+      EXECUTE format(
+        'ALTER TABLE public.%I ADD CONSTRAINT %I FOREIGN KEY (tenant_id) REFERENCES public.tenants(id)',
+        tbl, fk_name);
+    END IF;
+    EXECUTE format('CREATE INDEX IF NOT EXISTS %I ON public.%I (tenant_id)', idx_name, tbl);
+  END;
+  $fn$;
+
+  -- Drop any UNIQUE or PRIMARY KEY constraint on tbl whose column set is EXACTLY
+  -- cols (order-insensitive), regardless of its name. This is how the old global
+  -- unique is removed drift-safely: prod and fresh name it differently, and on
+  -- group_members it is a PK on prod but a UNIQUE on a fresh DB. No-op when no
+  -- such constraint exists (already swapped, or a drifted table that never had it).
+  CREATE OR REPLACE FUNCTION pg_temp.emails_drop_unique(tbl text, cols text[])
+  RETURNS void
+  LANGUAGE plpgsql
+  AS $fn$
+  DECLARE
+    target text[] := (SELECT array_agg(x ORDER BY x) FROM unnest(cols) AS x);
+    rec    record;
+  BEGIN
+    IF to_regclass('public.' || tbl) IS NULL THEN RETURN; END IF;
+    FOR rec IN
+      SELECT c.conname
+      FROM pg_constraint c
+      WHERE c.conrelid = ('public.' || tbl)::regclass
+        AND c.contype IN ('u', 'p')
+        AND (
+          SELECT array_agg(att.attname::text ORDER BY att.attname::text)
+          FROM unnest(c.conkey) AS k(attnum)
+          JOIN pg_attribute att ON att.attrelid = c.conrelid AND att.attnum = k.attnum
+        ) = target
+    LOOP
+      EXECUTE format('ALTER TABLE public.%I DROP CONSTRAINT IF EXISTS %I', tbl, rec.conname);
+    END LOOP;
+  END;
+  $fn$;
+
+  -- Create a tenant-scoped UNIQUE INDEX (trusted column list from this file).
+  CREATE OR REPLACE FUNCTION pg_temp.emails_add_unique(tbl text, idx_name text, cols_sql text)
+  RETURNS void
+  LANGUAGE plpgsql
+  AS $fn$
+  BEGIN
+    IF to_regclass('public.' || tbl) IS NULL THEN RETURN; END IF;
+    EXECUTE format('CREATE UNIQUE INDEX IF NOT EXISTS %I ON public.%I (%s)', idx_name, tbl, cols_sql);
+  END;
+  $fn$;
+
+  -- Replace a table's PRIMARY KEY with pk_cols (idempotent: no-op if already the
+  -- target set). Used for email_agent_settings: (agent_key) -> (tenant_id, agent_key).
+  CREATE OR REPLACE FUNCTION pg_temp.emails_set_pk(tbl text, pk_cols text[])
+  RETURNS void
+  LANGUAGE plpgsql
+  AS $fn$
+  DECLARE
+    existing_name text;
+    existing_cols text[];
+    target        text[] := (SELECT array_agg(x ORDER BY x) FROM unnest(pk_cols) AS x);
+    col           text;
+  BEGIN
+    IF to_regclass('public.' || tbl) IS NULL THEN RETURN; END IF;
+    -- Every PK column must be NOT NULL before ADD PRIMARY KEY.
+    FOREACH col IN ARRAY pk_cols LOOP
+      EXECUTE format('ALTER TABLE public.%I ALTER COLUMN %I SET NOT NULL', tbl, col);
+    END LOOP;
+    SELECT c.conname,
+           (SELECT array_agg(att.attname::text ORDER BY att.attname::text)
+            FROM unnest(c.conkey) AS k(attnum)
+            JOIN pg_attribute att ON att.attrelid = c.conrelid AND att.attnum = k.attnum)
+      INTO existing_name, existing_cols
+      FROM pg_constraint c
+      WHERE c.conrelid = ('public.' || tbl)::regclass AND c.contype = 'p';
+    IF existing_cols IS NOT DISTINCT FROM target THEN
+      RETURN; -- already the desired composite PK
+    END IF;
+    IF existing_name IS NOT NULL THEN
+      EXECUTE format('ALTER TABLE public.%I DROP CONSTRAINT %I', tbl, existing_name);
+    END IF;
+    EXECUTE format(
+      'ALTER TABLE public.%I ADD PRIMARY KEY (%s)',
+      tbl,
+      (SELECT string_agg(quote_ident(x), ', ' ORDER BY ord)
+       FROM unnest(pk_cols) WITH ORDINALITY AS u(x, ord)));
+  END;
+  $fn$;
+
+  -- ---- 1. identity + resolution tables (NOT tenant-scoped; §3.1) -------------
+  -- These are read BEFORE a tenant is known (they resolve it), and they hold
+  -- secrets (password_hash / token_hash). They are deliberately absent from
+  -- SELF_HOSTED_RESOURCES, so no generic SELECT * path can ever reach them.
+
+  CREATE TABLE IF NOT EXISTS tenants (
+    id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    slug       text NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9][a-z0-9-]*$'),
+    name       text NOT NULL,
+    status     text NOT NULL DEFAULT 'active',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE IF NOT EXISTS users (
+    id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    email              citext NOT NULL UNIQUE,
+    password_hash      text NOT NULL,
+    name               text,
+    status             text NOT NULL DEFAULT 'active',
+    email_verified_at  timestamptz,
+    failed_login_count integer NOT NULL DEFAULT 0,
+    locked_until       timestamptz,
+    created_at         timestamptz NOT NULL DEFAULT now(),
+    updated_at         timestamptz NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE IF NOT EXISTS memberships (
+    id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id  uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    role       text NOT NULL CHECK (role IN ('owner','admin','member','viewer')),
+    status     text NOT NULL DEFAULT 'active',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (user_id, tenant_id)
+  );
+  CREATE INDEX IF NOT EXISTS memberships_tenant_idx ON memberships (tenant_id);
+  CREATE INDEX IF NOT EXISTS memberships_user_idx ON memberships (user_id);
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id             uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id           uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    token_hash          text NOT NULL UNIQUE,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    last_used_at        timestamptz,
+    expires_at          timestamptz NOT NULL,
+    absolute_expires_at timestamptz NOT NULL,
+    revoked_at          timestamptz,
+    user_agent          text,
+    ip                  inet
+  );
+  CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id);
+  CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions (expires_at);
+
+  CREATE TABLE IF NOT EXISTS api_key_tenants (
+    kid                text PRIMARY KEY,
+    tenant_id          uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    created_by_user_id uuid REFERENCES users(id),
+    created_at         timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS api_key_tenants_tenant_idx ON api_key_tenants (tenant_id);
+
+  CREATE TABLE IF NOT EXISTS invitations (
+    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id   uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    email       citext NOT NULL,
+    role        text NOT NULL CHECK (role IN ('owner','admin','member')),
+    token_hash  text NOT NULL UNIQUE,
+    invited_by  uuid REFERENCES users(id),
+    expires_at  timestamptz NOT NULL,
+    accepted_at timestamptz,
+    created_at  timestamptz NOT NULL DEFAULT now()
+  );
+  -- one open (un-accepted) invite per email per tenant
+  CREATE UNIQUE INDEX IF NOT EXISTS invitations_open_uidx
+    ON invitations (tenant_id, email) WHERE accepted_at IS NULL;
+  CREATE INDEX IF NOT EXISTS invitations_tenant_idx ON invitations (tenant_id);
+
+  CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash text NOT NULL UNIQUE,
+    expires_at timestamptz NOT NULL,
+    used_at    timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS password_reset_tokens_user_idx ON password_reset_tokens (user_id);
+
+  -- Non-RLS resolution tables: read before a tenant GUC exists (design §6 H2/C1).
+  -- inbound_domain_routes = the global single-tenant receive map (one physical
+  -- domain -> exactly one tenant), used for envelope-recipient inbound routing.
+  CREATE TABLE IF NOT EXISTS inbound_domain_routes (
+    domain     text PRIMARY KEY,
+    tenant_id  uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS inbound_domain_routes_tenant_idx ON inbound_domain_routes (tenant_id);
+
+  -- send_key_tenants = credential -> tenant map (mirrors api_key_tenants), so a
+  -- send-key token resolves its tenant WITHOUT reading the (future) RLS-forced
+  -- send_keys table.
+  CREATE TABLE IF NOT EXISTS send_key_tenants (
+    send_key_id text PRIMARY KEY,
+    tenant_id   uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    created_at  timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS send_key_tenants_tenant_idx ON send_key_tenants (tenant_id);
+
+  -- ---- 2. default tenant (fixed sentinel for deterministic backfill) ---------
+  INSERT INTO tenants (id, slug, name, status)
+  VALUES ('${DEFAULT_TENANT_ID}', 'default', 'Default Tenant', 'active')
+  ON CONFLICT (id) DO NOTHING;
+
+  -- ---- 3. tenant_id on every data table (all 27) -----------------------------
+  SELECT pg_temp.emails_add_tenant('domains');
+  SELECT pg_temp.emails_add_tenant('addresses');
+  SELECT pg_temp.emails_add_tenant('messages');
+  SELECT pg_temp.emails_add_tenant('contacts');
+  SELECT pg_temp.emails_add_tenant('self_hosted_providers');
+  SELECT pg_temp.emails_add_tenant('templates');
+  SELECT pg_temp.emails_add_tenant('contact_groups');
+  SELECT pg_temp.emails_add_tenant('sequences');
+  SELECT pg_temp.emails_add_tenant('owners');
+  SELECT pg_temp.emails_add_tenant('send_keys');
+  SELECT pg_temp.emails_add_tenant('scheduled_emails');
+  SELECT pg_temp.emails_add_tenant('aliases');
+  SELECT pg_temp.emails_add_tenant('forwarding_rules');
+  SELECT pg_temp.emails_add_tenant('warming_schedules');
+  SELECT pg_temp.emails_add_tenant('email_triage');
+  SELECT pg_temp.emails_add_tenant('provisioning_events');
+  SELECT pg_temp.emails_add_tenant('mailbox_sources');
+  SELECT pg_temp.emails_add_tenant('events');
+  SELECT pg_temp.emails_add_tenant('email_agent_settings');
+  SELECT pg_temp.emails_add_tenant('email_agent_runs');
+  SELECT pg_temp.emails_add_tenant('email_digests');
+  SELECT pg_temp.emails_add_tenant('group_members');
+  SELECT pg_temp.emails_add_tenant('sequence_steps');
+  SELECT pg_temp.emails_add_tenant('sequence_enrollments');
+  SELECT pg_temp.emails_add_tenant('address_ownership_events');
+  SELECT pg_temp.emails_add_tenant('webhook_receipts');
+  SELECT pg_temp.emails_add_tenant('sandbox_emails');
+
+  -- ---- 4. swap global uniques -> per-tenant composites (§3.3) ----------------
+  -- Safe to drop the old unique for these (the shipped store never ON CONFLICTs on
+  -- them): drop the old (discovered by column set), add the tenant-scoped unique.
+  -- domains/addresses: the drifted PROD schema carries the old unique on
+  -- (provider_id, <col>), NOT the fresh (<col>) — a different COLUMN SET, not just
+  -- a different name — so drop BOTH variants.
+  SELECT pg_temp.emails_drop_unique('domains', ARRAY['domain']);
+  SELECT pg_temp.emails_drop_unique('domains', ARRAY['provider_id','domain']);
+  SELECT pg_temp.emails_add_unique('domains', 'domains_tenant_domain_uidx', 'tenant_id, domain');
+
+  SELECT pg_temp.emails_drop_unique('addresses', ARRAY['email']);
+  SELECT pg_temp.emails_drop_unique('addresses', ARRAY['provider_id','email']);
+  SELECT pg_temp.emails_add_unique('addresses', 'addresses_tenant_email_uidx', 'tenant_id, email');
+
+  SELECT pg_temp.emails_drop_unique('contacts', ARRAY['email']);
+  SELECT pg_temp.emails_add_unique('contacts', 'contacts_tenant_email_uidx', 'tenant_id, email');
+
+  SELECT pg_temp.emails_drop_unique('templates', ARRAY['name']);
+  SELECT pg_temp.emails_add_unique('templates', 'templates_tenant_name_uidx', 'tenant_id, name');
+
+  SELECT pg_temp.emails_drop_unique('contact_groups', ARRAY['name']);
+  SELECT pg_temp.emails_add_unique('contact_groups', 'contact_groups_tenant_name_uidx', 'tenant_id, name');
+
+  SELECT pg_temp.emails_drop_unique('warming_schedules', ARRAY['domain']);
+  SELECT pg_temp.emails_add_unique('warming_schedules', 'warming_schedules_tenant_domain_uidx', 'tenant_id, domain');
+
+  SELECT pg_temp.emails_drop_unique('aliases', ARRAY['domain','local_part']);
+  SELECT pg_temp.emails_add_unique('aliases', 'aliases_tenant_domain_local_part_uidx', 'tenant_id, domain, local_part');
+
+  SELECT pg_temp.emails_drop_unique('forwarding_rules', ARRAY['source_address','target_address','mode']);
+  SELECT pg_temp.emails_add_unique('forwarding_rules', 'forwarding_rules_tenant_route_uidx', 'tenant_id, source_address, target_address, mode');
+
+  SELECT pg_temp.emails_drop_unique('email_agent_runs', ARRAY['agent_key','inbound_email_id']);
+  SELECT pg_temp.emails_add_unique('email_agent_runs', 'email_agent_runs_tenant_agent_inbound_uidx', 'tenant_id, agent_key, inbound_email_id');
+
+  SELECT pg_temp.emails_drop_unique('group_members', ARRAY['group_id','email']);
+  SELECT pg_temp.emails_add_unique('group_members', 'group_members_tenant_group_email_uidx', 'tenant_id, group_id, email');
+
+  -- messages: ADD the tenant-scoped partial uniques, but RETAIN the legacy
+  -- single-column partial uniques so the untouched v1.0.0 store's
+  -- ON CONFLICT (idempotency_key) / (source_id) still resolves during the deploy
+  -- window. 0013 drops the legacy ones once the store uses the composite target.
+  CREATE UNIQUE INDEX IF NOT EXISTS messages_tenant_source_id_uidx
+    ON messages (tenant_id, source_id) WHERE source_id IS NOT NULL;
+  CREATE UNIQUE INDEX IF NOT EXISTS messages_tenant_idempotency_key_uidx
+    ON messages (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+  -- email_agent_settings: PK (agent_key) -> (tenant_id, agent_key). The legacy
+  -- agent_key-alone unique index (email_agent_settings_agent_key_uidx, from 0009)
+  -- is RETAINED transitionally so the store's ON CONFLICT (agent_key) still
+  -- resolves; 0013 drops it when per-tenant re-seed lands.
+  SELECT pg_temp.emails_set_pk('email_agent_settings', ARRAY['tenant_id','agent_key']);
+
+  -- webhook_receipts (§3.3 M2): no unique existed; dedupe pre-existing rows first,
+  -- keeping the newest per (tenant_id, provider, event_id), then add the unique.
+  DELETE FROM webhook_receipts a USING webhook_receipts b
+    WHERE a.tenant_id = b.tenant_id
+      AND a.provider = b.provider
+      AND a.event_id = b.event_id
+      AND a.ctid < b.ctid;
+  SELECT pg_temp.emails_add_unique('webhook_receipts', 'webhook_receipts_tenant_provider_event_uidx', 'tenant_id, provider, event_id');
+
+  -- ---- 5. backfill credential/resolution maps to the default tenant ----------
+  -- Binds EVERY existing api key to the default tenant so the currently-deployed
+  -- operator key keeps working (fail-closed 403 otherwise, design §4.3).
+  DO $$
+  BEGIN
+    IF to_regclass('public.api_keys') IS NOT NULL THEN
+      INSERT INTO api_key_tenants (kid, tenant_id)
+      SELECT kid, '${DEFAULT_TENANT_ID}'::uuid FROM api_keys
+      ON CONFLICT (kid) DO NOTHING;
+    END IF;
+    IF to_regclass('public.send_keys') IS NOT NULL THEN
+      INSERT INTO send_key_tenants (send_key_id, tenant_id)
+      SELECT id, '${DEFAULT_TENANT_ID}'::uuid FROM send_keys
+      ON CONFLICT (send_key_id) DO NOTHING;
+    END IF;
+    IF to_regclass('public.domains') IS NOT NULL THEN
+      INSERT INTO inbound_domain_routes (domain, tenant_id)
+      SELECT domain, '${DEFAULT_TENANT_ID}'::uuid FROM domains WHERE domain IS NOT NULL
+      ON CONFLICT (domain) DO NOTHING;
+    END IF;
+  END $$;
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -1197,5 +1589,6 @@ export function emailsSelfHostedMigrations(): Migration[] {
     PARITY_RESOURCE_SCHEMA,
     PROVISIONING_COLUMNS,
     PARITY_RESOURCE_SCHEMA_2,
+    TENANCY_IDENTITY_AND_BACKFILL,
   ];
 }

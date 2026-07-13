@@ -1,9 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { afterAll, describe, expect, it } from "bun:test";
 import { createPgPool, createQueryClient, MigrationLedger } from "../../storage-kit/index.js";
-import { emailsSelfHostedMigrations } from "./migrations.js";
+import { DEFAULT_TENANT_ID, emailsSelfHostedMigrations } from "./migrations.js";
 import { EmailsSelfHostedStore } from "./store.js";
-import { resourceSpecForPath } from "./resources.js";
+import { resourceSpecForPath, SELF_HOSTED_RESOURCES } from "./resources.js";
 
 const databaseUrl = process.env["EMAILS_TEST_POSTGRES_URL"];
 const client = databaseUrl
@@ -636,5 +636,258 @@ describe("self-hosted Postgres integration", () => {
     // Idempotent on a second run over the real schema.
     const rerun = await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
     expect(rerun.plan.filter((p) => p.state === "pending")).toHaveLength(0);
+  });
+
+  // ---- 0012: multi-tenancy identity + tenant_id backfill --------------------
+  // Loads a DRIFTED prod-shaped schema (the drift classes 0012 must survive:
+  // domains/addresses carry the prod `(provider_id, <col>)` unique, group_members
+  // carries a `(group_id, email)` PRIMARY KEY, email_agent_settings a single-col
+  // PK), migrates through 0011, seeds pre-tenancy rows + credentials, then runs
+  // 0012 and asserts: identity tables exist, tenant_id is NOT NULL and backfilled
+  // to the default tenant on EVERY data table, the credential/resolution maps are
+  // backfilled, the per-tenant composite uniques are in place (and the old global
+  // uniques are gone), the identity tables are unreachable via the resource layer,
+  // and a 2nd full run is a clean no-op.
+  const TENANT_DATA_TABLES = [
+    "domains", "addresses", "messages", "contacts", "self_hosted_providers", "templates",
+    "contact_groups", "sequences", "owners", "send_keys", "scheduled_emails", "aliases",
+    "forwarding_rules", "warming_schedules", "email_triage", "provisioning_events",
+    "mailbox_sources", "events", "email_agent_settings", "email_agent_runs", "email_digests",
+    "group_members", "sequence_steps", "sequence_enrollments", "address_ownership_events",
+    "webhook_receipts", "sandbox_emails",
+  ] as const;
+  const IDENTITY_TABLES = [
+    "tenants", "users", "memberships", "sessions", "api_key_tenants", "invitations",
+    "password_reset_tokens", "inbound_domain_routes", "send_key_tenants",
+  ] as const;
+
+  async function indexExists(name: string): Promise<boolean> {
+    const row = await client!.get<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_class WHERE relkind = 'i' AND relname = $1`,
+      [name],
+    );
+    return (row?.n ?? 0) > 0;
+  }
+  async function primaryKeyColumns(table: string): Promise<string[]> {
+    const rows = await client!.many<{ attname: string }>(
+      `SELECT att.attname::text AS attname
+         FROM pg_constraint c
+         JOIN unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+         JOIN pg_attribute att ON att.attrelid = c.conrelid AND att.attnum = k.attnum
+        WHERE c.conrelid = ('public.' || $1)::regclass AND c.contype = 'p'
+        ORDER BY k.ord`,
+      [table],
+    );
+    return rows.map((r) => r.attname);
+  }
+
+  it.skipIf(!client)("0012 creates identity tables, backfills tenant_id to the default tenant, and swaps uniques (drift-aware + idempotent)", async () => {
+    await resetPublicSchema();
+
+    // Drifted prod-shaped base schema (before any migration).
+    await client!.execute(`
+      CREATE TABLE providers (id TEXT PRIMARY KEY);
+      CREATE TABLE groups    (id TEXT PRIMARY KEY);
+      -- prod drift: (provider_id, domain) UNIQUE, provider_id NOT NULL FK.
+      CREATE TABLE domains (
+        id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL REFERENCES providers(id),
+        domain TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (provider_id, domain)
+      );
+      -- prod drift: (provider_id, email) UNIQUE.
+      CREATE TABLE addresses (
+        id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL REFERENCES providers(id),
+        email TEXT NOT NULL,
+        domain TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (provider_id, email)
+      );
+      -- (contacts is left to the migrations to create fresh; its prod shape ==
+      -- the fresh (email) UNIQUE shape, which 0012 swaps to (tenant_id, email).)
+      -- prod drift: (group_id, email) is the PRIMARY KEY (no id column).
+      CREATE TABLE group_members (
+        group_id TEXT NOT NULL REFERENCES groups(id),
+        email TEXT NOT NULL,
+        name TEXT,
+        vars TEXT NOT NULL DEFAULT '{}',
+        added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (group_id, email)
+      );
+      -- single-column PK, to exercise the PK -> (tenant_id, agent_key) change.
+      CREATE TABLE email_agent_settings (
+        agent_key TEXT PRIMARY KEY,
+        enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        always_on BOOLEAN NOT NULL DEFAULT FALSE,
+        provider TEXT NOT NULL DEFAULT 'external',
+        model TEXT,
+        apply_labels BOOLEAN NOT NULL DEFAULT TRUE,
+        use_network_tools BOOLEAN NOT NULL DEFAULT TRUE,
+        config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE TABLE send_keys (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT,
+        key_hash TEXT NOT NULL,
+        prefix TEXT,
+        label TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      -- api_keys pre-created in the contract's shape so the auth migration's
+      -- CREATE TABLE IF NOT EXISTS is a no-op and our seeded row survives.
+      CREATE TABLE api_keys (
+        kid text PRIMARY KEY,
+        app text NOT NULL,
+        agent text,
+        scopes jsonb NOT NULL,
+        token_hash text NOT NULL,
+        issued_at timestamptz NOT NULL,
+        expires_at timestamptz,
+        revoked_at timestamptz,
+        revoked_reason text,
+        last_used_at timestamptz,
+        created_by text,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
+    `);
+
+    // Phase A: migrate everything EXCEPT 0012 (reconciles the drift, creates the
+    // remaining tables). Then seed pre-tenancy rows into the migration-created
+    // tables (messages) and the credential sources (api_keys/send_keys/domains).
+    const throughEleven = emailsSelfHostedMigrations().filter(
+      (m) => m.id !== "0012_emails_tenancy_identity_and_backfill",
+    );
+    await new MigrationLedger(client!, throughEleven).migrate();
+
+    await client!.execute(`
+      INSERT INTO providers (id) VALUES ('p1');
+      INSERT INTO domains (id, provider_id, domain) VALUES ('dom-a', 'p1', 'a.example'), ('dom-b', 'p1', 'b.example');
+      INSERT INTO addresses (id, provider_id, email) VALUES ('addr-a', 'p1', 'user@a.example');
+      INSERT INTO contacts (id, email) VALUES ('con-a', 'contact@a.example');
+      INSERT INTO groups (id) VALUES ('g1');
+      INSERT INTO group_members (group_id, email) VALUES ('g1', 'member@a.example');
+      INSERT INTO send_keys (id, owner_id, key_hash, prefix) VALUES ('sk-a', 'owner1', 'hash-a', 'esk_aaaa');
+      INSERT INTO messages (id, from_addr, direction, source_id, idempotency_key, send_state)
+        VALUES ('msg-a', 'sender@a.example', 'outbound', 'src-a', 'idem-a', 'none');
+      INSERT INTO api_keys (kid, app, scopes, token_hash, issued_at)
+        VALUES ('kid-a', 'emails', '["emails:*"]'::jsonb, 'tok-hash-a', now());
+    `);
+
+    // Phase B: run the full set — 0012 becomes the only pending migration.
+    const result = await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    expect(result.plan.map((p) => p.migration.id)).toContain("0012_emails_tenancy_identity_and_backfill");
+    expect(
+      result.applied.map((r) => r.id),
+    ).toContain("0012_emails_tenancy_identity_and_backfill");
+
+    // 1. Identity + resolution tables exist.
+    for (const t of IDENTITY_TABLES) {
+      const reg = await client!.get<{ oid: string | null }>(
+        `SELECT to_regclass('public.' || $1) AS oid`, [t],
+      );
+      expect(reg?.oid, `identity table ${t} should exist`).not.toBeNull();
+    }
+
+    // 2. Default tenant seeded with the fixed sentinel id.
+    const tenant = await client!.get<{ id: string; slug: string; status: string }>(
+      `SELECT id, slug, status FROM tenants WHERE id = $1`, [DEFAULT_TENANT_ID],
+    );
+    expect(tenant?.slug).toBe("default");
+    expect(tenant?.status).toBe("active");
+
+    // 3. tenant_id exists, is NOT NULL, and is backfilled to the default tenant on
+    //    EVERY data table (zero rows outside the default tenant, zero NULLs).
+    for (const t of TENANT_DATA_TABLES) {
+      expect(await columnType(t, "tenant_id"), `${t}.tenant_id type`).toBe("uuid");
+      const nullable = await client!.get<{ is_nullable: string }>(
+        `SELECT is_nullable FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'tenant_id'`, [t],
+      );
+      expect(nullable?.is_nullable, `${t}.tenant_id NOT NULL`).toBe("NO");
+      const stray = await client!.get<{ n: number }>(
+        `SELECT count(*)::int AS n FROM ${t} WHERE tenant_id IS DISTINCT FROM $1`, [DEFAULT_TENANT_ID],
+      );
+      expect(stray?.n, `${t} rows outside default tenant`).toBe(0);
+    }
+
+    // Seeded rows are specifically confirmed to have moved into the default tenant.
+    for (const [t, id] of [["domains", "dom-a"], ["addresses", "addr-a"], ["contacts", "con-a"], ["messages", "msg-a"]] as const) {
+      const row = await client!.get<{ tenant_id: string }>(`SELECT tenant_id FROM ${t} WHERE id = $1`, [id]);
+      expect(row?.tenant_id, `${t} seeded row`).toBe(DEFAULT_TENANT_ID);
+    }
+
+    // 4. Credential + resolution maps backfilled to the default tenant.
+    const keyMap = await client!.get<{ tenant_id: string }>(
+      `SELECT tenant_id FROM api_key_tenants WHERE kid = $1`, ["kid-a"],
+    );
+    expect(keyMap?.tenant_id).toBe(DEFAULT_TENANT_ID);
+    const skMap = await client!.get<{ tenant_id: string }>(
+      `SELECT tenant_id FROM send_key_tenants WHERE send_key_id = $1`, ["sk-a"],
+    );
+    expect(skMap?.tenant_id).toBe(DEFAULT_TENANT_ID);
+    const routes = await client!.many<{ domain: string; tenant_id: string }>(
+      `SELECT domain, tenant_id FROM inbound_domain_routes ORDER BY domain`,
+    );
+    expect(routes).toEqual([
+      { domain: "a.example", tenant_id: DEFAULT_TENANT_ID },
+      { domain: "b.example", tenant_id: DEFAULT_TENANT_ID },
+    ]);
+
+    // 5. Per-tenant composite uniques in place.
+    for (const idx of [
+      "domains_tenant_domain_uidx", "addresses_tenant_email_uidx", "contacts_tenant_email_uidx",
+      "templates_tenant_name_uidx", "contact_groups_tenant_name_uidx", "warming_schedules_tenant_domain_uidx",
+      "aliases_tenant_domain_local_part_uidx", "forwarding_rules_tenant_route_uidx",
+      "email_agent_runs_tenant_agent_inbound_uidx", "group_members_tenant_group_email_uidx",
+      "messages_tenant_source_id_uidx", "messages_tenant_idempotency_key_uidx",
+      "webhook_receipts_tenant_provider_event_uidx",
+    ]) {
+      expect(await indexExists(idx), `composite unique ${idx}`).toBe(true);
+    }
+    // email_agent_settings PK swapped to the composite.
+    expect((await primaryKeyColumns("email_agent_settings")).sort()).toEqual(["agent_key", "tenant_id"]);
+    // The shipped store's ON CONFLICT targets survive transitionally.
+    expect(await indexExists("messages_idempotency_key_uidx")).toBe(true);
+    expect(await indexExists("messages_source_id_uidx")).toBe(true);
+    expect(await indexExists("email_agent_settings_agent_key_uidx")).toBe(true);
+
+    // 6. Old GLOBAL uniques are gone — a second tenant may reuse the same domain,
+    //    but a duplicate WITHIN a tenant is still rejected.
+    await client!.execute(
+      `INSERT INTO tenants (id, slug, name) VALUES ('22222222-2222-2222-2222-222222222222', 'tenant-two', 'Tenant Two')`,
+    );
+    // same domain value, different tenant -> allowed
+    await client!.execute(
+      `INSERT INTO domains (id, provider_id, domain, tenant_id) VALUES ('dom-a-t2', 'p1', 'a.example', '22222222-2222-2222-2222-222222222222')`,
+    );
+    // same domain value, same (default) tenant -> unique violation
+    let dupBlocked = false;
+    try {
+      await client!.execute(
+        `INSERT INTO domains (id, provider_id, domain, tenant_id) VALUES ('dom-a-dup', 'p1', 'a.example', '${DEFAULT_TENANT_ID}')`,
+      );
+    } catch { dupBlocked = true; }
+    expect(dupBlocked, "duplicate domain within a tenant must be blocked").toBe(true);
+
+    // 7. Identity/secret tables are NOT reachable via the generic resource layer.
+    const resourceTables = new Set(SELF_HOSTED_RESOURCES.map((r) => r.table));
+    for (const t of IDENTITY_TABLES) {
+      expect(resourceTables.has(t), `${t} must not be a generic resource`).toBe(false);
+    }
+
+    // 8. Idempotent: a 2nd full run is a clean no-op and invariants hold.
+    const rerun = await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    expect(rerun.plan.filter((p) => p.state === "pending")).toHaveLength(0);
+    expect(await columnType("domains", "tenant_id")).toBe("uuid");
+    expect((await primaryKeyColumns("email_agent_settings")).sort()).toEqual(["agent_key", "tenant_id"]);
   });
 });

@@ -49,21 +49,56 @@ export function buildIngestQueueStatement(queueArn: string, bucketArn: string, a
   };
 }
 
-/** Merge our statement into an existing queue policy by Sid (replacing any prior
- *  copy), preserving every other statement (e.g. an SNS subscription grant). */
-export function mergeQueuePolicy(existingPolicyJson: string | undefined, statement: Record<string, unknown>): object {
-  let statements: Array<Record<string, unknown>> = [];
+/** Statement allowing a cross-account consumer role to drain the queue. Needed
+ *  when SES/S3 live in one account (the queue's) and the ingest worker runs in
+ *  another — the queue's account grants the worker's role receive/delete here,
+ *  and the worker's own account must grant the matching IAM (see result guidance). */
+export function buildQueueConsumerStatement(queueArn: string, consumerRoleArn: string): Record<string, unknown> {
+  return {
+    Sid: "AllowCrossAccountConsume",
+    Effect: "Allow",
+    Principal: { AWS: consumerRoleArn },
+    Action: ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
+    Resource: queueArn,
+  };
+}
+
+/** Statement granting a cross-account consumer role read of the inbound objects.
+ *  Resource is the SHARED base (`inbound/*`) so it covers every domain, matching
+ *  buildSesBucketPolicy's grant shape. */
+export function buildBucketReaderStatement(bucket: string, prefix: string, consumerRoleArn: string): Record<string, unknown> {
+  const base = prefix.split("/")[0];
+  const resource = base ? `arn:aws:s3:::${bucket}/${base}/*` : `arn:aws:s3:::${bucket}/*`;
+  return {
+    Sid: "AllowCrossAccountInboundRead",
+    Effect: "Allow",
+    Principal: { AWS: consumerRoleArn },
+    Action: ["s3:GetObject"],
+    Resource: resource,
+  };
+}
+
+/** Merge statements into an existing AWS resource policy by Sid (replacing prior
+ *  copies of OUR Sids), preserving every other statement (e.g. the SES PutObject
+ *  grant on a bucket, or an SNS subscription grant on a queue). */
+export function mergePolicyStatements(existingPolicyJson: string | undefined, statements: Array<Record<string, unknown>>): object {
+  let existing: Array<Record<string, unknown>> = [];
   if (existingPolicyJson) {
     try {
       const parsed = JSON.parse(existingPolicyJson) as { Statement?: unknown };
-      if (Array.isArray(parsed.Statement)) statements = parsed.Statement as Array<Record<string, unknown>>;
+      if (Array.isArray(parsed.Statement)) existing = parsed.Statement as Array<Record<string, unknown>>;
     } catch {
       // Malformed policy → start clean rather than propagate corruption.
     }
   }
-  const sid = statement["Sid"];
-  const kept = statements.filter((s) => s && s["Sid"] !== sid);
-  return { Version: "2012-10-17", Statement: [...kept, statement] };
+  const ourSids = new Set(statements.map((s) => s["Sid"]));
+  const kept = existing.filter((s) => s && !ourSids.has(s["Sid"]));
+  return { Version: "2012-10-17", Statement: [...kept, ...statements] };
+}
+
+/** Back-compat single-statement merge (used for the same-account queue grant). */
+export function mergeQueuePolicy(existingPolicyJson: string | undefined, statement: Record<string, unknown>): object {
+  return mergePolicyStatements(existingPolicyJson, [statement]);
 }
 
 interface FilterRule { Name?: string; Value?: string }
@@ -131,6 +166,14 @@ export interface IngestPipelineOptions {
   prefix?: string;
   /** Also create a dead-letter queue + redrive (default true). */
   dlq?: boolean;
+  /**
+   * Cross-account consumer: the IAM role ARN of an ingest worker in ANOTHER
+   * account. When set, the queue policy grants that role receive/delete and the
+   * bucket policy grants it GetObject on the inbound prefix. The worker's OWN
+   * account must still attach the matching IAM (returned as guidance) and point
+   * its EMAILS_INGEST_S3_BUCKET / EMAILS_INGEST_QUEUE_URL at this bucket/queue.
+   */
+  consumerRoleArn?: string;
 }
 
 export interface IngestPipelineResult {
@@ -143,6 +186,15 @@ export interface IngestPipelineResult {
   notification_id: string;
   notification_installed: boolean;
   removed_overlapping_notifications: string[];
+  /** Cross-account: the consumer role granted (null for same-account). */
+  consumer_role_arn: string | null;
+  /** Cross-account: whether the bucket-policy reader grant was applied. */
+  bucket_reader_granted: boolean;
+  /** Cross-account: IAM the worker's OWN account must attach + ECS env to set. */
+  worker_setup: null | {
+    iam_policy: object;
+    ecs_env: { EMAILS_INGEST_S3_BUCKET: string; EMAILS_INGEST_QUEUE_URL: string };
+  };
 }
 
 type SqsSdk = typeof import("@aws-sdk/client-sqs");
@@ -204,12 +256,14 @@ export async function ensureInboundIngestPipeline(opts: IngestPipelineOptions): 
   }
   const queue = await ensureQueue(sqs, sqsSdk, opts.queueName, redrivePolicy);
 
-  // 2. Grant S3 → SQS SendMessage scoped to the bucket (merge, preserve others).
+  // 2. Queue policy: allow S3 → SendMessage (scoped to the bucket) + optionally a
+  //    cross-account consumer (receive/delete). Merge — preserve other statements.
   const bucketArn = `arn:aws:s3:::${opts.bucket}`;
   const { GetQueueAttributesCommand, SetQueueAttributesCommand } = sqsSdk;
-  const existingPolicy = (await sqs.send(new GetQueueAttributesCommand({ QueueUrl: queue.url, AttributeNames: ["Policy"] }))).Attributes?.["Policy"];
-  const statement = buildIngestQueueStatement(queue.arn, bucketArn, opts.accountId);
-  await sqs.send(new SetQueueAttributesCommand({ QueueUrl: queue.url, Attributes: { Policy: JSON.stringify(mergeQueuePolicy(existingPolicy, statement)) } }));
+  const existingQueuePolicy = (await sqs.send(new GetQueueAttributesCommand({ QueueUrl: queue.url, AttributeNames: ["Policy"] }))).Attributes?.["Policy"];
+  const queueStatements = [buildIngestQueueStatement(queue.arn, bucketArn, opts.accountId)];
+  if (opts.consumerRoleArn) queueStatements.push(buildQueueConsumerStatement(queue.arn, opts.consumerRoleArn));
+  await sqs.send(new SetQueueAttributesCommand({ QueueUrl: queue.url, Attributes: { Policy: JSON.stringify(mergePolicyStatements(existingQueuePolicy, queueStatements)) } }));
 
   // 3. S3 bucket notification: merge our ObjectCreated config for the shared prefix.
   const { GetBucketNotificationConfigurationCommand, PutBucketNotificationConfigurationCommand } = s3Sdk;
@@ -223,6 +277,34 @@ export async function ensureInboundIngestPipeline(opts: IngestPipelineOptions): 
     SkipDestinationValidation: true,
   }));
 
+  // 4. Cross-account: grant the consumer role GetObject on the inbound prefix via
+  //    the bucket policy (merge — MUST preserve the SES PutObject grant).
+  let bucketReaderGranted = false;
+  if (opts.consumerRoleArn) {
+    const { GetBucketPolicyCommand, PutBucketPolicyCommand } = s3Sdk;
+    let existingBucketPolicy: string | undefined;
+    try {
+      existingBucketPolicy = (await s3.send(new GetBucketPolicyCommand({ Bucket: opts.bucket }))).Policy;
+    } catch {
+      // No bucket policy yet — nothing to preserve.
+    }
+    const readerStmt = buildBucketReaderStatement(opts.bucket, prefix, opts.consumerRoleArn);
+    await s3.send(new PutBucketPolicyCommand({ Bucket: opts.bucket, Policy: JSON.stringify(mergePolicyStatements(existingBucketPolicy, [readerStmt])) }));
+    bucketReaderGranted = true;
+  }
+
+  const base = prefix.split("/")[0] || "";
+  const workerSetup = opts.consumerRoleArn ? {
+    iam_policy: {
+      Version: "2012-10-17",
+      Statement: [
+        { Sid: "EmailsIngestReadInbound", Effect: "Allow", Action: ["s3:GetObject"], Resource: base ? `${bucketArn}/${base}/*` : `${bucketArn}/*` },
+        { Sid: "EmailsIngestConsumeQueue", Effect: "Allow", Action: ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"], Resource: queue.arn },
+      ],
+    },
+    ecs_env: { EMAILS_INGEST_S3_BUCKET: opts.bucket, EMAILS_INGEST_QUEUE_URL: queue.url },
+  } : null;
+
   return {
     queue_name: opts.queueName,
     queue_url: queue.url,
@@ -233,5 +315,8 @@ export async function ensureInboundIngestPipeline(opts: IngestPipelineOptions): 
     notification_id: INGEST_NOTIFICATION_ID,
     notification_installed: true,
     removed_overlapping_notifications: removedIds,
+    consumer_role_arn: opts.consumerRoleArn ?? null,
+    bucket_reader_granted: bucketReaderGranted,
+    worker_setup: workerSetup,
   };
 }

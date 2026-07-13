@@ -5,9 +5,6 @@
 // (getDatabase/resetDatabase/:memory:/EMAILS_DB_PATH).
 //
 // Dropped from the local-SQLite version:
-//   - "stores tags": apiMessageToEmail hardcodes `tags: {}` (the /v1 message
-//     mapper does not surface tags), so createEmail no longer round-trips tags.
-//     Reported as a source gap; not patched here.
 //   - the two "lean projection / omits idempotency keys" tests inspected the
 //     local SQL string (recordingDb Proxy, `SELECT *`, column names) and passed a
 //     `db` handle that no longer exists. The meaningful part — idempotency_key is
@@ -113,6 +110,13 @@ describe("createEmail", () => {
     const e = createEmail(providerId, baseOpts, "msg-123");
     expect(e.provider_message_id).toBe("msg-123");
   });
+
+  it("round-trips tags through the /v1 store", () => {
+    const e = createEmail(providerId, { ...baseOpts, tags: { campaign: "launch", tier: "gold" } });
+    expect(e.tags).toEqual({ campaign: "launch", tier: "gold" });
+    // Tags survive a read-back (apiMessageToEmail maps the `tags` object).
+    expect(getEmail(e.id)!.tags).toEqual({ campaign: "launch", tier: "gold" });
+  });
 });
 
 describe("getEmail", () => {
@@ -122,9 +126,9 @@ describe("getEmail", () => {
     expect(found?.id).toBe(e.id);
   });
 
-  it("coerces malformed recipient JSON to empty arrays (tags always empty)", async () => {
+  it("coerces malformed recipient JSON to empty arrays (missing tags → {})", async () => {
     // A /v1 row whose address fields are non-array JSON must map to [] (cstrArray),
-    // and tags are never surfaced by the message mapper (always {}).
+    // and a row with no `tags` maps to {} (cobj of undefined).
     await stub.seed({
       messages: [
         outboundMessage({

@@ -1,8 +1,16 @@
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { setS3SendHandler, resetS3SendHandler } from "../test-support/aws-s3-mock.js";
 
 // ─── Mock AWS SDKs ────────────────────────────────────────────────────────────
+// SES is mocked inline (this file is the last-loaded of the SES mockers only where
+// it matters and its shape is compatible). The S3 mock is SHARED
+// (src/test-support/aws-s3-mock.ts) because a sibling file also drives
+// "@aws-sdk/client-s3" through a dynamic import and bun's process-global module mock
+// caches the first-resolved namespace — see that module's header. We route the
+// shared S3 `send` through this file's `mockS3Send` spy (below) so setupMocks() and
+// call assertions keep working.
 
 const mockSesSend = mock(async (_cmd: unknown) => ({}));
 const mockS3Send = mock(async (_cmd: unknown) => ({}));
@@ -18,21 +26,6 @@ mock.module("@aws-sdk/client-ses", () => ({
   UpdateReceiptRuleCommand: class { constructor(public input: unknown) {} },
 }));
 
-mock.module("@aws-sdk/client-s3", () => ({
-  S3Client: class { send = mockS3Send; },
-  CreateBucketCommand: class { constructor(public input: unknown) {} },
-  PutBucketPolicyCommand: class { constructor(public input: unknown) {} },
-  PutPublicAccessBlockCommand: class { constructor(public input: unknown) {} },
-  PutBucketVersioningCommand: class { constructor(public input: unknown) {} },
-  PutBucketEncryptionCommand: class { constructor(public input: unknown) {} },
-  PutObjectCommand: class { constructor(public input: unknown) {} },
-  HeadBucketCommand: class { constructor(public input: unknown) {} },
-  HeadObjectCommand: class { constructor(public input: unknown) {} },
-  ListObjectsV2Command: class { constructor(public input: unknown) {} },
-  GetObjectCommand: class { constructor(public input: unknown) {} },
-  CopyObjectCommand: class { constructor(public input: unknown) {} },
-}));
-
 const { setupInboundEmail, buildSesBucketPolicy } = await import("./aws-inbound.js");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -40,7 +33,12 @@ const { setupInboundEmail, buildSesBucketPolicy } = await import("./aws-inbound.
 beforeEach(() => {
   mockSesSend.mockReset();
   mockS3Send.mockReset();
+  // The shared S3 mock delegates to this file's spy so constructor.name dispatch
+  // (setupMocks) and any call assertions observe the commands the source sends.
+  setS3SendHandler((cmd) => mockS3Send(cmd));
 });
+
+afterEach(() => resetS3SendHandler());
 
 function setupMocks(bucketExists = false) {
   mockS3Send.mockImplementation(async (cmd: unknown) => {

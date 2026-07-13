@@ -1,4 +1,5 @@
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { setS3SendHandler, resetS3SendHandler, type S3Command } from "../test-support/aws-s3-mock.js";
 
 // ── SDK mocks (intercept the orchestrator's dynamic imports) ──────────────────
 // Mutable fixtures the mocks read, so tests can vary existing bucket state.
@@ -15,19 +16,11 @@ function cmd(type: string) {
   };
 }
 
-// NOTE (cross-file mock isolation): bun's `mock.module` is PROCESS-GLOBAL and the
-// resolved module namespace is cached the first time it is imported. The sibling
-// file src/lib/aws-inbound.test.ts (out of scope for this migration) also mocks
-// "@aws-sdk/client-s3" with a DIFFERENT, incompatible shape (a configurable
-// `send` spy and no Get/PutBucketNotificationConfiguration commands). Whichever
-// file's test resolves the module first wins the single cached namespace for the
-// whole process; a `beforeEach` re-registration cannot bust an already-cached
-// namespace, and a shared superset cannot satisfy both (their `S3Client.send`
-// contracts differ). This file therefore passes standalone and within this
-// migration's test set; in a full `bun test` run where aws-inbound.test.ts
-// resolves the SDK first, the two orchestrator cases below fail. The real fix is
-// out of scope: migrate aws-inbound.test.ts too, or enable per-file test
-// isolation.
+// SQS is mocked only by this file, so an inline mock.module is safe. The S3 mock is
+// SHARED (src/test-support/aws-s3-mock.ts) because a sibling test file also drives
+// "@aws-sdk/client-s3" through a dynamic import and bun's process-global module mock
+// caches the first-resolved namespace — see that module's header. We install this
+// file's S3 `send` behavior via setS3SendHandler in beforeEach below.
 mock.module("@aws-sdk/client-sqs", () => ({
   SQSClient: class {
     async send(c: { __type: string; input: Record<string, unknown> }) {
@@ -49,24 +42,6 @@ mock.module("@aws-sdk/client-sqs", () => ({
   SetQueueAttributesCommand: cmd("SetQueueAttributes"),
 }));
 
-mock.module("@aws-sdk/client-s3", () => ({
-  S3Client: class {
-    async send(c: { __type: string; input: Record<string, unknown> }) {
-      s3Calls.push({ type: c.__type, input: c.input });
-      if (c.__type === "GetBucketNotificationConfiguration") return existingNotification;
-      if (c.__type === "GetBucketPolicy") {
-        if (existingBucketPolicy === undefined) { const e = new Error("no policy"); (e as Error).name = "NoSuchBucketPolicy"; throw e; }
-        return { Policy: existingBucketPolicy };
-      }
-      return {};
-    }
-  },
-  GetBucketNotificationConfigurationCommand: cmd("GetBucketNotificationConfiguration"),
-  PutBucketNotificationConfigurationCommand: cmd("PutBucketNotificationConfiguration"),
-  GetBucketPolicyCommand: cmd("GetBucketPolicy"),
-  PutBucketPolicyCommand: cmd("PutBucketPolicy"),
-}));
-
 const {
   prefixesOverlap,
   buildIngestQueueStatement,
@@ -83,7 +58,21 @@ beforeEach(() => {
   existingBucketPolicy = undefined;
   sqsCalls = [];
   s3Calls = [];
+  // Install this file's S3 send behavior on the shared mock (see aws-s3-mock.ts).
+  setS3SendHandler((c: S3Command) => {
+    s3Calls.push({ type: c.__type, input: c.input });
+    if (c.__type === "GetBucketNotificationConfiguration") return existingNotification;
+    if (c.__type === "GetBucketPolicy") {
+      if (existingBucketPolicy === undefined) {
+        const e = new Error("no policy"); (e as Error).name = "NoSuchBucketPolicy"; throw e;
+      }
+      return { Policy: existingBucketPolicy };
+    }
+    return {};
+  });
 });
+
+afterEach(() => resetS3SendHandler());
 
 // ── pure helpers ─────────────────────────────────────────────────────────────
 

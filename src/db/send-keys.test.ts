@@ -1,21 +1,15 @@
-// Self-hosted-ONLY: scoped send keys. The `send-keys` /v1 resource is
-// summary-only — the secret `key_hash` is NEVER stored on or fetched by a
-// client, so minting and token verification have NO client-side equivalent and
-// FAIL LOUD (they run on the authoritative server). Exercises the REAL
-// synchronous curl transport against an out-of-process /v1 stub
-// (see src/test-support/v1-stub.ts).
+// Self-hosted-ONLY: scoped send keys. The generic `send-keys` /v1 resource is
+// summary-only — the secret `key_hash` is NEVER stored on or fetched by a client
+// — but minting and token verification are bespoke server operations exposed at
+// POST /v1/send-keys/mint and POST /v1/send-keys/verify. The client holds only the
+// one-time token; the hash stays on the server. Exercises the REAL synchronous
+// curl transport against an out-of-process /v1 stub (see src/test-support/v1-stub.ts),
+// whose mint/verify handlers mirror the server contract.
 //
-// Migrated from the deleted local-SQLite pattern. Dropped tests covered deleted
-// local behavior:
-//   - local token mint + hash verification (issue/verify, revoked-no-longer-
-//     verifies via a live token, assertSendAuthorized success path): a
-//     client-minted key would be unverifiable, so createSendKey / verifySendKey
-//     / assertSendAuthorized now throw. Their fail-loud contract is asserted
-//     instead.
-//   - SQL-projection / hash-absence-in-SQL assertions inspected local SQL that
-//     no longer exists; the /v1 summary rows simply carry no key_hash.
-// List/get/revoke still route to /v1 and are seeded with explicit created_at for
-// deterministic ordering (the old `UPDATE ... SET created_at` is gone).
+// Migrated from the deleted local-SQLite pattern. SQL-projection / hash-absence-
+// in-SQL assertions inspected local SQL that no longer exists; the /v1 summary
+// rows simply carry no key_hash. List/get/revoke route to /v1 and are seeded with
+// explicit created_at for deterministic ordering.
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
@@ -59,20 +53,49 @@ function keyRow(overrides: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-describe("send keys — fail-loud on client-side mint / verify", () => {
-  it("createSendKey is not available in the self-hosted client", () => {
-    expect(() => createSendKey("owner-1", "ci")).toThrow(
-      /not available in the self-hosted client|not supported|operator-issued service API key/,
-    );
+describe("send keys — /v1 mint + verify", () => {
+  it("mints a key via /v1, returns the token once, and never exposes the hash", () => {
+    const agent = createOwner({ type: "agent", name: "minter" });
+    const { token, key } = createSendKey(agent.id, "ci");
+    expect(token).toMatch(/^esk_/);
+    expect(key.owner_id).toBe(agent.id);
+    expect(key.label).toBe("ci");
+    expect(key.key_hash).toBe(""); // never exposed to the client
+    expect(key.prefix.length).toBeGreaterThan(0);
+    // The minted key is listable via the summary-only /v1 resource.
+    expect(listSendKeys(agent.id).map((k) => k.id)).toContain(key.id);
   });
 
-  it("verifySendKey is not available in the self-hosted client", () => {
-    expect(() => verifySendKey("esk_nope")).toThrow(/not available in the self-hosted client/);
-    expect(() => verifySendKey("garbage")).toThrow(/not available in the self-hosted client/);
+  it("verifySendKey resolves a valid token and rejects unknown/revoked ones", () => {
+    const agent = createOwner({ type: "agent", name: "verifier" });
+    const { token, key } = createSendKey(agent.id);
+    const resolved = verifySendKey(token);
+    expect(resolved).not.toBeNull();
+    expect(resolved!.id).toBe(key.id);
+    expect(resolved!.owner_id).toBe(agent.id);
+    expect(resolved!.key_hash).toBe("");
+    // Unknown token → null (not an error).
+    expect(verifySendKey("esk_unknown")).toBeNull();
+    // A revoked key stops verifying.
+    revokeSendKey(key.id);
+    expect(verifySendKey(token)).toBeNull();
   });
 
-  it("assertSendAuthorized is not available in the self-hosted client", () => {
-    expect(() => assertSendAuthorized("esk_bogus", "ops@x.com")).toThrow(/not available in the self-hosted client/);
+  it("assertSendAuthorized enforces the From scope and returns the owner", () => {
+    const agent = createOwner({ type: "agent", name: "sender" });
+    const mine = createAddress({ provider_id: PROVIDER_ID, email: "ops@x.com" });
+    assignAddressOwner(mine.id, agent.id);
+    createAddress({ provider_id: PROVIDER_ID, email: "other@x.com" });
+    const { token } = createSendKey(agent.id);
+
+    const owner = assertSendAuthorized(token, "ops@x.com");
+    expect(owner.id).toBe(agent.id);
+    expect(owner.name).toBe("sender");
+
+    // Out-of-scope From is denied.
+    expect(() => assertSendAuthorized(token, "other@x.com")).toThrow(/not authorized/i);
+    // Invalid token is rejected.
+    expect(() => assertSendAuthorized("esk_bogus", "ops@x.com")).toThrow(/invalid or revoked/i);
   });
 });
 

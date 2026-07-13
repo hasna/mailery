@@ -2,7 +2,7 @@ import type { Email, EmailFilter, EmailStatus, SendEmailOptions } from "../types
 import { EmailNotFoundError } from "../types/index.js";
 import { now, uuid } from "./runtime.js";
 import { canonicalSender } from "../lib/email-address.js";
-import { selfHostedResource, selfHostedListQuery, selfHostedPage, carray, cstrArray, ciso, cnum, cstr, cstrOrNull } from "./self-hosted-resource.js";
+import { selfHostedResource, selfHostedListQuery, selfHostedPage, carray, cobj, cstrArray, ciso, cnum, cstr, cstrOrNull } from "./self-hosted-resource.js";
 
 // The outbound sent-ledger (`email list` / `log` / `search`) is backed by the
 // shared `/v1/messages` store. A message row maps to the local Email shape; only
@@ -31,7 +31,7 @@ function apiMessageToEmail(e: Record<string, unknown>): Email {
     status,
     has_attachments: attachCount > 0,
     attachment_count: attachCount,
-    tags: {},
+    tags: cobj(e["tags"]) as Record<string, string>,
     sent_at: sentAt,
     created_at: createdAt,
     updated_at: ciso(e["updated_at"], createdAt),

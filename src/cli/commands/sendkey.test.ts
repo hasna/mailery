@@ -1,8 +1,8 @@
 // Self-hosted-ONLY: the send-keys resource is summary-only (the secret key_hash
-// never leaves the server). Listing/revoking/checking route to `/v1`, so these
-// tests drive the REAL command against an out-of-process /v1 stub (see
-// src/test-support/v1-stub.ts). Minting a key still fails loud because it runs on
-// the authoritative self-hosted server. No local SQLite exists anymore.
+// never leaves the server). Listing/revoking/checking route to `/v1`, and minting
+// routes to the bespoke POST /v1/send-keys/mint endpoint (token returned once), so
+// these tests drive the REAL command against an out-of-process /v1 stub (see
+// src/test-support/v1-stub.ts). No local SQLite exists anymore.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
 import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
@@ -22,30 +22,6 @@ async function runSendKeyCommand(args: string[]) {
   });
   await program.parseAsync(["node", "emails", ...args]);
   return { data, out: out.join("\n") };
-}
-
-async function runSendKeyCommandExpectingError(args: string[]): Promise<string> {
-  const program = new Command();
-  program.exitOverride();
-  const errors: string[] = [];
-  const originalError = console.error;
-  const originalExit = process.exit;
-  console.error = ((...a: unknown[]) => {
-    errors.push(a.map(String).join(" "));
-  }) as typeof console.error;
-  process.exit = ((code?: number) => {
-    throw new Error(`exit:${code ?? 0}`);
-  }) as typeof process.exit;
-  registerSendKeyCommands(program, () => {});
-  try {
-    await program.parseAsync(["node", "emails", ...args]);
-  } catch {
-    // handleError exits via the stubbed process.exit (or commander throws).
-  } finally {
-    console.error = originalError;
-    process.exit = originalExit;
-  }
-  return errors.join("\n");
 }
 
 beforeAll(async () => {
@@ -91,7 +67,7 @@ describe("sendkey list command", () => {
 });
 
 describe("sendkey create command", () => {
-  it("fails loud because minting a send key runs on the self-hosted server", async () => {
+  it("mints a send key via /v1 and returns the token once", async () => {
     await stub.seed({
       owners: [{
         id: "o-1",
@@ -102,10 +78,18 @@ describe("sendkey create command", () => {
       }],
     });
 
-    const errors = await runSendKeyCommandExpectingError(["sendkey", "create", "sk-owner"]);
+    const result = await runSendKeyCommand(["sendkey", "create", "sk-owner", "--label", "ci"]);
+    const data = result.data as { id: string; token: string; owner_id: string; label: string | null };
 
-    expect(errors).toContain(
-      "Creating a send key is not available in the self-hosted client; it runs on the self-hosted server.",
-    );
+    expect(data.token).toMatch(/^esk_/);
+    expect(data.owner_id).toBe("o-1");
+    expect(data.label).toBe("ci");
+    expect(data.id.length).toBeGreaterThan(0);
+
+    // The minted key is now listable via /v1 (summary only, no hash).
+    const list = await runSendKeyCommand(["sendkey", "list", "--owner", "sk-owner"]);
+    const keys = list.data as Array<Record<string, unknown> & { id: string }>;
+    expect(keys.map((k) => k.id)).toContain(data.id);
+    expect(keys.every((k) => !("key_hash" in k))).toBe(true);
   });
 });

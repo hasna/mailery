@@ -70,6 +70,9 @@ const DEFAULT_API_KEY = "hasna_emails_stub_key_0123456789";
 const SERVER_SRC = String.raw`
 const KEY = process.env.V1_STUB_API_KEY || "";
 let store = safeParse(process.env.V1_STUB_SEED);
+// Secret token -> send-key id map. Kept OUT of the store object so it is never
+// returned by __dump (a send token must never leave the server). Cleared on __reset.
+let sendTokens = {};
 
 function safeParse(raw) {
   if (!raw) return {};
@@ -96,6 +99,29 @@ function hasLabel(row, label) {
   return Array.isArray(row.labels) && row.labels.some(function (v) { return String(v).toLowerCase() === label; });
 }
 function isOutbound(row) { return String(row.direction || "").toLowerCase() === "outbound"; }
+
+// Send-key From-scope check, mirroring the server: an owner may send from an
+// address it OWNS or ADMINISTERS. Canonicalizes the From (a single angle-addr or a
+// bare email); an ambiguous/multi-angle From is denied (spoofing resistance).
+function canonicalFrom(value) {
+  const s = String(value == null ? "" : value).trim().toLowerCase();
+  if (!s) return "";
+  const angles = s.match(/<[^>]*>/g);
+  if (angles && angles.length === 1) {
+    const inner = angles[0].slice(1, -1).trim();
+    return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(inner) ? inner : "";
+  }
+  if (angles && angles.length > 1) return "";
+  return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(s) ? s : "";
+}
+function isOwnerAuthorizedFrom(ownerId, from) {
+  const email = canonicalFrom(from);
+  if (!email || !ownerId) return false;
+  return rowsFor("addresses").some(function (a) {
+    return String(a.email == null ? "" : a.email).toLowerCase() === email &&
+      (String(a.owner_id) === String(ownerId) || String(a.administrator_id) === String(ownerId));
+  });
+}
 
 function listMessages(params) {
   let ordered = rowsFor("messages").slice().sort(function (a, b) {
@@ -163,6 +189,7 @@ const server = Bun.serve({
     if (req.method === "POST" && parts[0] === "v1" && parts[1] === "__reset") {
       const body = await req.json().catch(function () { return {}; });
       store = body && body.resources ? body.resources : {};
+      sendTokens = {};
       return json({ ok: true });
     }
     if (req.method === "GET" && parts[0] === "v1" && parts[1] === "__dump") {
@@ -193,6 +220,39 @@ const server = Bun.serve({
     }
     if (resource === "messages" && id === undefined && req.method === "GET") {
       return json({ messages: listMessages(url.searchParams) });
+    }
+
+    // Scoped send keys: bespoke mint/verify (matched before the generic matcher so
+    // "mint"/"verify" are not read as a send-key id). Mirrors the server: the token
+    // and its hash live ONLY here; the generic /v1/send-keys resource is summary-only.
+    if (resource === "send-keys" && sub === "mint" && req.method === "POST") {
+      const body = await req.json().catch(function () { return {}; });
+      const ownerId = String(body.owner_id == null ? "" : body.owner_id).trim();
+      if (!ownerId) return json({ error: "owner_id is required" }, 400);
+      const label = body.label == null ? null : String(body.label);
+      const ts = new Date().toISOString();
+      const token = "esk_" + crypto.randomUUID().replace(/-/g, "");
+      const keyId = crypto.randomUUID();
+      const key = {
+        id: keyId, owner_id: ownerId, prefix: token.slice(0, 12), label: label,
+        last_used_at: null, revoked_at: null, created_at: ts, updated_at: ts,
+      };
+      rowsFor("send-keys").push(key);
+      sendTokens[token] = keyId;
+      return json({ token: token, key: key }, 201);
+    }
+    if (resource === "send-keys" && sub === "verify" && req.method === "POST") {
+      const body = await req.json().catch(function () { return {}; });
+      const token = typeof body.token === "string" ? body.token : "";
+      if (!token.trim()) return json({ error: "token is required" }, 400);
+      const keyId = sendTokens[token];
+      const key = keyId ? rowsFor("send-keys").find(function (r) { return String(r.id) === String(keyId); }) : null;
+      if (!key || key.revoked_at) return json({ valid: false, authorized: false, key: null });
+      key.last_used_at = new Date().toISOString();
+      key.updated_at = key.last_used_at;
+      const from = typeof body.from === "string" ? body.from.trim() : "";
+      if (!from) return json({ valid: true, authorized: false, key: key });
+      return json({ valid: true, authorized: isOwnerAuthorizedFrom(key.owner_id, from), key: key });
     }
 
     const rows = rowsFor(resource);

@@ -15,12 +15,10 @@
 //     mailbox_message_state canonical tables (folder_id, is_spam, is_trash),
 //     which have no /v1 equivalent on the client.
 //
-// NOTE (reported to the parent agent): setInboundArchived / setInboundArchivedFlag
-// / setInboundArchivedSummary PATCH an `archived` FIELD, but is_archived and the
-// archived list filter are derived from an `archived` LABEL (v1HasLabel). Against
-// the generic /v1 stub the write therefore does not surface as is_archived=true.
-// The archived READ/FILTER path is still verified below by seeding the label
-// directly; the archived WRITE round-trip is left to the server and not asserted.
+// The archived WRITE now moves the `archived` LABEL (which is_archived and the
+// archived filter derive from) as well as sending the `archived` convenience field
+// the server understands, so the round-trip holds through the generic /v1 store —
+// asserted below.
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect } from "bun:test";
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
@@ -29,6 +27,7 @@ import {
   setInboundRead, setInboundStarred,
   setInboundReadSummary, setInboundStarredSummary,
   setInboundReadFlag, setInboundStarredFlag,
+  setInboundArchived, setInboundArchivedSummary, setInboundArchivedFlag,
   addInboundLabel, removeInboundLabel, addInboundLabelSummary, removeInboundLabelSummary,
   getUnreadCount,
 } from "./inbound.js";
@@ -130,6 +129,37 @@ describe("inbound archive / star", () => {
     const b = seed("star");
     setInboundStarred(b.id, true);
     expect(listInboundEmails({ starred: true }).map((e) => e.subject)).toEqual(["star"]);
+  });
+
+  it("archive write round-trips: is_archived flips and the archived filter follows", () => {
+    const e = seed("to-archive");
+    expect(e.is_archived).toBe(false);
+
+    const archived = setInboundArchived(e.id, true);
+    expect(archived.is_archived).toBe(true);
+    expect(archived.label_ids).toContain("archived");
+    // Hidden from the default list, visible with archived:true.
+    expect(listInboundEmails({}).map((m) => m.subject)).not.toContain("to-archive");
+    expect(listInboundEmails({ archived: true }).map((m) => m.subject)).toEqual(["to-archive"]);
+    // Re-reading confirms the persisted state.
+    expect(getInboundEmail(e.id)!.is_archived).toBe(true);
+
+    // Unarchive removes the label and returns it to the inbox.
+    const restored = setInboundArchived(e.id, false);
+    expect(restored.is_archived).toBe(false);
+    expect(restored.label_ids).not.toContain("archived");
+    expect(listInboundEmails({}).map((m) => m.subject)).toContain("to-archive");
+  });
+
+  it("archived summary/flag variants also move the label", () => {
+    const e = seed("archive-variants");
+    const summary = setInboundArchivedSummary(e.id, true);
+    expect(summary.is_archived).toBe(true);
+    expect("text_body" in summary).toBe(false);
+    expect(getInboundEmail(e.id)!.is_archived).toBe(true);
+
+    expect(setInboundArchivedFlag(e.id, false)).toBe(false);
+    expect(getInboundEmail(e.id)!.is_archived).toBe(false);
   });
 });
 

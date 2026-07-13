@@ -572,16 +572,31 @@ export function setInboundReadFlag(id: string, read: boolean): boolean {
   return read;
 }
 
+// The archived STATE is derived on read from the `archived` LABEL (v1HasLabel),
+// so the write must move that label — not set an out-of-band `archived` field the
+// read path never consults. We PATCH the recomputed `labels` array (which the
+// generic /v1 store persists and the read derives from) AND keep the `archived`
+// convenience field the authoritative server understands, so the round-trip holds
+// against both the generic resource store and the server's message endpoint.
+function setInboundArchivedState(id: string, archived: boolean): Record<string, unknown> {
+  const store = messagesStore();
+  const current = store.get(id);
+  if (!current) throw new Error(`Inbound email not found: ${id}`);
+  const labels = v1Labels(current).filter((l) => l.trim().toLowerCase() !== "archived");
+  if (archived) labels.push("archived");
+  return store.update(id, { archived, labels });
+}
+
 export function setInboundArchived(id: string, archived: boolean): InboundEmail {
-  return apiToInboundEmail(messagesStore().update(id, { archived }));
+  return apiToInboundEmail(setInboundArchivedState(id, archived));
 }
 
 export function setInboundArchivedSummary(id: string, archived: boolean): InboundEmailSummary {
-  return apiToInboundEmailSummary(messagesStore().update(id, { archived }));
+  return apiToInboundEmailSummary(setInboundArchivedState(id, archived));
 }
 
 export function setInboundArchivedFlag(id: string, archived: boolean): boolean {
-  messagesStore().update(id, { archived });
+  setInboundArchivedState(id, archived);
   return archived;
 }
 

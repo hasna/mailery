@@ -2,18 +2,25 @@
  * Scoped send keys — a credential bound to one owner (an agent or human). A key
  * authorizes sending only from addresses that owner OWNS or ADMINISTERS.
  *
- * Self-hosted-ONLY: the `send-keys` resource is summary-only — the secret
- * `key_hash` is NEVER stored on or fetched by a client (token verification is
- * server-side). Minting and verification therefore have no client-side /v1
- * equivalent and run on the authoritative server.
+ * Self-hosted-ONLY: the generic `send-keys` /v1 resource is summary-only — the
+ * secret `key_hash` is NEVER stored on or fetched by a client. Minting and token
+ * verification are bespoke server operations exposed at dedicated endpoints:
+ *   - POST /v1/send-keys/mint   { owner_id, label } -> { token, key }
+ *   - POST /v1/send-keys/verify { token, from? }    -> { valid, authorized, key }
+ * The token/hash never leaves the server; the client only ever holds the one-time
+ * token (returned by mint) and passes it back through verify. The token value is
+ * carried in the request body over the same authenticated transport and is never
+ * logged.
  */
 import { now } from "./runtime.js";
-import { getAddressOwnership, type Owner } from "./owners.js";
+import { getAddressOwnership, getOwner, type Owner } from "./owners.js";
 import { findAddressesByEmail } from "./addresses.js";
 import { canonicalSender } from "../lib/email-address.js";
-import { selfHostedResource, selfHostedListQuery, selfHostedPage, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
+import { selfHostedResource, selfHostedListQuery, selfHostedPage, cbool, cobj, ciso, cstr, cstrOrNull } from "./self-hosted-resource.js";
 
 const SEND_KEY_RESOURCE = "send-keys";
+const SEND_KEY_MINT_RESOURCE = "send-keys/mint";
+const SEND_KEY_VERIFY_RESOURCE = "send-keys/verify";
 
 function apiToSendKeySummary(e: Record<string, unknown>): SendKeySummary {
   return {
@@ -58,14 +65,14 @@ function bareEmail(from: string): string {
   return canonicalSender(from) ?? "";
 }
 
-export function createSendKey(_ownerId: string, _label?: string): { token: string; key: SendKey } {
-  // A send key's SHA-256 hash MUST live on the authoritative server that
-  // verifies it. The self-hosted `send-keys` resource is summary-only (no
-  // key_hash column), so a client-minted key could never be verified. Refuse
-  // until the server exposes a dedicated mint endpoint.
-  throw new Error(
-    "Creating a send key is not available in the self-hosted client; it runs on the self-hosted server.",
-  );
+export function createSendKey(ownerId: string, label?: string): { token: string; key: SendKey } {
+  // Mint on the server: it generates the token, stores only its hash, and returns
+  // the token ONCE. The client keeps the token in-hand (never logged) and a
+  // hash-free key summary.
+  const res = selfHostedResource(SEND_KEY_MINT_RESOURCE).create({ owner_id: ownerId, label: label ?? null });
+  const token = cstr(res["token"]);
+  const key = summaryToKey(apiToSendKeySummary(cobj(res["key"])));
+  return { token, key };
 }
 
 export function getSendKey(id: string): SendKey | null {
@@ -73,13 +80,13 @@ export function getSendKey(id: string): SendKey | null {
   return record ? summaryToKey(apiToSendKeySummary(record)) : null;
 }
 
-/** Resolve a token to its (non-revoked) key, stamping last_used_at. */
-export function verifySendKey(_token: string): SendKey | null {
-  // Token verification requires the secret key_hash, which is never exposed to
-  // the client; the server authenticates send keys on `/v1/send`.
-  throw new Error(
-    "verifySendKey is not available in the self-hosted client; it runs on the self-hosted server.",
-  );
+/** Resolve a token to its (non-revoked) key, stamping last_used_at server-side. */
+export function verifySendKey(token: string): SendKey | null {
+  // The server holds the hash; it resolves the token and returns a hash-free key
+  // (or valid:false for an unknown/revoked token).
+  const res = selfHostedResource(SEND_KEY_VERIFY_RESOURCE).create({ token });
+  if (!cbool(res["valid"]) || res["key"] == null) return null;
+  return summaryToKey(apiToSendKeySummary(cobj(res["key"])));
 }
 
 export function listSendKeys(ownerId?: string, opts?: ListSendKeyOptions): SendKey[] {
@@ -144,9 +151,19 @@ export function canOwnerSendFrom(ownerId: string, fromEmail: string): boolean {
  * Verify a send key and confirm it is authorized to send from `fromEmail`.
  * Throws on an invalid/revoked key or an out-of-scope From. Returns the owner.
  */
-export function assertSendAuthorized(_token: string, _fromEmail: string): Owner {
-  // Depends on verifySendKey, which is server-side only (see above).
-  throw new Error(
-    "assertSendAuthorized is not available in the self-hosted client; it runs on the self-hosted server.",
-  );
+export function assertSendAuthorized(token: string, fromEmail: string): Owner {
+  // The server verifies the token AND performs the from-address scope check in one
+  // call (default-deny: `authorized` is only true for an actual owned/administered
+  // From). The client never sees the key hash.
+  const res = selfHostedResource(SEND_KEY_VERIFY_RESOURCE).create({ token, from: fromEmail });
+  if (!cbool(res["valid"]) || res["key"] == null) {
+    throw new Error("Send key is invalid or revoked");
+  }
+  if (!cbool(res["authorized"])) {
+    throw new Error(`Send key is not authorized to send from ${bareEmail(fromEmail)}`);
+  }
+  const key = apiToSendKeySummary(cobj(res["key"]));
+  const owner = getOwner(key.owner_id);
+  if (!owner) throw new Error("Send key owner no longer exists");
+  return owner;
 }

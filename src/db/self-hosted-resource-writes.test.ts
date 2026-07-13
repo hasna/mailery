@@ -1,9 +1,9 @@
 // End-to-end proof that the resource repositories route WRITES to the selfHosted /v1
 // API in selfHosted mode (not the local SQLite island) — the write half of the
 // split-brain fix. Reads were already routed (see self-hosted-resource-routing.test.ts);
-// this covers createOwner, createGroup, and contact suppress/unsuppress, plus the
-// deliberate fail-loud for send-key creation (the selfHosted store holds no secret
-// hash, so a locally-minted key would be unverifiable / split-brain).
+// this covers createOwner, createGroup, and contact suppress/unsuppress, plus
+// send-key minting (which POSTs to the bespoke /v1/send-keys/mint endpoint — the
+// token/hash are server-minted and only a hash-free key summary reaches the client).
 //
 // A stateful stub /v1 server runs OUT OF PROCESS (the repo layer's selfHosted client
 // is synchronous curl, which cannot reach an in-process Bun.serve). The local DB
@@ -25,6 +25,7 @@ const groups = [];
 const contacts = [];
 const templates = [];
 const sequences = [];
+const sendKeys = [];
 let seq = 0;
 const nid = (p) => p + (++seq);
 const now = "2026-01-01T00:00:00Z";
@@ -82,6 +83,13 @@ const server = Bun.serve({ port: 0, async fetch(req) {
     const s = { id: nid("s"), name: body.name, description: body.description ?? null, status: body.status ?? "active", created_at: now, updated_at: now };
     sequences.push(s);
     return ok(s, 201);
+  }
+
+  if (p === "/v1/send-keys" && m === "GET") return ok({ items: sendKeys });
+  if (p === "/v1/send-keys/mint" && m === "POST") {
+    const k = { id: nid("sk"), owner_id: body.owner_id, prefix: "esk_stubpref", label: body.label ?? null, last_used_at: null, revoked_at: null, created_at: now, updated_at: now };
+    sendKeys.push(k);
+    return ok({ token: "esk_stub_" + k.id, key: k }, 201);
   }
 
   const cm = p.match(/^\\/v1\\/contacts\\/([^/]+)$/);
@@ -184,7 +192,14 @@ describe("resource repos route writes to selfHosted in selfHosted mode", () => {
     expect(listSequences().some((x) => x.name === "onboarding")).toBe(true);
   });
 
-  test("createSendKey FAILS LOUD in selfHosted mode instead of a silent local mint", () => {
-    expect(() => createSendKey("o1", "ci")).toThrow(/not available in the self-hosted client|not supported|operator-issued service API key/);
+  test("createSendKey POSTs to /v1/send-keys/mint and returns a hash-free key", () => {
+    const owner = createOwner({ type: "agent", name: "Key Owner" });
+    const { token, key } = createSendKey(owner.id, "ci");
+    // The token is server-minted (routed to the selfHosted, not a local island).
+    expect(token).toStartWith("esk_");
+    expect(key.owner_id).toBe(owner.id);
+    expect(key.label).toBe("ci");
+    // The client never receives the secret hash.
+    expect(key.key_hash).toBe("");
   });
 });

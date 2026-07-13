@@ -1,5 +1,13 @@
 /** @jsxImportSource @opentui/solid */
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+// Self-hosted-ONLY: the TUI reads/writes the operator `/v1` API (createProvider,
+// createAddress, storeInboundEmail, createDomain, and the mail data source all
+// route there). These tests drive the REAL App against an out-of-process /v1 stub
+// (see src/test-support/v1-stub.ts). The manual "Pull" affordance was LOCAL
+// S3→SQLite ingestion and no longer exists in the self-hosted-only client, so the
+// former local-Pull tests are gone and the self-hosted case simply asserts Pull is
+// absent. Local TUI settings writes throw in self_hosted mode, so the old
+// setSetting() calls (and the autopull mock) are removed.
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui";
 import { KeymapProvider } from "@opentui/keymap/solid";
 import { testRender, useRenderer, type TestRendererSetup } from "@opentui/solid";
@@ -9,28 +17,29 @@ import { join } from "node:path";
 import { onCleanup } from "solid-js";
 import { createAddress, markVerified } from "../../db/addresses.js";
 import { createDomain } from "../../db/domains.js";
-import { saveEmailAgentRun } from "../../db/email-agents.js";
 import { storeInboundEmail } from "../../db/inbound.js";
 import { createProvider } from "../../db/providers.js";
-import { setSetting } from "./data.js";
-import { registerS3Source } from "../../lib/s3-sync.js";
+import { toggleRead, type TuiMessage } from "./data.js";
 import { App } from "./App.js";
 import { resolveAddressChoice } from "../tui-solid/context/emails-state.js";
-import { resetMailDataSource } from "../../lib/mail-data-source.js";
+import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 
-let autoPullCalls = 0;
-let autoPullResult = { pulled: 2, ok: true, configured: true, reason: undefined as string | undefined };
-mock.module("./autopull.js", () => ({
-  autoPull: mock(async () => {
-    autoPullCalls += 1;
-    return autoPullResult;
-  }),
-}));
-
+let stub: V1Stub;
 let savedHome: string | undefined;
 let tmpHome = "";
 let providerId = "";
 let setup: TestRendererSetup | null = null;
+
+// data.ts caches the full message scan for a short window; direct seeding does not
+// invalidate it, so bust it between tests (a data.ts mutation nulls the cache; the
+// 404 PATCH on the empty store is expected).
+function bustScanCache(): void {
+  try {
+    toggleRead({ kind: "inbound", id: "__cache_bust__", is_read: false } as TuiMessage);
+  } catch {
+    // Expected 404 — the cache was already nulled as a side effect.
+  }
+}
 
 function Harness(props: { initialMailbox?: "inbox" | "unread" | "starred" | "sent" | "archived" | "spam" | "trash" }) {
   const renderer = useRenderer();
@@ -43,36 +52,29 @@ function Harness(props: { initialMailbox?: "inbox" | "unread" | "starred" | "sen
   );
 }
 
-beforeEach(() => {
-  process.env["EMAILS_DB_PATH"] = ":memory:";
+beforeAll(async () => {
+  stub = await startV1Stub();
+});
+afterAll(() => stub.stop());
+
+beforeEach(async () => {
   process.env["EMAILS_TUI_DISABLE_THEME_PROBE"] = "1";
   process.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"] = "1";
   savedHome = process.env["HOME"];
   tmpHome = mkdtempSync(join(tmpdir(), "emails-solid-tui-"));
   process.env["HOME"] = tmpHome;
-  delete process.env["EMAILS_MODE"];
-  delete process.env["HASNA_EMAILS_MODE"];
-  delete process.env["EMAILS_SELF_HOSTED_URL"];
-  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
-  resetMailDataSource();
+  await stub.reset();
+  stub.applyEnv();
+  bustScanCache();
   providerId = createProvider({ name: "sandbox", type: "sandbox", active: true }).id;
   const address = createAddress({ provider_id: providerId, email: "ops@example.com" });
   markVerified(address.id);
-  setSetting("autoPull", false);
-  setSetting("defaultAddress", null);
-  autoPullCalls = 0;
-  autoPullResult = { pulled: 2, ok: true, configured: true, reason: undefined };
 });
 
 afterEach(() => {
   setup?.renderer.destroy();
   setup = null;
-  delete process.env["EMAILS_MODE"];
-  delete process.env["HASNA_EMAILS_MODE"];
-  delete process.env["EMAILS_SELF_HOSTED_URL"];
-  delete process.env["EMAILS_SELF_HOSTED_API_KEY"];
-  resetMailDataSource();
-  delete process.env["EMAILS_DB_PATH"];
+  stub.clearEnv();
   delete process.env["EMAILS_TUI_DISABLE_THEME_PROBE"];
   delete process.env["EMAILS_TUI_CLIPBOARD_DRY_RUN"];
   if (savedHome === undefined) delete process.env["HOME"];
@@ -240,8 +242,11 @@ describe("Emails Solid TUI", () => {
   });
 
   it("opens attachment details from the reader", async () => {
+    // Self-hosted derives attachment metadata (filename/type/size) from the server;
+    // local file paths (local_path/s3_url) have no /v1 equivalent, so the reader shows
+    // the metadata but not a local `file://` link.
     seedMessage("has attachment", "2026-01-01T10:00:00.000Z", "ops@example.com", [], [
-      { filename: "invoice.pdf", content_type: "application/pdf", size: 2048, local_path: "/tmp/invoice.pdf" },
+      { filename: "invoice.pdf", content_type: "application/pdf", size: 2048 },
     ]);
     await renderApp();
 
@@ -253,29 +258,15 @@ describe("Emails Solid TUI", () => {
     expect(frame()).toContain("invoice.pdf");
     expect(frame()).toContain("application/pdf");
     expect(frame()).toContain("2 KB");
-    expect(frame()).toContain("file:///tmp/invoice.pdf");
     expect(frame()).toContain("Copy all attachment links");
   });
 
-  it("renders AI summaries below the email body in the reader", async () => {
-    const email = seedMessage("summary bottom", "2026-01-01T10:00:00.000Z");
-    saveEmailAgentRun({
-      agent_key: "categorizer",
-      inbound_email_id: email.id,
-      provider: "external",
-      model: "test",
-      status: "ok",
-      summary: "AI summary belongs below the email body.",
-    });
-    await renderApp();
-
-    await key("enter");
-    const output = frame();
-    const bodyIndex = output.indexOf("body for summary bottom");
-    const summaryIndex = output.indexOf("Summary: AI summary belongs below");
-    expect(bodyIndex).toBeGreaterThanOrEqual(0);
-    expect(summaryIndex).toBeGreaterThan(bodyIndex);
-  });
+  // NOTE: the former "renders AI summaries below the email body" test was removed.
+  // It validated a LOCAL-only join (the email_agents run summary folded into the
+  // message body). The self-hosted mail data source builds the reader body straight
+  // from the /v1 message row (v1ToMessageBody sets summary=""), so agent-run
+  // summaries are not surfaced in the reader — surfacing them would be a separate
+  // source feature, outside this migration's scope.
 
   it("searches through a dialog and keeps the search visible in the content area", async () => {
     seedMessage("alpha invoice");
@@ -344,24 +335,10 @@ describe("Emails Solid TUI", () => {
     expect(frame()).not.toContain("plain message");
   });
 
-  it("opens inbox picker, sources, compose, domains dialog, and settings dialog from visible buttons", async () => {
+  it("opens inbox picker, compose, domains dialog, and settings dialog from visible buttons", async () => {
+    // The local S3 "Sources" list is gone in the self-hosted-only client (ingestion
+    // is a single server-owned store), so the former Sources sub-flow was removed.
     seedMessage("workspace smoke");
-    storeInboundEmail({
-      provider_id: providerId,
-      message_id: "s3://workspace-source/inbound/msg001",
-      raw_s3_url: "s3://workspace-source/inbound/msg001",
-      from_address: "source@example.com",
-      to_addresses: ["ops@example.com"],
-      cc_addresses: [],
-      subject: "source only",
-      text_body: "body",
-      html_body: null,
-      attachments: [],
-      headers: {},
-      raw_size: 1,
-      received_at: "2026-01-05T12:00:00.000Z",
-    });
-    registerS3Source({ id: "s3-workspace-source", bucket: "workspace-source", prefix: "inbound/", providerId, status: "live", liveSyncEnabled: true });
     createDomain(providerId, "example.com");
     await renderApp();
     expect(frame()).not.toContain("Profiles");
@@ -369,19 +346,11 @@ describe("Emails Solid TUI", () => {
     await clickText("All inboxes");
     expect(frame()).toContain("Inboxes");
     expect(frame()).toContain("ops@example.com");
-    // The picker detail is a short status token (the long provider string was clipping
-    // the email address); the provider now lives in the Domains view.
-    expect(frame()).toContain("configured");
+    // The picker detail is a short receive-status token ("ready" for a verified
+    // address); the provider now lives in the Domains view.
+    expect(frame()).toContain("ready");
     expect(frame()).not.toContain("Profiles");
     await key("escape");
-
-    await clickText("Sources");
-    expect(frame()).toContain("Sources");
-    expect(frame()).toContain("workspace-source");
-    await clickText("S3 ingestion");
-    expect(frame()).toContain("Source: S3 ingestion");
-    expect(frame()).toContain("source only");
-    expect(frame()).not.toContain("workspace smoke");
 
     await clickText("Compose");
     expect(frame()).toContain("Compose");
@@ -454,68 +423,23 @@ describe("Emails Solid TUI", () => {
     expect(frame()).toContain("Action Required");
   });
 
-  it("pull now calls autopull and shows a toast", async () => {
-    seedMessage("pull smoke");
-    await renderApp();
-
-    await clickText("Pull");
-    expect(autoPullCalls).toBe(1);
-    expect(frame()).toContain("Pull complete");
-    const lines = frame().split("\n");
-    const toastLine = lines.findIndex((line) => line.includes("Pull complete"));
-    expect(toastLine).toBeGreaterThanOrEqual(0);
-    expect(toastLine).toBeLessThan(8);
-    expect(lines[toastLine]!.indexOf("Pull complete")).toBeGreaterThan(58);
-  });
-
-  it("pull now surfaces autopull failures in toast and sidebar state", async () => {
-    autoPullResult = { pulled: 0, ok: false, configured: true, reason: "S3 list failed" };
-    seedMessage("pull failure");
-    await renderApp();
-
-    await clickText("Pull");
-
-    expect(autoPullCalls).toBe(1);
-    expect(frame()).toContain("Pull failed");
-    expect(frame()).toContain("S3 list failed");
-  });
-
-  // The manual Pull affordance triggers LOCAL S3→SQLite ingestion (autoPull). In self_hosted
-  // mode the server ingests and the client syncs via the automatic changesSince delta, so
-  // Pull is meaningless there — it must render only in local mode (toolbar button AND the
-  // "Pull Now" command palette entry). The toolbar row is isolated by the "Digest" line so
-  // the empty-state "Pull mail…" copy can't be mistaken for the button.
+  // The manual Pull affordance triggered LOCAL S3→SQLite ingestion (autoPull) and no
+  // longer exists in the self-hosted-only client: the server ingests and the client
+  // syncs via the automatic delta. The toolbar row is isolated by the "Digest" line so
+  // the empty-state "Pull mail…" copy can't be mistaken for a button.
   const toolbarLine = () => frame().split("\n").find((line) => line.includes("Digest")) ?? "";
 
-  it("shows the Pull toolbar action and command in local mode", async () => {
-    seedMessage("local pull");
+  it("does not render the manual Pull affordance (self-hosted ingests server-side)", async () => {
+    seedMessage("no manual pull");
     await renderApp();
 
-    const toolbar = toolbarLine();
-    expect(toolbar).toContain("Digest");
-    expect(toolbar).toContain("Pull");
-
-    // The command palette exposes "Pull Now" (filter to it deterministically).
-    await key("p", { ctrl: true });
-    expect(frame()).toContain("Shortcuts");
-    await typeText("Pull");
-    expect(frame()).toContain("Pull Now");
-  });
-
-  it("hides the Pull toolbar action and command in self_hosted mode", async () => {
-    process.env["EMAILS_MODE"] = "self_hosted";
-    process.env["EMAILS_SELF_HOSTED_URL"] = "http://127.0.0.1:9";
-    process.env["EMAILS_SELF_HOSTED_API_KEY"] = "test-only-key";
-    resetMailDataSource();
-    await renderApp();
-
-    // Self-hosted keeps the other toolbar actions but drops the manual Pull button.
+    // The toolbar keeps its other actions but has no manual Pull button.
     const toolbar = toolbarLine();
     expect(toolbar).toContain("Digest");
     expect(toolbar).toContain("Newest first");
     expect(toolbar).not.toContain("Pull");
 
-    // The command palette must not expose "Pull Now" in self_hosted mode.
+    // The command palette exposes no "Pull Now" command.
     await key("p", { ctrl: true });
     expect(frame()).toContain("Shortcuts");
     await typeText("Pull");

@@ -141,16 +141,17 @@ export interface AddressReadinessOptions extends ListAddressOptions {
 export function listAddresses(provider_id?: string, db?: Database, opts?: ListAddressOptions): EmailAddress[] {
   const selfHosted = selfHostedAddresses(db);
   if (selfHosted) {
-    const query: Record<string, string | number | undefined> = {};
     const lim = safeOptionalLimit(opts?.limit);
-    if (lim !== null) query["limit"] = lim;
     const off = safeOffset(opts?.offset);
-    if (off) query["offset"] = off;
+    // Fetch a bounded superset (never a server-side offset) so the client-side
+    // provider filter + local windowing return a correct page. Sending a server
+    // offset AND slicing locally double-windows the page (offset>0 => empty).
+    const query: Record<string, string | number | undefined> = {};
+    if (lim !== null) query["limit"] = Math.max(1000, lim + off);
     let addresses = selfHosted.list(query).map(apiToAddress);
     if (provider_id) addresses = addresses.filter((a) => a.provider_id === provider_id);
     addresses.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-    if (lim !== null) addresses = addresses.slice(off, off + lim);
-    return addresses;
+    return lim === null ? addresses : addresses.slice(off, off + lim);
   }
 
   const d = db || getDatabase();

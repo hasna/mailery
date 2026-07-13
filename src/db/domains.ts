@@ -227,16 +227,17 @@ export interface UsableDomainOptions extends ListDomainOptions {
 export function listDomains(provider_id?: string, db?: Database, opts?: ListDomainOptions): Domain[] {
   const selfHosted = selfHostedDomains(db);
   if (selfHosted) {
-    const query: Record<string, string | number | undefined> = {};
     const lim = safeOptionalLimit(opts?.limit);
-    if (lim !== null) query["limit"] = lim;
     const off = safeOffset(opts?.offset);
-    if (off) query["offset"] = off;
+    // Fetch a bounded superset (never a server-side offset) so the client-side
+    // provider filter + local windowing return a correct page. Sending a server
+    // offset AND slicing locally double-windows the page (offset>0 => empty).
+    const query: Record<string, string | number | undefined> = {};
+    if (lim !== null) query["limit"] = Math.max(1000, lim + off);
     let domains = selfHosted.list(query).map(apiToDomain);
     if (provider_id) domains = domains.filter((dm) => dm.provider_id === provider_id);
     domains.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
-    if (lim !== null) domains = domains.slice(off, off + lim);
-    return domains;
+    return lim === null ? domains : domains.slice(off, off + lim);
   }
 
   const d = db || getDatabase();

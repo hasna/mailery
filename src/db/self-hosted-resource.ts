@@ -34,7 +34,21 @@ export interface SelfHostedPageOptions {
   offset?: number;
 }
 
-/** Build a bounded `{limit, offset}` query for a selfHosted list call. */
+// Bounded superset fetched from the server so the caller can apply its own
+// client-side filters (e.g. `--provider`, status, owner) and STILL return a full
+// page after local windowing. Matches the `{ limit: 1000 }` convention already
+// used in domains.ts/addresses.ts.
+const SELF_HOSTED_LIST_FETCH_CAP = 1000;
+
+/**
+ * Build the server query for a selfHosted list call.
+ *
+ * The page is windowed LOCALLY by `selfHostedPage` after the caller's own
+ * client-side filters run. We therefore fetch a bounded superset and NEVER send
+ * a server-side `offset`: sending an offset to the server AND slicing locally
+ * double-windows the page (so `offset > 0` returned an empty list), and a
+ * server-side page cut before a client-side filter under-fills the result.
+ */
 export function selfHostedListQuery(opts?: SelfHostedPageOptions): {
   query: Record<string, string | number | boolean | undefined>;
   limit: number | null;
@@ -43,12 +57,13 @@ export function selfHostedListQuery(opts?: SelfHostedPageOptions): {
   const query: Record<string, string | number | boolean | undefined> = {};
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
-  if (limit !== null) query["limit"] = limit;
-  if (offset) query["offset"] = offset;
+  // Only cap the fetch when a limit was requested; a null limit means "all rows"
+  // and is windowed to identity by selfHostedPage (its historical behavior).
+  if (limit !== null) query["limit"] = Math.max(SELF_HOSTED_LIST_FETCH_CAP, limit + offset);
   return { query, limit, offset };
 }
 
-/** Apply the same limit/offset window locally after a selfHosted list, for parity. */
+/** Window the requested page LOCALLY after a selfHosted list + client-side filters. */
 export function selfHostedPage<T>(rows: T[], limit: number | null, offset: number): T[] {
   if (limit === null) return rows;
   return rows.slice(offset, offset + limit);

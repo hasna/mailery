@@ -574,6 +574,227 @@ const LEGACY_MESSAGES_BACKFILL_DEDUPE = defineMigration(
   `,
 );
 
+/**
+ * Self-hosted-only PARITY tables. The app is becoming self-hosted-ONLY, so the
+ * /v1 API must expose every resource the deleted local SQLite store carried.
+ * These tables back the generic /v1 resource CRUD for aliases, forwarding rules,
+ * warming schedules, triage, provisioning events, mailbox sources, delivery
+ * events, inbound AI agent settings/runs, and inbox digests. Every column
+ * mirrors the local SQLite schema in snake_case; JSON columns are JSONB and
+ * every table carries created_at/updated_at so the generic updater
+ * (`SET ... updated_at = now()`) works uniformly even on the audit-style tables
+ * whose local originals had only created_at.
+ */
+const PARITY_RESOURCE_SCHEMA = defineMigration(
+  "0009_emails_selfhosted_parity_tables",
+  `
+  CREATE TABLE IF NOT EXISTS aliases (
+    id             TEXT PRIMARY KEY,
+    domain         TEXT NOT NULL,
+    local_part     TEXT NOT NULL,
+    target_address TEXT NOT NULL DEFAULT '',
+    protected      BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(domain, local_part)
+  );
+  CREATE INDEX IF NOT EXISTS aliases_domain_idx ON aliases (domain);
+
+  CREATE TABLE IF NOT EXISTS forwarding_rules (
+    id             TEXT PRIMARY KEY,
+    source_address TEXT NOT NULL,
+    target_address TEXT NOT NULL,
+    mode           TEXT NOT NULL DEFAULT 'app-copy',
+    provider_id    TEXT,
+    from_address   TEXT,
+    enabled        BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(source_address, target_address, mode)
+  );
+  CREATE INDEX IF NOT EXISTS forwarding_rules_source_idx ON forwarding_rules (source_address, enabled);
+
+  CREATE TABLE IF NOT EXISTS warming_schedules (
+    id                  TEXT PRIMARY KEY,
+    domain              TEXT NOT NULL UNIQUE,
+    provider_id         TEXT,
+    target_daily_volume INTEGER NOT NULL DEFAULT 0,
+    start_date          TEXT,
+    status              TEXT NOT NULL DEFAULT 'active',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS warming_schedules_status_idx ON warming_schedules (status);
+
+  CREATE TABLE IF NOT EXISTS email_triage (
+    id               TEXT PRIMARY KEY,
+    email_id         TEXT,
+    inbound_email_id TEXT,
+    label            TEXT NOT NULL,
+    priority         INTEGER NOT NULL DEFAULT 3,
+    summary          TEXT,
+    sentiment        TEXT,
+    draft_reply      TEXT,
+    confidence       DOUBLE PRECISION NOT NULL DEFAULT 0,
+    model            TEXT,
+    triaged_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS email_triage_label_idx ON email_triage (label);
+  CREATE INDEX IF NOT EXISTS email_triage_email_idx ON email_triage (email_id);
+  CREATE INDEX IF NOT EXISTS email_triage_inbound_idx ON email_triage (inbound_email_id);
+
+  CREATE TABLE IF NOT EXISTS provisioning_events (
+    id          TEXT PRIMARY KEY,
+    entity_type TEXT NOT NULL,
+    entity_id   TEXT NOT NULL,
+    from_state  TEXT,
+    to_state    TEXT NOT NULL,
+    detail_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS provisioning_events_entity_idx ON provisioning_events (entity_type, entity_id);
+
+  CREATE TABLE IF NOT EXISTS mailbox_sources (
+    id                     TEXT PRIMARY KEY,
+    mailbox_id             TEXT NOT NULL,
+    provider_id            TEXT,
+    type                   TEXT NOT NULL,
+    name                   TEXT NOT NULL DEFAULT '',
+    external_account_id    TEXT,
+    external_mailbox       TEXT,
+    status                 TEXT NOT NULL DEFAULT 'active',
+    settings_json          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    provider_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    last_synced_at         TIMESTAMPTZ,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS mailbox_sources_mailbox_idx ON mailbox_sources (mailbox_id);
+
+  CREATE TABLE IF NOT EXISTS events (
+    id                TEXT PRIMARY KEY,
+    email_id          TEXT,
+    provider_id       TEXT,
+    provider_event_id TEXT,
+    type              TEXT NOT NULL,
+    recipient         TEXT,
+    metadata          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    occurred_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS events_provider_occurred_idx ON events (provider_id, occurred_at);
+  CREATE INDEX IF NOT EXISTS events_type_occurred_idx ON events (type, occurred_at);
+  CREATE INDEX IF NOT EXISTS events_email_idx ON events (email_id);
+
+  CREATE TABLE IF NOT EXISTS email_agent_settings (
+    agent_key         TEXT PRIMARY KEY,
+    enabled           BOOLEAN NOT NULL DEFAULT FALSE,
+    always_on         BOOLEAN NOT NULL DEFAULT FALSE,
+    provider          TEXT NOT NULL DEFAULT 'external',
+    model             TEXT,
+    apply_labels      BOOLEAN NOT NULL DEFAULT TRUE,
+    use_network_tools BOOLEAN NOT NULL DEFAULT TRUE,
+    config_json       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  INSERT INTO email_agent_settings (agent_key, enabled, always_on, provider, model, apply_labels, use_network_tools, config_json)
+  VALUES
+    ('categorizer', FALSE, FALSE, 'external', 'external-summary', FALSE, TRUE, '{}'::jsonb),
+    ('labeler',     FALSE, FALSE, 'external', 'external-summary', TRUE,  TRUE, '{}'::jsonb),
+    ('fraud',       FALSE, FALSE, 'external', 'external-summary', TRUE,  TRUE, '{}'::jsonb)
+  ON CONFLICT (agent_key) DO NOTHING;
+
+  CREATE TABLE IF NOT EXISTS email_agent_runs (
+    id               TEXT PRIMARY KEY,
+    agent_key        TEXT NOT NULL,
+    inbound_email_id TEXT NOT NULL,
+    provider         TEXT NOT NULL,
+    model            TEXT NOT NULL,
+    status           TEXT NOT NULL,
+    category         TEXT,
+    labels_json      JSONB NOT NULL DEFAULT '[]'::jsonb,
+    priority         INTEGER,
+    confidence       DOUBLE PRECISION,
+    risk_score       INTEGER,
+    summary          TEXT,
+    reasoning        TEXT,
+    tool_calls_json  JSONB NOT NULL DEFAULT '[]'::jsonb,
+    output_json      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    error            TEXT,
+    started_at       TIMESTAMPTZ,
+    completed_at     TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(agent_key, inbound_email_id)
+  );
+  CREATE INDEX IF NOT EXISTS email_agent_runs_agent_status_idx ON email_agent_runs (agent_key, status, completed_at);
+  CREATE INDEX IF NOT EXISTS email_agent_runs_inbound_idx ON email_agent_runs (inbound_email_id);
+
+  CREATE TABLE IF NOT EXISTS email_digests (
+    id                       TEXT PRIMARY KEY,
+    period                   TEXT NOT NULL,
+    since                    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    until                    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    provider                 TEXT NOT NULL,
+    model                    TEXT NOT NULL,
+    status                   TEXT NOT NULL,
+    message_count            INTEGER NOT NULL DEFAULT 0,
+    summary                  TEXT,
+    highlights_json          JSONB NOT NULL DEFAULT '[]'::jsonb,
+    action_items_json        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    important_email_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    label_counts_json        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    error                    TEXT,
+    started_at               TIMESTAMPTZ,
+    completed_at             TIMESTAMPTZ,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS email_digests_period_completed_idx ON email_digests (period, status, completed_at);
+  `,
+);
+
+/**
+ * Provisioning lifecycle STATE columns on domains and addresses (the local
+ * store carried these on its domains/addresses tables — migration 19 there).
+ * The audit trail is the separate provisioning_events table (0009). All columns
+ * are additive and nullable/defaulted so existing rows and readers are
+ * unaffected; nameservers are a JSONB array.
+ */
+const PROVISIONING_COLUMNS = defineMigration(
+  "0010_emails_selfhosted_provisioning_columns",
+  `
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS provisioning_status TEXT NOT NULL DEFAULT 'none';
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS purchase_provider TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS dns_provider TEXT NOT NULL DEFAULT 'cloudflare';
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS send_provider TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS cf_zone_id TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS registrar TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS nameservers_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS mail_from_domain TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS last_error TEXT;
+  ALTER TABLE domains ADD COLUMN IF NOT EXISTS next_check_at TIMESTAMPTZ;
+
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS domain_id TEXT;
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS receive_strategy TEXT;
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS forward_to TEXT;
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS routing_rule_id TEXT;
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS provisioning_status TEXT NOT NULL DEFAULT 'none';
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS last_validated_at TIMESTAMPTZ;
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS last_error TEXT;
+  ALTER TABLE addresses ADD COLUMN IF NOT EXISTS next_check_at TIMESTAMPTZ;
+
+  CREATE INDEX IF NOT EXISTS domains_provstatus_idx ON domains (provisioning_status);
+  CREATE INDEX IF NOT EXISTS addresses_provstatus_idx ON addresses (provisioning_status);
+  CREATE INDEX IF NOT EXISTS addresses_domain_id_idx ON addresses (domain_id);
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -589,5 +810,7 @@ export function emailsSelfHostedMigrations(): Migration[] {
     LEGACY_MESSAGES_BACKFILL_PREP,
     LEGACY_MESSAGES_BACKFILL,
     LEGACY_MESSAGES_BACKFILL_DEDUPE,
+    PARITY_RESOURCE_SCHEMA,
+    PROVISIONING_COLUMNS,
   ];
 }

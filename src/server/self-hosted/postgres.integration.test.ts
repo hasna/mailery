@@ -40,7 +40,18 @@ afterAll(async () => { await client?.close(); });
 // its own dedicated coverage in rls.integration.test.ts.
 const TENANCY_MIGRATION_ID = "0012_emails_tenancy_identity_and_backfill";
 const RLS_MIGRATION_ID = "0013_emails_tenancy_rls_and_seal";
-const migrationsThrough0012 = () => emailsSelfHostedMigrations().filter((m) => m.id !== RLS_MIGRATION_ID);
+const migrationsBefore0012 = () => {
+  const all = emailsSelfHostedMigrations();
+  const tenancyIndex = all.findIndex((migration) => migration.id === TENANCY_MIGRATION_ID);
+  if (tenancyIndex < 0) throw new Error(`Missing migration ${TENANCY_MIGRATION_ID}`);
+  return all.slice(0, tenancyIndex);
+};
+const migrationsThrough0012 = () => {
+  const all = emailsSelfHostedMigrations();
+  const tenancyIndex = all.findIndex((migration) => migration.id === TENANCY_MIGRATION_ID);
+  if (tenancyIndex < 0) throw new Error(`Missing migration ${TENANCY_MIGRATION_ID}`);
+  return all.slice(0, tenancyIndex + 1);
+};
 
 async function resetPublicSchema(): Promise<void> {
   await client!.execute("DROP SCHEMA IF EXISTS public CASCADE");
@@ -771,10 +782,7 @@ describe("self-hosted Postgres integration", () => {
     // Phase A: migrate everything EXCEPT 0012 (reconciles the drift, creates the
     // remaining tables). Then seed pre-tenancy rows into the migration-created
     // tables (messages) and the credential sources (api_keys/send_keys/domains).
-    const throughEleven = emailsSelfHostedMigrations().filter(
-      (m) => m.id !== TENANCY_MIGRATION_ID && m.id !== RLS_MIGRATION_ID,
-    );
-    await new MigrationLedger(client!, throughEleven).migrate();
+    await new MigrationLedger(client!, migrationsBefore0012()).migrate();
 
     await client!.execute(`
       INSERT INTO providers (id) VALUES ('p1');
@@ -945,10 +953,7 @@ describe("self-hosted Postgres integration", () => {
 
     // Phase A: migrate everything EXCEPT 0012 (reconciles drift + creates the
     // dependent tables: provisioning_events, address_ownership_events, messages).
-    const throughEleven = emailsSelfHostedMigrations().filter(
-      (m) => m.id !== TENANCY_MIGRATION_ID && m.id !== RLS_MIGRATION_ID,
-    );
-    await new MigrationLedger(client!, throughEleven).migrate();
+    await new MigrationLedger(client!, migrationsBefore0012()).migrate();
 
     // Seed the duplicate data + id-based dependents. tenant_id does not exist yet
     // (0012 adds it), so every row backfills to the default tenant, turning the

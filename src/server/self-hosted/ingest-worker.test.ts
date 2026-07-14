@@ -29,19 +29,28 @@ function makeDeps(overrides: Partial<IngestDeps> & { existing?: string | null } 
   deps: IngestDeps;
   upserts: MessageInput[];
   fetched: string[];
+  quarantines: Array<{ sourceId: string; reason: string; envelopeRecipients: string[] }>;
 } {
   const upserts: MessageInput[] = [];
   const fetched: string[] = [];
+  const quarantines: Array<{ sourceId: string; reason: string; envelopeRecipients: string[] }> = [];
   const deps: IngestDeps = {
     store: {
-      findMessageIdByKey: async () => overrides.existing ?? null,
-      upsertMessage: async (input: MessageInput) => {
-        upserts.push(input);
-        return {
-          record: { id: "row-1", ...input } as unknown as MessageRecord,
-          inserted: true,
-        };
-      },
+      resolveInboundRecipients: async (recipients) => ({
+        groups: recipients.length > 0 ? [{ tenantId: "tenant-a", recipients }] : [],
+        unresolved: recipients.length > 0 ? [] : recipients,
+      }),
+      quarantineInbound: async (input) => { quarantines.push(input); },
+      forTenant: () => ({
+        findMessageIdByKey: async () => overrides.existing ?? null,
+        upsertMessage: async (input: MessageInput) => {
+          upserts.push(input);
+          return {
+            record: { id: "row-1", ...input } as unknown as MessageRecord,
+            inserted: true,
+          };
+        },
+      }),
     },
     fetchObject: async (bucket: string, key: string) => {
       fetched.push(`${bucket}/${key}`);
@@ -51,7 +60,7 @@ function makeDeps(overrides: Partial<IngestDeps> & { existing?: string | null } 
     ...(overrides.store ? { store: overrides.store } : {}),
     ...(overrides.fetchObject ? { fetchObject: overrides.fetchObject } : {}),
   };
-  return { deps, upserts, fetched };
+  return { deps, upserts, fetched, quarantines };
 }
 
 describe("processInboundNotification", () => {
@@ -65,7 +74,7 @@ describe("processInboundNotification", () => {
   it("deletes only terminal success and duplicate results", () => {
     expect(shouldDeleteIngestResult({ status: "ingested" })).toBe(true);
     expect(shouldDeleteIngestResult({ status: "duplicate" })).toBe(true);
-    expect(shouldDeleteIngestResult({ status: "skipped" })).toBe(false);
+    expect(shouldDeleteIngestResult({ status: "quarantined" })).toBe(true);
     expect(shouldDeleteIngestResult({ status: "error" })).toBe(false);
   });
 
@@ -87,6 +96,7 @@ describe("processInboundNotification", () => {
     expect(w.direction).toBe("inbound");
     expect(w.status).toBe("received");
     expect(w.to_addrs).toEqual(["andrei@hasna.com"]);
+    expect(w.cc_addrs).toEqual([]);
     expect(w.from_addr).toContain("alice@external.com");
     // The Date header wins over the SES timestamp for received_at.
     expect(w.received_at).toBe("2026-07-02T09:59:00.000Z");
@@ -96,7 +106,7 @@ describe("processInboundNotification", () => {
 
   it("ingests a listed S3 object directly for one-shot backfills", async () => {
     const { deps, upserts, fetched } = makeDeps();
-    const r = await ingestS3Object(deps, BUCKET, OBJECT_KEY);
+    const r = await ingestS3Object(deps, BUCKET, OBJECT_KEY, { recipients: ["andrei@hasna.com"] });
 
     expect(r.status).toBe("ingested");
     expect(fetched).toEqual([`${BUCKET}/${OBJECT_KEY}`]);
@@ -114,6 +124,71 @@ describe("processInboundNotification", () => {
     expect(r.status).toBe("duplicate");
     expect(fetched).toEqual([]); // never fetched from S3
     expect(upserts).toEqual([]);
+  });
+
+  it("routes only from the SES envelope and ignores spoofed MIME recipients", async () => {
+    const spoofed = [
+      "From: attacker@external.com",
+      "To: victim@other-tenant.example",
+      "Cc: hidden@other-tenant.example",
+      "Subject: spoof",
+      "",
+      "body",
+    ].join("\r\n");
+    const { deps, upserts } = makeDeps({ fetchObject: async () => Buffer.from(spoofed) });
+    const result = await processInboundNotification(deps, sesNotification, BUCKET);
+    expect(result.status).toBe("ingested");
+    expect(upserts[0]!.to_addrs).toEqual(["andrei@hasna.com"]);
+    expect(upserts[0]!.cc_addrs).toEqual([]);
+  });
+
+  it("splits one object into tenant-scoped writes and deduplicates within each tenant", async () => {
+    const writes = new Map<string, MessageInput[]>();
+    const { deps, fetched } = makeDeps({
+      store: {
+        resolveInboundRecipients: async () => ({
+          groups: [
+            { tenantId: "tenant-a", recipients: ["a@one.example"] },
+            { tenantId: "tenant-b", recipients: ["b@two.example"] },
+          ],
+          unresolved: [],
+        }),
+        quarantineInbound: async () => {},
+        forTenant: (tenantId) => ({
+          findMessageIdByKey: async () => null,
+          upsertMessage: async (input) => {
+            const rows = writes.get(tenantId) ?? [];
+            rows.push(input);
+            writes.set(tenantId, rows);
+            return { record: { id: `${tenantId}-row`, ...input } as unknown as MessageRecord, inserted: true };
+          },
+        }),
+      },
+    });
+    const result = await ingestS3Object(deps, BUCKET, OBJECT_KEY, {
+      recipients: ["a@one.example", "b@two.example"],
+    });
+    expect(result).toMatchObject({ status: "ingested", tenant_ids: ["tenant-a", "tenant-b"] });
+    expect(fetched).toEqual([`${BUCKET}/${OBJECT_KEY}`]);
+    expect(writes.get("tenant-a")?.[0]?.to_addrs).toEqual(["a@one.example"]);
+    expect(writes.get("tenant-b")?.[0]?.to_addrs).toEqual(["b@two.example"]);
+  });
+
+  it("quarantines an event with no route and never fetches or writes raw mail", async () => {
+    const captured: Array<{ sourceId: string; reason: string; envelopeRecipients: string[] }> = [];
+    const { deps, fetched, upserts } = makeDeps({
+      store: {
+        resolveInboundRecipients: async (recipients) => ({ groups: [], unresolved: recipients }),
+        quarantineInbound: async (input) => { captured.push(input); },
+        forTenant: () => { throw new Error("must not enter a tenant"); },
+      },
+    });
+    const result = await processInboundNotification(deps, sesNotification, BUCKET);
+    expect(result).toMatchObject({ status: "quarantined", reason: "no_tenant_route" });
+    expect(fetched).toEqual([]);
+    expect(upserts).toEqual([]);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.envelopeRecipients).toEqual(["andrei@hasna.com"]);
   });
 
   it("leaves notifications with no object key for redrive/DLQ", async () => {

@@ -118,9 +118,15 @@ function messagesClient(): { client: TypedQueryClient; rows: Record<string, unkn
 
 function deps(): SelfHostedServiceDeps {
   const { client } = messagesClient();
+  const store = selfScopedStore(client);
+  // These message-state-machine tests isolate provider/idempotency behavior from
+  // the independently-covered outbound policy store. Explicitly allow by default;
+  // denial tests override this method below.
+  (store as unknown as { evaluateOutboundPolicy: () => Promise<{ allowed: true }> }).evaluateOutboundPolicy =
+    async () => ({ allowed: true });
   return {
     client,
-    store: selfScopedStore(client),
+    store,
     verifier: verifyApiKey({ app: "emails", signingSecret: SIGNING_SECRET }),
     sender: { provider: "ses", send: async () => "provider-message-id" },
     migrations: emailsSelfHostedMigrations(),
@@ -286,6 +292,35 @@ describe("Emails self-hosted inbound messages", () => {
     expect(res?.status).toBe(202);
     expect(sent).toHaveLength(1);
     expect((await res!.json()).message.provider_message_id).toBe("ses-message-1");
+  });
+
+  test("outbound policy denial is durably blocked before any provider side effect", async () => {
+    const d = deps();
+    let sends = 0;
+    d.sender = { provider: "ses", send: async () => { sends++; return "must-not-send"; } };
+    d.store.evaluateOutboundPolicy = async () => ({
+      allowed: false,
+      code: "recipient_suppressed",
+      message: "one or more recipients are suppressed",
+      status: 409,
+    });
+    d.store.markSendBlocked = async (id, reason) => {
+      const current = await d.store.getMessage(id);
+      return current ? { ...current, status: "blocked", send_state: "blocked", headers: { policy_denial: reason } } : null;
+    };
+    const res = await handleSelfHostedRequest(d, new Request("http://svc/v1/messages/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": writeToken() },
+      body: JSON.stringify({
+        from: "me@example.com",
+        to: ["blocked@example.com"],
+        subject: "must block",
+        idempotency_key: "blocked-policy-key",
+      }),
+    }));
+    expect(res?.status).toBe(409);
+    expect(await res!.json()).toMatchObject({ reason: "recipient_suppressed", retry_safe: false });
+    expect(sends).toBe(0);
   });
 
   it("returns the same completed intent on retry without sending twice", async () => {

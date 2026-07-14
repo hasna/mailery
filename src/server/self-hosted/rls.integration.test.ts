@@ -157,35 +157,36 @@ describe.skipIf(!pg)("Row-Level Security backstop (Layer 2, migration 0013)", ()
       tx.execute(`INSERT INTO domains (id, domain, tenant_id) VALUES ('dom-a2','a2.example',$1)`, [TENANT_A]),
     );
     expect(await countAsProbe(TENANT_A, "domains")).toBe(2);
-    // A row inserted with the DEFAULT tenant_id (omitted column) is invisible to A.
-    await asProbe(DEFAULT_TENANT_ID, (tx) =>
-      tx.execute(`INSERT INTO domains (id, domain) VALUES ('dom-def','def.example')`),
-    );
-    expect(await countAsProbe(TENANT_A, "domains"), "default-tenant row invisible to A").toBe(2);
-    expect(await countAsProbe(DEFAULT_TENANT_ID, "domains"), "default-tenant row visible under default GUC").toBe(1);
+    // 0016 seals the schema: omitting tenant_id can no longer silently write to
+    // the former default tenant, even when the GUC itself is set.
+    await expect(
+      asProbe(DEFAULT_TENANT_ID, (tx) =>
+        tx.execute(`INSERT INTO domains (id, domain) VALUES ('dom-def','def.example')`),
+      ),
+    ).rejects.toThrow(/row-level security|not-null/i);
+    expect(await countAsProbe(DEFAULT_TENANT_ID, "domains")).toBe(0);
   });
 
-  it("worker path: a default-tenant message upsert on the composite conflict target works under RLS", async () => {
-    // Mirrors EmailsSelfHostedStore.upsertMessage (the untenanted ingest path): it
-    // sets the GUC to the default tenant, omits tenant_id (the transitional DEFAULT
-    // fills it), and conflicts on (tenant_id, source_id). Prove insert-then-update
-    // both satisfy the policy as the NOBYPASSRLS owner.
+  it("worker path: a resolved-tenant message upsert on the composite conflict target works under RLS", async () => {
+    // Mirrors TenantScopedStore.upsertMessage after envelope routing: the worker
+    // resolves the tenant first, sets the same tenant GUC, explicitly stamps
+    // tenant_id, and conflicts on (tenant_id, source_id).
     const upsert = (tx: TypedQueryClient) =>
       tx.one<{ inserted: boolean }>(
-        `INSERT INTO messages (id, from_addr, source_id)
-         VALUES ($1, 'ingest@x.example', 'obj-key-1')
+        `INSERT INTO messages (id, from_addr, source_id, tenant_id)
+         VALUES ($1, 'ingest@x.example', 'obj-key-1', $2)
          ON CONFLICT (tenant_id, source_id) WHERE source_id IS NOT NULL
          DO UPDATE SET updated_at = now()
          RETURNING (xmax = 0) AS inserted`,
-        [crypto.randomUUID()],
+        [crypto.randomUUID(), TENANT_A],
       );
-    const first = await asProbe(DEFAULT_TENANT_ID, upsert);
+    const first = await asProbe(TENANT_A, upsert);
     expect(first.inserted, "first upsert inserts").toBe(true);
-    const second = await asProbe(DEFAULT_TENANT_ID, upsert);
+    const second = await asProbe(TENANT_A, upsert);
     expect(second.inserted, "re-delivery updates in place (idempotent)").toBe(false);
-    // The upserted row landed in the default tenant and is invisible to tenant A.
+    // The upserted row landed only in tenant A and is invisible to tenant B.
     expect(
-      await asProbe(TENANT_A, (tx) => tx.get<{ id: string }>(`SELECT id FROM messages WHERE source_id = 'obj-key-1'`)),
+      await asProbe(TENANT_B, (tx) => tx.get<{ id: string }>(`SELECT id FROM messages WHERE source_id = 'obj-key-1'`)),
     ).toBeNull();
   });
 

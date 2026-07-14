@@ -30,6 +30,7 @@ import {
   toPublicTenant,
   toPublicUser,
   type Role,
+  type GlobalRole,
 } from "./store.js";
 import { RateLimiter } from "./rate-limit.js";
 import { isAllowedSignupEmail } from "./allowed-email.js";
@@ -56,6 +57,7 @@ export interface RequestContext {
   principalType: PrincipalType;
   userId?: string;
   role?: Role;
+  globalRole?: GlobalRole;
   kid?: string;
   scopes: string[];
 }
@@ -145,6 +147,7 @@ export async function resolveRequestContext(
         principalType: "user",
         userId: session.userId,
         role: session.role,
+        globalRole: session.globalRole,
         scopes,
       },
     };
@@ -210,7 +213,7 @@ export async function handleAuthRoutes(deps: AuthServiceDeps, req: Request, url:
   const method = req.method.toUpperCase();
 
   const isAuthPath =
-    path === "/v1/me" ||
+    path === "/v1/me" || path.startsWith("/v1/me/") ||
     path === "/v1/auth" || path.startsWith("/v1/auth/") ||
     path === "/v1/tenants" || path.startsWith("/v1/tenants/") ||
     path.startsWith("/v1/memberships/") ||
@@ -228,9 +231,22 @@ export async function handleAuthRoutes(deps: AuthServiceDeps, req: Request, url:
     if (path === "/v1/auth/password/reset" && method === "POST") return await handleReset(deps, req);
     if (path === "/v1/invites/accept" && method === "POST") return await handleAcceptInvite(deps, req);
     if (path === "/v1/auth/bootstrap-owner" && method === "POST") return await handleBootstrapOwner(deps, req, url);
+    if (path === "/v1/auth/bootstrap-super-admin" && method === "POST") return await handleBootstrapSuperAdmin(deps, req, url);
 
     // ---- session-authenticated endpoints ---------------------------------
     if (path === "/v1/me" && method === "GET") return await handleMe(deps, req, url);
+    if (path === "/v1/me/email-identities") {
+      if (method === "GET") return await handleListEmailIdentities(deps, req, url);
+      if (method === "POST") return await handleAddEmailIdentity(deps, req, url);
+    }
+    const primaryIdentity = path.match(/^\/v1\/me\/email-identities\/([^/]+)\/primary$/);
+    if (primaryIdentity && method === "POST") {
+      return await handleMakePrimaryEmailIdentity(deps, req, url, decodeURIComponent(primaryIdentity[1]!));
+    }
+    const deleteIdentity = path.match(/^\/v1\/me\/email-identities\/([^/]+)$/);
+    if (deleteIdentity && method === "DELETE") {
+      return await handleDeleteEmailIdentity(deps, req, url, decodeURIComponent(deleteIdentity[1]!));
+    }
     if (path === "/v1/auth/logout" && method === "POST") return await handleLogout(deps, req, url);
     if (path === "/v1/auth/logout-all" && method === "POST") return await handleLogoutAll(deps, req, url);
     if (path === "/v1/auth/switch-tenant" && method === "POST") return await handleSwitchTenant(deps, req, url);
@@ -399,7 +415,7 @@ async function handleLogin(deps: AuthServiceDeps, req: Request): Promise<Respons
   }
 
   // A2: refuse login until the email is confirmed.
-  if (!user.email_verified_at) {
+  if (!user.login_email_verified_at) {
     return json(403, { error: "email is not verified", reason: "email_unverified" });
   }
 
@@ -485,7 +501,7 @@ async function handleForgot(deps: AuthServiceDeps, req: Request): Promise<Respon
   const generic = json(200, { status: "reset_requested" });
   if (!email || !isAllowedSignupEmail(email, env(deps))) return generic;
   const user = await deps.authStore.findUserByEmail(email);
-  if (user && user.status === "active") {
+  if (user && user.status === "active" && user.login_email_verified_at) {
     const reset = await deps.authStore.createPasswordReset(user.id);
     // M7: token is emailed, never logged.
     await sendPasswordResetEmail(deps.sender, deps.mailer, email, reset.token);
@@ -580,6 +596,53 @@ async function handleBootstrapOwner(deps: AuthServiceDeps, req: Request, url: UR
   return json(201, { user: toPublicUser(result.user), tenant: tenant ? toPublicTenant(tenant) : null });
 }
 
+/** Normalize the non-secret operator setting used to pin primary bootstrap. */
+export function configuredPrimarySuperAdminEmail(source: NodeJS.ProcessEnv): string | null {
+  const value = source["EMAILS_PRIMARY_SUPER_ADMIN_EMAIL"]?.trim().toLowerCase() ?? "";
+  return value && /^[^@\s]+@[^@\s]+$/.test(value) ? value : null;
+}
+
+/**
+ * POST /v1/auth/bootstrap-super-admin — operator API-key-only, idempotent, and
+ * pinned to EMAILS_PRIMARY_SUPER_ADMIN_EMAIL. Email matching is not itself an
+ * authorization mechanism; the verified mapped API key remains mandatory.
+ */
+async function handleBootstrapSuperAdmin(deps: AuthServiceDeps, req: Request, url: URL): Promise<Response> {
+  const resolved = await resolveRequestContext(deps, req, url, ["emails:write"]);
+  if (!resolved.ok) return resolved.response;
+  if (resolved.ctx.principalType !== "apikey" || !resolved.ctx.kid) {
+    return json(403, { error: "bootstrap requires an operator api key", reason: "apikey_required" });
+  }
+  const configuredEmail = configuredPrimarySuperAdminEmail(env(deps));
+  if (!configuredEmail) {
+    return json(503, { error: "primary super-admin bootstrap is not configured", reason: "bootstrap_not_configured" });
+  }
+  const body = await readJsonBody(req);
+  const requestedEmail = str(body.email).toLowerCase();
+  if (requestedEmail && requestedEmail !== configuredEmail) {
+    return json(403, { error: "bootstrap email does not match operator configuration", reason: "email_mismatch" });
+  }
+  const pw = validatePassword(body.password);
+  if (!pw.ok) return json(400, { error: pw.error });
+  const result = await deps.authStore.bootstrapPrimarySuperAdmin({
+    tenantId: resolved.ctx.tenantId,
+    email: configuredEmail,
+    passwordHash: await hashPassword(pw.value),
+    actorKid: resolved.ctx.kid,
+    name: str(body.name) || null,
+  });
+  if ("error" in result) {
+    return json(409, { error: "a different primary super-admin already exists", reason: result.error });
+  }
+  const tenant = await deps.authStore.getTenantById(resolved.ctx.tenantId);
+  await deps.authStore.seedTenantAgentSettings(resolved.ctx.tenantId);
+  return json(result.created ? 201 : 200, {
+    created: result.created,
+    user: toPublicUser(result.user),
+    tenant: tenant ? toPublicTenant(tenant) : null,
+  });
+}
+
 // ---- handlers: session lifecycle + me ---------------------------------------
 
 async function handleLogout(deps: AuthServiceDeps, req: Request, url: URL): Promise<Response> {
@@ -616,6 +679,7 @@ async function handleMe(deps: AuthServiceDeps, req: Request, url: URL): Promise<
   }
   const user = ctx.userId ? await deps.authStore.getUserById(ctx.userId) : null;
   const memberships = ctx.userId ? await deps.authStore.listTenantsForUser(ctx.userId) : [];
+  const emailIdentities = ctx.userId ? await deps.authStore.listUserEmailIdentities(ctx.userId) : [];
   return json(200, {
     principal_type: "user",
     user: user ? toPublicUser(user) : null,
@@ -623,7 +687,83 @@ async function handleMe(deps: AuthServiceDeps, req: Request, url: URL): Promise<
     role: ctx.role,
     scopes: ctx.scopes,
     memberships: memberships.map((m) => ({ tenant_id: m.id, slug: m.slug, name: m.name, role: m.role })),
+    email_identities: emailIdentities.map((identity) => ({
+      id: identity.id,
+      email: identity.email,
+      is_primary: identity.is_primary,
+      verified: identity.verified_at !== null,
+    })),
   });
+}
+
+async function requireUserSession(deps: AuthServiceDeps, req: Request, url: URL, write: boolean) {
+  const resolved = await resolveRequestContext(deps, req, url, [write ? "emails:write" : "emails:read"]);
+  if (!resolved.ok) return resolved;
+  if (resolved.ctx.principalType !== "user" || !resolved.ctx.userId) {
+    return { ok: false as const, response: json(403, { error: "session required", reason: "session_required" }) };
+  }
+  return resolved as typeof resolved & { ctx: RequestContext & { userId: string } };
+}
+
+async function handleListEmailIdentities(deps: AuthServiceDeps, req: Request, url: URL): Promise<Response> {
+  const auth = await requireUserSession(deps, req, url, false);
+  if (!auth.ok) return auth.response;
+  const identities = await deps.authStore.listUserEmailIdentities(auth.ctx.userId);
+  return json(200, {
+    email_identities: identities.map((identity) => ({
+      id: identity.id,
+      email: identity.email,
+      is_primary: identity.is_primary,
+      verified: identity.verified_at !== null,
+      created_at: identity.created_at,
+    })),
+  });
+}
+
+async function handleAddEmailIdentity(deps: AuthServiceDeps, req: Request, url: URL): Promise<Response> {
+  const auth = await requireUserSession(deps, req, url, true);
+  if (!auth.ok) return auth.response;
+  const body = await readJsonBody(req);
+  const email = str(body.email).toLowerCase();
+  if (!email || !isAllowedSignupEmail(email, env(deps))) {
+    return json(403, { error: "that email domain is not allowed", reason: "email_not_allowed" });
+  }
+  const existing = await deps.authStore.findUserByEmail(email);
+  if (existing) return json(409, { error: "email identity is already registered", reason: "email_taken" });
+  const identity = await deps.authStore.addUserEmailIdentity(auth.ctx.userId, email);
+  const verification = await deps.authStore.createEmailVerification(auth.ctx.userId, email);
+  await sendVerificationEmail(deps.sender, deps.mailer, email, verification.token);
+  return json(201, {
+    email_identity: { id: identity.id, email: identity.email, is_primary: false, verified: false },
+    verification_required: true,
+  });
+}
+
+async function handleMakePrimaryEmailIdentity(
+  deps: AuthServiceDeps,
+  req: Request,
+  url: URL,
+  identityId: string,
+): Promise<Response> {
+  const auth = await requireUserSession(deps, req, url, true);
+  if (!auth.ok) return auth.response;
+  const identity = await deps.authStore.makePrimaryEmailIdentity(auth.ctx.userId, identityId);
+  if (!identity) return json(409, { error: "email identity must exist and be verified", reason: "identity_unverified" });
+  return json(200, { email_identity: { id: identity.id, email: identity.email, is_primary: true, verified: true } });
+}
+
+async function handleDeleteEmailIdentity(
+  deps: AuthServiceDeps,
+  req: Request,
+  url: URL,
+  identityId: string,
+): Promise<Response> {
+  const auth = await requireUserSession(deps, req, url, true);
+  if (!auth.ok) return auth.response;
+  const removed = await deps.authStore.removeUserEmailIdentity(auth.ctx.userId, identityId);
+  return removed
+    ? json(200, { removed: true, id: identityId })
+    : json(409, { error: "primary or unknown email identity cannot be removed", reason: "identity_not_removable" });
 }
 
 async function handleSwitchTenant(deps: AuthServiceDeps, req: Request, url: URL): Promise<Response> {

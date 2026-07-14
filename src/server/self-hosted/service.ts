@@ -627,6 +627,9 @@ export async function handleSelfHostedRequest(
         attachments,
         provider: deps.sender.provider,
       };
+      const sendKeyToken = typeof body.send_key === "string"
+        ? body.send_key.trim()
+        : req.headers.get("x-emails-send-key")?.trim() ?? "";
       let reserved;
       try {
         reserved = await auth.store.reserveSendIntent({
@@ -667,6 +670,14 @@ export async function handleSelfHostedRequest(
           }
           return json(202, { message: publicMessage(reserved.record), provider: deps.sender.provider, in_progress: true });
         }
+        if (reserved.record.send_state === "blocked") {
+          return json(409, {
+            error: "send was blocked by outbound policy",
+            reason: String(reserved.record.headers?.["policy_denial"] ?? "policy_denied"),
+            message: publicMessage(reserved.record),
+            retry_safe: false,
+          });
+        }
         if (reserved.record.send_state !== "pending") {
           return json(409, {
             error: "send outcome is uncertain; reconcile the provider message before any retry",
@@ -674,6 +685,21 @@ export async function handleSelfHostedRequest(
             retry_safe: false,
           });
         }
+      }
+
+      const policy = await auth.store.evaluateOutboundPolicy({
+        from,
+        recipients: [...to, ...cc, ...bcc],
+        sendKeyToken: sendKeyToken || null,
+      });
+      if (!policy.allowed) {
+        const blocked = await auth.store.markSendBlocked(reserved.record.id, policy.code).catch(() => null);
+        return json(policy.status, {
+          error: policy.message,
+          reason: policy.code,
+          message: publicMessage(blocked ?? reserved.record),
+          retry_safe: false,
+        });
       }
 
       const claimed = await auth.store.claimSendIntent(reserved.record.id);

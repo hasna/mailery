@@ -1911,6 +1911,118 @@ const MESSAGES_ID_PREFIX_INDEX = defineMigration(
   `,
 );
 
+/**
+ * 0015 — global user identities + primary platform administrator.
+ *
+ * Users remain global (memberships bind them to tenants), and may authenticate
+ * with any verified identity in `user_email_identities`.  `users.email` is kept
+ * as a compatibility mirror of the primary identity while older clients are
+ * upgraded.  The platform role deliberately does NOT bypass tenant RLS: a
+ * super-admin still enters tenant data through an explicit membership/session.
+ *
+ * Bootstrap is an operator action, so the audit table is global/non-RLS and
+ * contains identifiers only — never a password, session token, or API key.
+ */
+const USER_IDENTITIES_AND_PLATFORM_ADMIN = defineMigration(
+  "0015_user_identities_and_platform_admin",
+  `
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS global_role text NOT NULL DEFAULT 'user';
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS is_primary_super_admin boolean NOT NULL DEFAULT false;
+
+  DO $$
+  BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conrelid = 'public.users'::regclass AND conname = 'users_global_role_check'
+    ) THEN
+      ALTER TABLE users ADD CONSTRAINT users_global_role_check
+        CHECK (global_role IN ('user', 'super_admin'));
+    END IF;
+  END $$;
+
+  CREATE UNIQUE INDEX IF NOT EXISTS users_one_primary_super_admin_uidx
+    ON users (is_primary_super_admin) WHERE is_primary_super_admin = true;
+
+  CREATE TABLE IF NOT EXISTS user_email_identities (
+    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    email       citext NOT NULL UNIQUE,
+    is_primary  boolean NOT NULL DEFAULT false,
+    verified_at timestamptz,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS user_email_identities_user_idx
+    ON user_email_identities (user_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS user_email_identities_one_primary_uidx
+    ON user_email_identities (user_id) WHERE is_primary = true;
+
+  INSERT INTO user_email_identities (user_id, email, is_primary, verified_at)
+  SELECT id, email, true, email_verified_at FROM users
+  ON CONFLICT (email) DO UPDATE SET
+    verified_at = COALESCE(user_email_identities.verified_at, EXCLUDED.verified_at),
+    updated_at = now();
+
+  CREATE TABLE IF NOT EXISTS admin_bootstrap_audit (
+    id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    action         text NOT NULL,
+    tenant_id      uuid NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    user_id        uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    email          citext NOT NULL,
+    actor_kid      text NOT NULL,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (action, tenant_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS admin_bootstrap_audit_created_idx
+    ON admin_bootstrap_audit (created_at DESC);
+  `,
+);
+
+/**
+ * 0016 — seal inbound routing now that the worker resolves envelope recipients.
+ *
+ * `inbound_quarantine` is intentionally global/non-RLS: it records events for
+ * which no tenant could safely be resolved.  It stores metadata only; raw MIME
+ * remains in the operator's durable S3 bucket.  Tenant defaults are removed so
+ * every future data write must carry an explicit resolved tenant.
+ */
+const INBOUND_ROUTING_AND_QUARANTINE = defineMigration(
+  "0016_inbound_routing_and_quarantine",
+  `
+  CREATE TABLE IF NOT EXISTS inbound_quarantine (
+    id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_id           text NOT NULL UNIQUE,
+    bucket              text NOT NULL,
+    object_key          text NOT NULL,
+    envelope_recipients jsonb NOT NULL DEFAULT '[]'::jsonb,
+    reason              text NOT NULL,
+    detail              text,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    updated_at          timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS inbound_quarantine_reason_idx
+    ON inbound_quarantine (reason, created_at DESC);
+
+  DO $$
+  DECLARE tbl text;
+  BEGIN
+    FOREACH tbl IN ARRAY ARRAY[
+      'domains','addresses','messages','contacts','self_hosted_providers',
+      'templates','contact_groups','sequences','owners','send_keys',
+      'scheduled_emails','aliases','forwarding_rules','warming_schedules',
+      'email_triage','provisioning_events','mailbox_sources','events',
+      'email_agent_settings','email_agent_runs','email_digests','group_members',
+      'sequence_steps','sequence_enrollments','address_ownership_events',
+      'webhook_receipts','sandbox_emails'
+    ] LOOP
+      IF to_regclass('public.' || tbl) IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE public.%I ALTER COLUMN tenant_id DROP DEFAULT', tbl);
+      END IF;
+    END LOOP;
+  END $$;
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -1932,5 +2044,7 @@ export function emailsSelfHostedMigrations(): Migration[] {
     TENANCY_IDENTITY_AND_BACKFILL,
     TENANCY_RLS_AND_SEAL,
     MESSAGES_ID_PREFIX_INDEX,
+    USER_IDENTITIES_AND_PLATFORM_ADMIN,
+    INBOUND_ROUTING_AND_QUARANTINE,
   ];
 }

@@ -8,7 +8,6 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { QueryResult, TypedQueryClient, PoolQueryClient } from "../../storage-kit/index.js";
 import type { QueryResultRow } from "pg";
 import type { SelfHostedResourceSpec, ResourceColumn } from "./resources.js";
-import { DEFAULT_TENANT_ID } from "./migrations.js";
 
 /** A live pool exposes `transaction()`; an in-memory unit-test shim does not. */
 function isTransactional(client: TypedQueryClient): client is PoolQueryClient {
@@ -161,6 +160,31 @@ export interface SendKeyRecord {
   created_at: string;
   updated_at: string;
 }
+
+export interface InboundRouteGroup {
+  tenantId: string;
+  recipients: string[];
+}
+
+export interface InboundRouteResolution {
+  groups: InboundRouteGroup[];
+  unresolved: string[];
+}
+
+export type OutboundPolicyCode =
+  | "sender_not_registered"
+  | "sender_inactive"
+  | "sender_unverified"
+  | "sender_not_ready"
+  | "send_key_invalid"
+  | "send_key_forbidden"
+  | "recipient_suppressed"
+  | "address_quota_exceeded"
+  | "warming_limit_exceeded";
+
+export type OutboundPolicyDecision =
+  | { allowed: true }
+  | { allowed: false; code: OutboundPolicyCode; message: string; status: 403 | 409 | 429 };
 
 export interface MessageRecord {
   id: string;
@@ -483,6 +507,21 @@ function canonicalAddress(from: string): string {
   return bare.includes("@") ? bare : "";
 }
 
+function warmingLimit(target: number, startDate: string | null, now = new Date()): number | null {
+  if (!startDate || !Number.isFinite(target) || target < 0) return null;
+  const start = new Date(startDate);
+  if (!Number.isFinite(start.getTime())) return null;
+  const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const startUtc = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate());
+  const day = Math.floor((todayUtc - startUtc) / 86_400_000) + 1;
+  if (day < 1) return 0;
+  let limit = 50;
+  for (let currentDay = 1; currentDay < day && limit < target; currentDay++) {
+    if (currentDay % 2 === 0) limit = Math.round(limit * 2);
+  }
+  return Math.min(limit, target);
+}
+
 /** Coerce/encode a request value for a generic-resource column per its kind. */
 function encodeColumn(col: ResourceColumn, value: unknown): unknown {
   if (value === undefined) return null;
@@ -536,8 +575,8 @@ export class CrossTenantReferenceError extends Error {
 }
 
 /**
- * Unscoped root store. Holds ONLY `forTenant()` plus the transitional
- * background-worker methods (design §6 Layer 1). It deliberately exposes NO
+ * Unscoped root store. Holds `forTenant()` plus global pre-tenant resolution
+ * primitives for inbound routing. It deliberately exposes NO
  * tenant-scoped data CRUD: a request handler is only ever handed a
  * {@link TenantScopedStore}, so forgetting the tenant is a COMPILE error rather
  * than a silent cross-tenant leak.
@@ -558,49 +597,83 @@ export class EmailsSelfHostedStore {
     return new TenantScopedStore(tenantScopedClient(this.client, tenantId), tenantId);
   }
 
-  // ---- transitional background-worker methods (design §6 x-cut #1 / §10) ----
-  //
-  // The SES-inbound ingest worker arrives with an event that carries NO
-  // credential and therefore no tenant yet (that is finding C1, resolved in
-  // P4/WI-4a by envelope-recipient routing through `inbound_domain_routes`).
-  // Until then these two UNTENANTED writes rely on the transitional `tenant_id`
-  // DEFAULT that migration 0012 adds (every row lands in the default tenant, no
-  // crash, no data loss). They are the ONLY data methods on the unscoped base;
-  // ALL credentialed /v1 traffic goes through forTenant(). These two run in the
-  // DEFAULT tenant: the inbound event carries no credential, so until the C1
-  // envelope-recipient routing lands (WI-4a), every inbound message keeps landing
-  // in the default tenant (via the transitional tenant_id DEFAULT that 0012 added
-  // and 0013 KEEPS). Setting the GUC to the default tenant is what makes these
-  // writes pass the RLS policy that 0013 enables, and the ON CONFLICT target is the
-  // per-tenant composite (the legacy single-column uniques are dropped in 0013).
+  // ---- global inbound resolution (before a tenant is known) -----------------
 
-  /** The default-tenant scoping client for the untenanted worker paths. */
-  private workerClient(): TypedQueryClient {
-    return tenantScopedClient(this.client, DEFAULT_TENANT_ID);
+  /**
+   * Resolve ONLY trusted SMTP/SES envelope recipients through the global physical
+   * domain map. Header recipients are intentionally not accepted here. A route is
+   * returned only for active tenants; everything else is explicitly unresolved.
+   */
+  async resolveInboundRecipients(envelopeRecipients: string[]): Promise<InboundRouteResolution> {
+    const normalized = [...new Set(envelopeRecipients.map(canonicalAddress).filter(Boolean))];
+    const byDomain = new Map<string, string[]>();
+    const unresolved: string[] = [];
+    for (const recipient of normalized) {
+      const at = recipient.lastIndexOf("@");
+      if (at <= 0 || at === recipient.length - 1) {
+        unresolved.push(recipient);
+        continue;
+      }
+      const domain = recipient.slice(at + 1);
+      const values = byDomain.get(domain) ?? [];
+      values.push(recipient);
+      byDomain.set(domain, values);
+    }
+    const domains = [...byDomain.keys()];
+    const routes = domains.length
+      ? await this.client.many<{ domain: string; tenant_id: string }>(
+        `SELECT r.domain, r.tenant_id
+         FROM inbound_domain_routes r
+         JOIN tenants t ON t.id = r.tenant_id
+         WHERE lower(r.domain) = ANY($1::text[]) AND t.status = 'active'`,
+        [domains],
+      )
+      : [];
+    const routeByDomain = new Map(routes.map((row) => [row.domain.toLowerCase(), row.tenant_id]));
+    const grouped = new Map<string, string[]>();
+    for (const [domain, recipients] of byDomain) {
+      const tenantId = routeByDomain.get(domain);
+      if (!tenantId) {
+        unresolved.push(...recipients);
+        continue;
+      }
+      const current = grouped.get(tenantId) ?? [];
+      current.push(...recipients);
+      grouped.set(tenantId, current);
+    }
+    return {
+      groups: [...grouped].map(([tenantId, recipients]) => ({ tenantId, recipients })),
+      unresolved,
+    };
   }
 
-  /** Worker dedup: match an existing message by stable upstream key (default tenant). */
-  async findMessageIdByKey(key: string): Promise<string | null> {
-    if (!key) return null;
-    const row = await this.workerClient().get<{ id: string }>(
-      `SELECT id FROM messages WHERE source_id = $1 OR message_id = $1 LIMIT 1`,
-      [key],
+  /** Record an unroutable event without storing raw MIME or any credential. */
+  async quarantineInbound(input: {
+    sourceId: string;
+    bucket: string;
+    objectKey: string;
+    envelopeRecipients: string[];
+    reason: string;
+    detail?: string | null;
+  }): Promise<void> {
+    await this.client.execute(
+      `INSERT INTO inbound_quarantine (
+         source_id, bucket, object_key, envelope_recipients, reason, detail
+       ) VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+       ON CONFLICT (source_id) DO UPDATE SET
+         envelope_recipients = EXCLUDED.envelope_recipients,
+         reason = EXCLUDED.reason,
+         detail = EXCLUDED.detail,
+         updated_at = now()`,
+      [
+        input.sourceId,
+        input.bucket,
+        input.objectKey,
+        JSON.stringify(input.envelopeRecipients),
+        input.reason,
+        input.detail ?? null,
+      ],
     );
-    return row ? row.id : null;
-  }
-
-  /** Worker idempotent inbound write keyed on source_id (default tenant). */
-  async upsertMessage(input: MessageInput): Promise<{ record: MessageRecord; inserted: boolean }> {
-    if (!input.source_id) throw new Error("upsertMessage requires a source_id");
-    const row = await this.workerClient().one<Record<string, unknown>>(
-      `INSERT INTO messages (${MESSAGE_INSERT_COLS})
-       VALUES (${MESSAGE_INSERT_VALUES})
-       ON CONFLICT (tenant_id, source_id) WHERE source_id IS NOT NULL DO UPDATE SET
-         ${MESSAGE_UPSERT_ASSIGNMENTS}
-       RETURNING ${MESSAGE_COLUMNS}, (xmax = 0) AS inserted`,
-      messageInsertParams(input),
-    );
-    return { record: mapMessageRow(row), inserted: Boolean(row["inserted"]) };
   }
 }
 
@@ -1084,6 +1157,122 @@ export class TenantScopedStore {
     return mapMessageRow(row);
   }
 
+  /** Return an existing tenant-scoped send intent without exposing another tenant. */
+  async getSendIntentByIdempotencyKey(key: string): Promise<MessageRecord | null> {
+    const row = await this.client.get<Record<string, unknown>>(
+      `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE idempotency_key = $1 AND tenant_id = $2`,
+      [key, this.tenantId],
+    );
+    return row ? mapMessageRow(row) : null;
+  }
+
+  /**
+   * Central outbound policy gate. It runs after the durable pending intent is
+   * reserved, so that denials are auditable and quota counts include the current
+   * attempt. No provider side effect may happen before this returns allowed.
+   */
+  async evaluateOutboundPolicy(input: {
+    from: string;
+    recipients: string[];
+    sendKeyToken?: string | null;
+  }): Promise<OutboundPolicyDecision> {
+    const from = canonicalAddress(input.from);
+    const address = await this.client.get<{
+      id: string;
+      email: string;
+      status: string;
+      verified: boolean;
+      daily_quota: number | null;
+      owner_id: string | null;
+      administrator_id: string | null;
+      provisioning_status: string | null;
+      domain: string | null;
+      domain_status: string | null;
+      domain_verified: boolean | null;
+      domain_provisioning_status: string | null;
+    }>(
+      `SELECT a.id, a.email, a.status, a.verified, a.daily_quota,
+              a.owner_id, a.administrator_id, a.provisioning_status,
+              COALESCE(a.domain, d.domain) AS domain,
+              d.status AS domain_status, d.verified AS domain_verified,
+              d.provisioning_status AS domain_provisioning_status
+       FROM addresses a
+       LEFT JOIN domains d
+         ON d.tenant_id = a.tenant_id
+        AND (d.id::text = a.domain_id OR (a.domain_id IS NULL AND lower(d.domain) = split_part(lower(a.email), '@', 2)))
+       WHERE lower(a.email) = $1 AND a.tenant_id = $2
+       ORDER BY (d.id::text = a.domain_id) DESC NULLS LAST
+       LIMIT 1`,
+      [from, this.tenantId],
+    );
+    if (!address) {
+      return { allowed: false, code: "sender_not_registered", message: "sender address is not registered", status: 403 };
+    }
+    if (address.status !== "active") {
+      return { allowed: false, code: "sender_inactive", message: "sender address is not active", status: 403 };
+    }
+    if (!address.verified) {
+      return { allowed: false, code: "sender_unverified", message: "sender address is not verified", status: 403 };
+    }
+    const addressReady = ["ready", "active", "verified"].includes(address.provisioning_status ?? "");
+    const domainReady = address.domain_verified === true && ["active", "verified", "ready"].includes(address.domain_status ?? "");
+    const domainProvisioned = ["ready", "active", "verified"].includes(address.domain_provisioning_status ?? "");
+    if (!addressReady && !domainReady && !domainProvisioned) {
+      return { allowed: false, code: "sender_not_ready", message: "sender domain is not ready for outbound mail", status: 403 };
+    }
+
+    if (input.sendKeyToken) {
+      const key = await this.verifySendKey(input.sendKeyToken);
+      if (!key) return { allowed: false, code: "send_key_invalid", message: "send key is invalid or revoked", status: 403 };
+      if (!key.owner_id || (key.owner_id !== address.owner_id && key.owner_id !== address.administrator_id)) {
+        return { allowed: false, code: "send_key_forbidden", message: "send key is not authorized for this sender", status: 403 };
+      }
+    }
+
+    const recipients = [...new Set(input.recipients.map(canonicalAddress).filter(Boolean))];
+    const suppressed = recipients.length
+      ? await this.client.get<{ email: string }>(
+        `SELECT email FROM contacts
+         WHERE tenant_id = $1 AND suppressed = true AND lower(email) = ANY($2::text[])
+         LIMIT 1`,
+        [this.tenantId, recipients],
+      )
+      : null;
+    if (suppressed) {
+      return { allowed: false, code: "recipient_suppressed", message: "one or more recipients are suppressed", status: 409 };
+    }
+
+    const usage = await this.client.one<{ address_count: number; domain_count: number }>(
+      `SELECT
+         count(*) FILTER (WHERE lower(from_addr) = $2)::int AS address_count,
+         count(*) FILTER (WHERE split_part(lower(from_addr), '@', 2) = $3)::int AS domain_count
+       FROM messages
+       WHERE tenant_id = $1
+         AND direction = 'outbound'
+         AND send_state IN ('pending', 'sending', 'sent')
+         AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`,
+      [this.tenantId, from, address.domain ?? from.split("@")[1] ?? ""],
+    );
+    if (address.daily_quota !== null && Number(usage.address_count) > address.daily_quota) {
+      return { allowed: false, code: "address_quota_exceeded", message: "sender daily quota has been reached", status: 429 };
+    }
+
+    if (address.domain) {
+      const warming = await this.client.get<{ target_daily_volume: number; start_date: string | null; status: string }>(
+        `SELECT target_daily_volume, start_date, status FROM warming_schedules
+         WHERE tenant_id = $1 AND lower(domain) = lower($2) AND status = 'active' LIMIT 1`,
+        [this.tenantId, address.domain],
+      );
+      if (warming) {
+        const limit = warmingLimit(Number(warming.target_daily_volume), warming.start_date);
+        if (limit !== null && Number(usage.domain_count) > limit) {
+          return { allowed: false, code: "warming_limit_exceeded", message: "domain warming limit has been reached", status: 429 };
+        }
+      }
+    }
+    return { allowed: true };
+  }
+
   /**
    * Persist a unique outbound intent before any provider side effect. Conflict
    * target + fallback select are tenant-scoped (`(tenant_id, idempotency_key)`),
@@ -1136,6 +1325,19 @@ export class TenantScopedStore {
        WHERE id = $1 AND tenant_id = $2 AND send_state <> 'sent'
        RETURNING ${MESSAGE_COLUMNS}`,
       [id, this.tenantId],
+    );
+    return row ? mapMessageRow(row) : null;
+  }
+
+  async markSendBlocked(id: string, reason: OutboundPolicyCode): Promise<MessageRecord | null> {
+    const row = await this.client.get<Record<string, unknown>>(
+      `UPDATE messages SET
+         send_state = 'blocked', status = 'blocked',
+         headers = COALESCE(headers, '{}'::jsonb) || jsonb_build_object('policy_denial', $2::text),
+         updated_at = now()
+       WHERE id = $1 AND tenant_id = $3 AND send_state = 'pending'
+       RETURNING ${MESSAGE_COLUMNS}`,
+      [id, reason, this.tenantId],
     );
     return row ? mapMessageRow(row) : null;
   }

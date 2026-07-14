@@ -1,6 +1,6 @@
 {
   "name": "@hasnaxyz/emails",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Hasna internal self-hosted email management CLI and MCP server (API-only /v1 client)",
   "type": "module",
   "repository": {

@@ -2003,6 +2003,20 @@ const INBOUND_ROUTING_AND_QUARANTINE = defineMigration(
   CREATE INDEX IF NOT EXISTS inbound_quarantine_reason_idx
     ON inbound_quarantine (reason, created_at DESC);
 
+  -- 0012 conservatively backfilled every legacy domain so no mail was lost
+  -- during the transition. The runtime now has an explicit claim lifecycle;
+  -- seal the map to the same receive-readiness predicate before removing the
+  -- last transitional tenant defaults. Pending/unverified/stale routes are
+  -- deliberately removed and will quarantine until re-verified and activated.
+  DELETE FROM inbound_domain_routes r
+   WHERE NOT EXISTS (
+     SELECT 1 FROM domains d
+      WHERE d.tenant_id = r.tenant_id
+        AND lower(d.domain) = lower(r.domain)
+        AND d.verified = true
+        AND d.status IN ('active','verified','ready','inbound_ready')
+   );
+
   DO $$
   DECLARE tbl text;
   BEGIN

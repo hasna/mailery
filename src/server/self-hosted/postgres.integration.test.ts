@@ -1101,4 +1101,37 @@ describe("self-hosted Postgres integration", () => {
     const rerun = await new MigrationLedger(client!, migrationsThrough0012()).migrate();
     expect(rerun.plan.filter((p) => p.state === "pending")).toHaveLength(0);
   });
+
+  it.skipIf(!client)("0016 removes pending, unverified, and stale legacy inbound routes", async () => {
+    await resetPublicSchema();
+    await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    const tenantId = "33333333-3333-3333-3333-333333333333";
+    await client!.execute(
+      `INSERT INTO tenants (id, slug, name) VALUES ($1, 'route-seal', 'Route Seal')`,
+      [tenantId],
+    );
+    await client!.execute(
+      `INSERT INTO domains (id, domain, status, verified, tenant_id) VALUES
+         ('route-pending', 'pending-route.example', 'pending', false, $1),
+         ('route-active', 'active-route.example', 'active', true, $1)`,
+      [tenantId],
+    );
+    await client!.execute(
+      `INSERT INTO inbound_domain_routes (domain, tenant_id) VALUES
+         ('pending-route.example', $1),
+         ('active-route.example', $1),
+         ('stale-route.example', $1)`,
+      [tenantId],
+    );
+
+    const seal = emailsSelfHostedMigrations().find(
+      (migration) => migration.id === "0016_inbound_routing_and_quarantine",
+    )!;
+    await client!.execute(seal.sql);
+    const routes = await client!.many<{ domain: string }>(
+      `SELECT domain FROM inbound_domain_routes WHERE tenant_id = $1 ORDER BY domain`,
+      [tenantId],
+    );
+    expect(routes.map((route) => route.domain)).toEqual(["active-route.example"]);
+  });
 });

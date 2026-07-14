@@ -28,6 +28,7 @@ import {
 } from "./tokens.js";
 
 export type Role = "owner" | "admin" | "member" | "viewer";
+export type GlobalRole = "user" | "super_admin";
 export const ROLES: readonly Role[] = ["owner", "admin", "member", "viewer"];
 /** Roles that may be assigned via invite/membership APIs (viewer is read-only, still assignable). */
 export const ASSIGNABLE_ROLES: readonly Role[] = ["owner", "admin", "member", "viewer"];
@@ -52,10 +53,14 @@ export interface UserRow {
   name: string | null;
   status: string;
   email_verified_at: string | null;
+  global_role: GlobalRole;
+  is_primary_super_admin: boolean;
   failed_login_count: number;
   locked_until: string | null;
   created_at: string;
   updated_at: string;
+  /** Verification state of the identity used for an email lookup/login. */
+  login_email_verified_at?: string | null;
 }
 
 /** Safe user projection (NEVER carries password_hash). */
@@ -65,6 +70,8 @@ export interface PublicUser {
   name: string | null;
   status: string;
   email_verified: boolean;
+  global_role: GlobalRole;
+  is_primary_super_admin: boolean;
   created_at: string;
 }
 
@@ -83,6 +90,17 @@ export interface SessionContext {
   userId: string;
   tenantId: string;
   role: Role;
+  globalRole: GlobalRole;
+}
+
+export interface UserEmailIdentity {
+  id: string;
+  user_id: string;
+  email: string;
+  is_primary: boolean;
+  verified_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface CreatedSession {
@@ -105,6 +123,8 @@ export function toPublicUser(row: UserRow): PublicUser {
     name: row.name,
     status: row.status,
     email_verified: row.email_verified_at !== null,
+    global_role: row.global_role ?? "user",
+    is_primary_super_admin: row.is_primary_super_admin ?? false,
     created_at: row.created_at,
   };
 }
@@ -216,9 +236,10 @@ export class AuthStore {
       user_id: string;
       tenant_id: string;
       role: Role;
+      global_role: GlobalRole;
       absolute_expires_at: string;
     }>(
-      `SELECT s.id AS session_id, s.user_id, s.tenant_id, m.role, s.absolute_expires_at
+      `SELECT s.id AS session_id, s.user_id, s.tenant_id, m.role, u.global_role, s.absolute_expires_at
          FROM sessions s
          JOIN users u ON u.id = s.user_id
          JOIN tenants t ON t.id = s.tenant_id
@@ -241,13 +262,24 @@ export class AuthStore {
       `UPDATE sessions SET expires_at = $2::timestamptz, last_used_at = now() WHERE id = $1`,
       [row.session_id, nextExpiry],
     );
-    return { sessionId: row.session_id, userId: row.user_id, tenantId: row.tenant_id, role: row.role };
+    return {
+      sessionId: row.session_id,
+      userId: row.user_id,
+      tenantId: row.tenant_id,
+      role: row.role,
+      globalRole: row.global_role ?? "user",
+    };
   }
 
   // ---- users ---------------------------------------------------------------
 
   async findUserByEmail(email: string): Promise<UserRow | null> {
-    return this.client.get<UserRow>(`SELECT * FROM users WHERE email = $1`, [email.trim()]);
+    return this.client.get<UserRow>(
+      `SELECT u.*, i.verified_at AS login_email_verified_at FROM users u
+       JOIN user_email_identities i ON i.user_id = u.id
+       WHERE i.email = $1`,
+      [email.trim()],
+    );
   }
 
   async getUserById(id: string): Promise<UserRow | null> {
@@ -338,6 +370,11 @@ export class AuthStore {
       const user = await tx.one<UserRow>(
         `INSERT INTO users (email, password_hash, name, status) VALUES ($1, $2, $3, 'active') RETURNING *`,
         [email, input.passwordHash, input.name ?? null],
+      );
+      await tx.execute(
+        `INSERT INTO user_email_identities (user_id, email, is_primary, verified_at)
+         VALUES ($1, $2, true, NULL)`,
+        [user.id, email],
       );
       const membership = await tx.one<MembershipRow>(
         `INSERT INTO memberships (user_id, tenant_id, role, status) VALUES ($1, $2, 'owner', 'active') RETURNING *`,
@@ -657,19 +694,77 @@ export class AuthStore {
     const tokenHash = hashToken(token);
     const nowIso = this.iso();
     return this.client.transaction(async (tx) => {
-      const row = await tx.get<{ id: string; user_id: string }>(
+      const row = await tx.get<{ id: string; user_id: string; email: string }>(
         `UPDATE email_verification_tokens SET used_at = now()
           WHERE token_hash = $1 AND used_at IS NULL AND expires_at > $2::timestamptz
-          RETURNING id, user_id`,
+          RETURNING id, user_id, email`,
         [tokenHash, nowIso],
       );
       if (!row) return null;
+      await tx.execute(
+        `UPDATE user_email_identities SET verified_at = COALESCE(verified_at, now()), updated_at = now()
+         WHERE user_id = $1 AND email = $2`,
+        [row.user_id, row.email],
+      );
       return tx.get<UserRow>(
-        `UPDATE users SET email_verified_at = COALESCE(email_verified_at, now()), updated_at = now()
-          WHERE id = $1 RETURNING *`,
-        [row.user_id],
+        `UPDATE users SET
+           email_verified_at = CASE WHEN email = $2 THEN COALESCE(email_verified_at, now()) ELSE email_verified_at END,
+           updated_at = now()
+         WHERE id = $1 RETURNING *`,
+        [row.user_id, row.email],
       );
     });
+  }
+
+  async listUserEmailIdentities(userId: string): Promise<UserEmailIdentity[]> {
+    return this.client.many<UserEmailIdentity>(
+      `SELECT id, user_id, email, is_primary, verified_at, created_at, updated_at
+       FROM user_email_identities WHERE user_id = $1
+       ORDER BY is_primary DESC, created_at ASC`,
+      [userId],
+    );
+  }
+
+  async addUserEmailIdentity(userId: string, email: string): Promise<UserEmailIdentity> {
+    return this.client.one<UserEmailIdentity>(
+      `INSERT INTO user_email_identities (user_id, email, is_primary)
+       VALUES ($1, $2, false)
+       RETURNING id, user_id, email, is_primary, verified_at, created_at, updated_at`,
+      [userId, email.trim()],
+    );
+  }
+
+  async makePrimaryEmailIdentity(userId: string, identityId: string): Promise<UserEmailIdentity | null> {
+    return this.client.transaction(async (tx) => {
+      const identity = await tx.get<UserEmailIdentity>(
+        `SELECT id, user_id, email, is_primary, verified_at, created_at, updated_at
+         FROM user_email_identities WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+        [identityId, userId],
+      );
+      if (!identity || !identity.verified_at) return null;
+      await tx.execute(`UPDATE user_email_identities SET is_primary = false, updated_at = now() WHERE user_id = $1`, [userId]);
+      const primary = await tx.one<UserEmailIdentity>(
+        `UPDATE user_email_identities SET is_primary = true, updated_at = now()
+         WHERE id = $1 AND user_id = $2
+         RETURNING id, user_id, email, is_primary, verified_at, created_at, updated_at`,
+        [identityId, userId],
+      );
+      await tx.execute(
+        `UPDATE users SET email = $2, email_verified_at = $3::timestamptz, updated_at = now() WHERE id = $1`,
+        [userId, primary.email, primary.verified_at],
+      );
+      return primary;
+    });
+  }
+
+  async removeUserEmailIdentity(userId: string, identityId: string): Promise<boolean> {
+    const deleted = await this.client.many<{ id: string }>(
+      `DELETE FROM user_email_identities
+       WHERE id = $1 AND user_id = $2 AND is_primary = false
+       RETURNING id`,
+      [identityId, userId],
+    );
+    return deleted.length > 0;
   }
 
   // ---- password reset ------------------------------------------------------
@@ -766,13 +861,21 @@ export class AuthStore {
         [tokenHash, nowIso],
       );
       if (!invite) return { error: "invalid" as const };
-      let user = await tx.get<UserRow>(`SELECT * FROM users WHERE email = $1`, [invite.email]);
+      let user = await tx.get<UserRow>(
+        `SELECT u.* FROM users u JOIN user_email_identities i ON i.user_id = u.id WHERE i.email = $1`,
+        [invite.email],
+      );
       if (!user) {
         if (!input.passwordHash) return { error: "needs_password" as const };
         user = await tx.one<UserRow>(
           `INSERT INTO users (email, password_hash, name, status, email_verified_at)
            VALUES ($1, $2, $3, 'active', now()) RETURNING *`,
           [invite.email, input.passwordHash, input.name ?? null],
+        );
+        await tx.execute(
+          `INSERT INTO user_email_identities (user_id, email, is_primary, verified_at)
+           VALUES ($1, $2, true, now())`,
+          [user.id, invite.email],
         );
       }
       await tx.execute(
@@ -806,10 +909,88 @@ export class AuthStore {
         [email, input.passwordHash, input.name ?? null],
       );
       await tx.execute(
+        `INSERT INTO user_email_identities (user_id, email, is_primary, verified_at)
+         VALUES ($1, $2, true, now())`,
+        [user.id, email],
+      );
+      await tx.execute(
         `INSERT INTO memberships (user_id, tenant_id, role, status) VALUES ($1, $2, 'owner', 'active')`,
         [user.id, input.tenantId],
       );
       return { user };
+    });
+  }
+
+  /**
+   * Operator-only, idempotent creation/promotion of the single primary platform
+   * super-admin. The caller is authenticated separately with an API key; only its
+   * non-secret kid is written to the audit ledger.
+   */
+  async bootstrapPrimarySuperAdmin(input: {
+    tenantId: string;
+    email: string;
+    passwordHash: string;
+    actorKid: string;
+    name?: string | null;
+  }): Promise<{ user: UserRow; created: boolean } | { error: "primary_exists" }> {
+    const email = input.email.trim().toLowerCase();
+    return this.client.transaction(async (tx) => {
+      // Serialize this one-time global operator action. Without this lock, two
+      // concurrent first calls can both observe an empty singleton before either
+      // inserts, turning an idempotent replay into a unique-constraint 500.
+      await tx.execute(`SELECT pg_advisory_xact_lock(hashtext('emails:primary-super-admin-bootstrap'))`);
+      const incumbent = await tx.get<{ id: string; email: string }>(
+        `SELECT id, email FROM users WHERE is_primary_super_admin = true FOR UPDATE`,
+      );
+      let user = await tx.get<UserRow>(
+        `SELECT u.* FROM users u JOIN user_email_identities i ON i.user_id = u.id WHERE i.email = $1 FOR UPDATE`,
+        [email],
+      );
+      if (incumbent && (!user || incumbent.id !== user.id)) return { error: "primary_exists" as const };
+
+      let created = false;
+      if (!user) {
+        user = await tx.one<UserRow>(
+          `INSERT INTO users (
+             email, password_hash, name, status, email_verified_at, global_role, is_primary_super_admin
+           ) VALUES ($1, $2, $3, 'active', now(), 'super_admin', true)
+           RETURNING *`,
+          [email, input.passwordHash, input.name ?? null],
+        );
+        await tx.execute(
+          `INSERT INTO user_email_identities (user_id, email, is_primary, verified_at)
+           VALUES ($1, $2, true, now())`,
+          [user.id, email],
+        );
+        created = true;
+      } else {
+        user = await tx.one<UserRow>(
+          `UPDATE users SET global_role = 'super_admin', is_primary_super_admin = true,
+             status = 'active', email_verified_at = COALESCE(email_verified_at, now()), updated_at = now()
+           WHERE id = $1 RETURNING *`,
+          [user.id],
+        );
+        await tx.execute(
+          `UPDATE user_email_identities SET verified_at = COALESCE(verified_at, now()), updated_at = now()
+           WHERE user_id = $1 AND email = $2`,
+          [user.id, email],
+        );
+      }
+
+      await tx.execute(
+        `INSERT INTO memberships (user_id, tenant_id, role, status)
+         VALUES ($1, $2, 'owner', 'active')
+         ON CONFLICT (user_id, tenant_id) DO UPDATE
+           SET role = 'owner', status = 'active', updated_at = now()`,
+        [user.id, input.tenantId],
+      );
+      await tx.execute(
+        `INSERT INTO admin_bootstrap_audit (action, tenant_id, user_id, email, actor_kid)
+         VALUES ('primary_super_admin_bootstrap', $1, $2, $3, $4)
+         ON CONFLICT (action, tenant_id, user_id) DO NOTHING`,
+        [input.tenantId, user.id, email, input.actorKid],
+      );
+      return { user, created };
     });
   }
 }

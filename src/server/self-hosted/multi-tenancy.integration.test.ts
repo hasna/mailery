@@ -26,6 +26,7 @@ import { RateLimiter } from "./auth/rate-limit.js";
 import { hashPassword } from "./auth/password.js";
 import type { AuthMailerConfig } from "./auth/mailer.js";
 import type { SelfHostedKeyStore } from "./keys.js";
+import { ingestS3Object } from "./ingest-worker.js";
 
 const SIGNING_SECRET = "test-signing-secret-do-not-use-in-prod-0123456789";
 const databaseUrl = process.env["EMAILS_TEST_POSTGRES_URL"];
@@ -121,14 +122,14 @@ function lastToken(sent: Captured[]): string {
 }
 
 /** Create a tenant + a signed api key bound to it. */
-async function makeTenant(slug: string): Promise<{ tenantId: string; token: string }> {
+async function makeTenant(slug: string): Promise<{ tenantId: string; token: string; kid: string }> {
   const t = await pgClient!.one<{ id: string }>(
     `INSERT INTO tenants (slug, name) VALUES ($1, $2) RETURNING id`,
     [slug, slug],
   );
   const minted = mintApiKey({ app: "emails", scopes: ["emails:*"], signingSecret: SIGNING_SECRET });
   await pgClient!.execute(`INSERT INTO api_key_tenants (kid, tenant_id) VALUES ($1, $2)`, [minted.kid, t.id]);
-  return { tenantId: t.id, token: minted.token };
+  return { tenantId: t.id, token: minted.token, kid: minted.kid };
 }
 
 async function createVerifiedUser(email: string, password: string, tenantId: string, role: string): Promise<string> {
@@ -136,6 +137,11 @@ async function createVerifiedUser(email: string, password: string, tenantId: str
   const u = await pgClient!.one<{ id: string }>(
     `INSERT INTO users (email, password_hash, status, email_verified_at) VALUES ($1, $2, 'active', now()) RETURNING id`,
     [email, hash],
+  );
+  await pgClient!.execute(
+    `INSERT INTO user_email_identities (user_id, email, is_primary, verified_at)
+     VALUES ($1, $2, true, now())`,
+    [u.id, email],
   );
   await pgClient!.execute(
     `INSERT INTO memberships (user_id, tenant_id, role, status) VALUES ($1, $2, $3, 'active')`,
@@ -340,6 +346,202 @@ describe.skipIf(!pgClient)("tenant isolation matrix (WI-5c, Layer 1)", () => {
   });
 });
 
+describe.skipIf(!pgClient)("central outbound enforcement", () => {
+  it("allows a ready sender and blocks suppression, unverified senders, and quota before provider I/O", async () => {
+    const { deps, sent } = makeDeps();
+    const tenant = await makeTenant("outbound-policy");
+    const domain = await call(deps, "POST", "/v1/domains", {
+      token: tenant.token,
+      body: { domain: "policy.example", status: "active", verified: true, provisioning_status: "ready" },
+    });
+    expect(domain.status).toBe(201);
+    const register = (email: string, extra: Record<string, unknown> = {}) => call(deps, "POST", "/v1/addresses", {
+      token: tenant.token,
+      body: {
+        email,
+        status: "active",
+        verified: true,
+        domain_id: domain.body.domain.id,
+        provisioning_status: "ready",
+        ...extra,
+      },
+    });
+    await register("ready@policy.example");
+    const allowed = await call(deps, "POST", "/v1/messages/send", {
+      token: tenant.token,
+      body: {
+        from: "ready@policy.example",
+        to: ["ok@example.net"],
+        subject: "allowed",
+        idempotency_key: crypto.randomUUID(),
+      },
+    });
+    expect(allowed.status).toBe(202);
+    expect(sent).toHaveLength(1);
+
+    const memberEmail = `member-send-${crypto.randomUUID()}@hasna.com`;
+    await createVerifiedUser(memberEmail, "sup3rsecret!", tenant.tenantId, "member");
+    const memberLogin = await call(deps, "POST", "/v1/auth/login", {
+      body: { email: memberEmail, password: "sup3rsecret!" },
+    });
+    const memberBypass = await call(deps, "POST", "/v1/messages/send", {
+      token: memberLogin.body.session_token,
+      body: {
+        from: "ready@policy.example",
+        to: ["member-target@example.net"],
+        subject: "member cannot omit sender authorization",
+        idempotency_key: crypto.randomUUID(),
+      },
+    });
+    expect(memberBypass).toMatchObject({ status: 403, body: { reason: "send_key_required" } });
+    expect(sent).toHaveLength(1);
+
+    const ambiguousRecipient = await call(deps, "POST", "/v1/messages/send", {
+      token: tenant.token,
+      body: {
+        from: "ready@policy.example",
+        to: ["first@example.net, second@example.net"],
+        subject: "ambiguous recipient",
+        idempotency_key: crypto.randomUUID(),
+      },
+    });
+    expect(ambiguousRecipient.status).toBe(400);
+    expect(sent).toHaveLength(1);
+
+    await call(deps, "POST", "/v1/contacts", {
+      token: tenant.token,
+      body: { email: "blocked@example.net", suppressed: true },
+    });
+    const suppressed = await call(deps, "POST", "/v1/messages/send", {
+      token: tenant.token,
+      body: {
+        from: "ready@policy.example",
+        to: ["Blocked User <blocked@example.net>"],
+        subject: "blocked",
+        idempotency_key: crypto.randomUUID(),
+      },
+    });
+    expect(suppressed).toMatchObject({ status: 409, body: { reason: "recipient_suppressed", retry_safe: false } });
+    expect(sent).toHaveLength(1);
+
+    await register("quota@policy.example", { daily_quota: 0 });
+    const quota = await call(deps, "POST", "/v1/messages/send", {
+      token: tenant.token,
+      body: {
+        from: "quota@policy.example",
+        to: ["ok2@example.net"],
+        subject: "quota",
+        idempotency_key: crypto.randomUUID(),
+      },
+    });
+    expect(quota).toMatchObject({ status: 429, body: { reason: "address_quota_exceeded" } });
+    expect(sent).toHaveLength(1);
+
+    await register("unverified@policy.example", { verified: false });
+    const unverified = await call(deps, "POST", "/v1/messages/send", {
+      token: tenant.token,
+      body: {
+        from: "unverified@policy.example",
+        to: ["ok3@example.net"],
+        subject: "unverified",
+        idempotency_key: crypto.randomUUID(),
+      },
+    });
+    expect(unverified).toMatchObject({ status: 403, body: { reason: "sender_unverified" } });
+    expect(sent).toHaveLength(1);
+  });
+});
+
+describe.skipIf(!pgClient)("envelope-only inbound tenant routing", () => {
+  it("splits tenants, ignores spoofed headers, deduplicates per tenant, and quarantines no-route events", async () => {
+    const { deps } = makeDeps();
+    const a = await makeTenant("inbound-route-a");
+    const b = await makeTenant("inbound-route-b");
+    const domainA = `route-a-${crypto.randomUUID()}.example`;
+    const domainB = `route-b-${crypto.randomUUID()}.example`;
+    await deps.store.forTenant(a.tenantId).createDomain({ domain: domainA, status: "active", verified: true });
+    await deps.store.forTenant(b.tenantId).createDomain({ domain: domainB, status: "active", verified: true });
+    const key = `inbound/${crypto.randomUUID()}`;
+    const raw = Buffer.from([
+      "From: attacker@external.example",
+      "To: spoofed@unrouted.example",
+      "Cc: other@unrouted.example",
+      "Subject: envelope wins",
+      "",
+      "body",
+    ].join("\r\n"));
+    const result = await ingestS3Object(
+      { store: deps.store, fetchObject: async () => raw, now: () => new Date().toISOString() },
+      "test-bucket",
+      key,
+      { recipients: [`alpha@${domainA}`, `beta@${domainB}`] },
+    );
+    expect(result).toMatchObject({ status: "ingested", tenant_ids: [a.tenantId, b.tenantId] });
+    expect((await deps.store.forTenant(a.tenantId).listMessages())[0]!.to_addrs).toEqual([`alpha@${domainA}`]);
+    expect((await deps.store.forTenant(b.tenantId).listMessages())[0]!.to_addrs).toEqual([`beta@${domainB}`]);
+
+    const replay = await ingestS3Object(
+      { store: deps.store, fetchObject: async () => { throw new Error("duplicate must not fetch"); }, now: () => new Date().toISOString() },
+      "test-bucket",
+      key,
+      { recipients: [`alpha@${domainA}`, `beta@${domainB}`] },
+    );
+    expect(replay.status).toBe("duplicate");
+
+    const quarantineKey = `inbound/${crypto.randomUUID()}`;
+    const quarantined = await ingestS3Object(
+      { store: deps.store, fetchObject: async () => { throw new Error("quarantine must not fetch"); }, now: () => new Date().toISOString() },
+      "test-bucket",
+      quarantineKey,
+      { recipients: ["nobody@no-route.example"] },
+    );
+    expect(quarantined.status).toBe("quarantined");
+    expect((await pgClient!.one<{ n: number }>(
+      `SELECT count(*)::int AS n FROM inbound_quarantine WHERE source_id = $1 AND reason = 'no_tenant_route'`,
+      [quarantineKey],
+    )).n).toBe(1);
+  });
+
+  it("atomically claims, rejects cross-tenant reassignment, releases, transfers, and suspends routes", async () => {
+    const { deps } = makeDeps();
+    const a = await makeTenant(`route-life-a-${crypto.randomUUID()}`);
+    const b = await makeTenant(`route-life-b-${crypto.randomUUID()}`);
+    const domain = `route-life-${crypto.randomUUID()}.example`;
+    const claimed = await call(deps, "POST", "/v1/domains", {
+      token: a.token,
+      body: { domain, status: "active", verified: true },
+    });
+    expect(claimed.status).toBe(201);
+    const pending = await call(deps, "POST", "/v1/domains", {
+      token: b.token,
+      body: { domain, status: "pending", verified: false },
+    });
+    expect(pending.status).toBe(201);
+    const hijack = await call(deps, "PATCH", `/v1/domains/${pending.body.domain.id}`, {
+      token: b.token,
+      body: { status: "active", verified: true },
+    });
+    expect(hijack).toMatchObject({ status: 409, body: { reason: "inbound_route_conflict" } });
+
+    expect((await call(deps, "DELETE", `/v1/domains/${claimed.body.domain.id}`, { token: a.token })).status).toBe(200);
+    expect((await call(deps, "PATCH", `/v1/domains/${pending.body.domain.id}`, {
+      token: b.token,
+      body: { status: "active", verified: true },
+    })).status).toBe(200);
+    expect((await deps.store.resolveInboundRecipients([`mail@${domain}`])).groups).toEqual([
+      { tenantId: b.tenantId, recipients: [`mail@${domain}`] },
+    ]);
+
+    await pgClient!.execute(`UPDATE tenants SET status = 'suspended' WHERE id = $1`, [b.tenantId]);
+    expect(await deps.store.resolveInboundRecipients([`mail@${domain}`])).toMatchObject({ groups: [], unresolved: [`mail@${domain}`] });
+    await pgClient!.execute(`UPDATE tenants SET status = 'active' WHERE id = $1`, [b.tenantId]);
+    expect((await call(deps, "DELETE", `/v1/domains/${pending.body.domain.id}`, { token: b.token })).status).toBe(200);
+    expect((await pgClient!.one<{ n: number }>(
+      `SELECT count(*)::int AS n FROM inbound_domain_routes WHERE domain = $1`, [domain],
+    )).n).toBe(0);
+  });
+});
+
 describe.skipIf(!pgClient)("Addendum A1: @hasna gate", () => {
   it("signup with a non-hasna email is a generic 403", async () => {
     const { deps } = makeDeps();
@@ -439,6 +641,47 @@ describe.skipIf(!pgClient)("Addendum A2: signup -> verify -> login (SES send moc
   });
 });
 
+describe.skipIf(!pgClient)("multiple verified email identities", () => {
+  it("adds and verifies an alias, logs in through it, makes it primary, and protects the primary identity", async () => {
+    const { deps, sent } = makeDeps();
+    const primary = `identity-${crypto.randomUUID()}@hasna.com`;
+    const alias = `identity-alias-${crypto.randomUUID()}@hasna.com`;
+    const password = "sup3rsecret!";
+    const signup = await call(deps, "POST", "/v1/auth/signup", {
+      body: { email: primary, password, tenant_name: `Identity ${crypto.randomUUID()}` },
+    });
+    expect(signup.status).toBe(200);
+    await call(deps, "GET", `/v1/auth/verify-email?token=${encodeURIComponent(lastToken(sent))}`);
+    const login = await call(deps, "POST", "/v1/auth/login", { body: { email: primary, password } });
+    const session = login.body.session_token;
+
+    const added = await call(deps, "POST", "/v1/me/email-identities", {
+      token: session,
+      body: { email: alias },
+    });
+    expect(added.status).toBe(201);
+    const aliasId = added.body.email_identity.id;
+    expect(added.body.verification_required).toBe(true);
+    // An unverified alias cannot be used to log in even though the primary is verified.
+    expect((await call(deps, "POST", "/v1/auth/login", { body: { email: alias, password } })).body.reason).toBe("email_unverified");
+
+    const aliasToken = lastToken(sent);
+    expect((await call(deps, "GET", `/v1/auth/verify-email?token=${encodeURIComponent(aliasToken)}`)).status).toBe(200);
+    expect((await call(deps, "POST", "/v1/auth/login", { body: { email: alias, password } })).status).toBe(200);
+
+    const madePrimary = await call(deps, "POST", `/v1/me/email-identities/${aliasId}/primary`, { token: session });
+    expect(madePrimary.status).toBe(200);
+    const me = await call(deps, "GET", "/v1/me", { token: session });
+    expect(me.body.user.email).toBe(alias);
+    expect(me.body.email_identities).toHaveLength(2);
+    expect(me.body.email_identities.filter((item: any) => item.is_primary)).toEqual([
+      expect.objectContaining({ id: aliasId, email: alias, verified: true }),
+    ]);
+    const cannotDelete = await call(deps, "DELETE", `/v1/me/email-identities/${aliasId}`, { token: session });
+    expect(cannotDelete.status).toBe(409);
+  });
+});
+
 describe.skipIf(!pgClient)("role gates", () => {
   it("a viewer is read-only (write routes -> 403 insufficient_scope)", async () => {
     const { deps } = makeDeps();
@@ -488,6 +731,71 @@ describe.skipIf(!pgClient)("bootstrap-owner (api-key migration bridge)", () => {
     expect(second.body.reason).toBe("owner_exists");
     // A session (non-key) cannot bootstrap.
     const viaSession = await call(deps, "POST", "/v1/auth/bootstrap-owner", { token: login.body.session_token, body: { email: `x-${crypto.randomUUID()}@hasna.com`, password: "sup3rsecret!" } });
+    expect(viaSession.status).toBe(403);
+  });
+});
+
+describe.skipIf(!pgClient)("primary super-admin bootstrap", () => {
+  it("is pinned to one operator key, race-idempotent, singleton, and audit-safe", async () => {
+    const { deps } = makeDeps();
+    const tenant = await makeTenant("primary-super-admin");
+    const body = { email: "andrei@hasna.com", password: "test-only-password-93", name: "Andrei" };
+    deps.env = { ...process.env, EMAILS_PRIMARY_SUPER_ADMIN_EMAIL: "andrei@hasna.com" };
+    const unpinned = await call(deps, "POST", "/v1/auth/bootstrap-super-admin", { token: tenant.token, body });
+    expect(unpinned.status).toBe(503);
+    expect(unpinned.body.reason).toBe("bootstrap_not_configured");
+
+    deps.env = {
+      ...deps.env,
+      EMAILS_PRIMARY_SUPER_ADMIN_BOOTSTRAP_KID: tenant.kid,
+    };
+    const attacker = await makeTenant("primary-super-admin-attacker");
+    const crossTenantKey = await call(deps, "POST", "/v1/auth/bootstrap-super-admin", {
+      token: attacker.token,
+      body,
+    });
+    expect(crossTenantKey.status).toBe(403);
+    expect(crossTenantKey.body.reason).toBe("bootstrap_key_forbidden");
+
+    const raced = await Promise.all([
+      call(deps, "POST", "/v1/auth/bootstrap-super-admin", { token: tenant.token, body }),
+      call(deps, "POST", "/v1/auth/bootstrap-super-admin", { token: tenant.token, body }),
+    ]);
+    expect(raced.map((result) => result.status).sort()).toEqual([200, 201]);
+    const first = raced.find((result) => result.status === 201)!;
+    expect(first.body.user).toMatchObject({
+      email: "andrei@hasna.com",
+      global_role: "super_admin",
+      is_primary_super_admin: true,
+    });
+    expect(first.body.user).not.toHaveProperty("password_hash");
+
+    const replay = await call(deps, "POST", "/v1/auth/bootstrap-super-admin", { token: tenant.token, body });
+    expect(replay.status).toBe(200);
+    expect(replay.body.created).toBe(false);
+    expect(replay.body.user.id).toBe(first.body.user.id);
+
+    const audit = await pgClient!.one<{ n: number; secrets: number }>(
+      `SELECT count(*)::int AS n,
+              count(*) FILTER (WHERE to_jsonb(admin_bootstrap_audit)::text ~* 'password|token|secret')::int AS secrets
+       FROM admin_bootstrap_audit WHERE user_id = $1`,
+      [first.body.user.id],
+    );
+    expect(audit).toEqual({ n: 1, secrets: 0 });
+
+    const mismatch = await call(deps, "POST", "/v1/auth/bootstrap-super-admin", {
+      token: tenant.token,
+      body: { ...body, email: "someone-else@hasna.com" },
+    });
+    expect(mismatch.status).toBe(403);
+
+    const login = await call(deps, "POST", "/v1/auth/login", {
+      body: { email: "andrei@hasna.com", password: body.password },
+    });
+    const viaSession = await call(deps, "POST", "/v1/auth/bootstrap-super-admin", {
+      token: login.body.session_token,
+      body,
+    });
     expect(viaSession.status).toBe(403);
   });
 });

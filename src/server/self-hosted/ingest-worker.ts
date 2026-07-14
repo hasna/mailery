@@ -25,12 +25,25 @@
 import { parseSesNotification } from "../../lib/inbound-realtime.js";
 import { parseInboundMime } from "../../lib/inbound-mime.js";
 import { getSelfHostedPool, closeSelfHostedPool } from "./env.js";
-import { EmailsSelfHostedStore, type MessageInput, type MessageRecord } from "./store.js";
+import {
+  EmailsSelfHostedStore,
+  type InboundRouteResolution,
+  type TenantScopedStore,
+  type MessageInput,
+} from "./store.js";
 
 /** Minimal store surface the worker needs (kept narrow for testability). */
 export interface IngestStore {
-  findMessageIdByKey(key: string): Promise<string | null>;
-  upsertMessage(input: MessageInput): Promise<{ record: MessageRecord; inserted: boolean }>;
+  resolveInboundRecipients(recipients: string[]): Promise<InboundRouteResolution>;
+  quarantineInbound(input: {
+    sourceId: string;
+    bucket: string;
+    objectKey: string;
+    envelopeRecipients: string[];
+    reason: string;
+    detail?: string | null;
+  }): Promise<void>;
+  forTenant(tenantId: string): Pick<TenantScopedStore, "findMessageIdByKey" | "upsertMessage">;
 }
 
 export interface IngestDeps {
@@ -40,13 +53,15 @@ export interface IngestDeps {
   now: () => string;
 }
 
-export type IngestStatus = "ingested" | "duplicate" | "skipped" | "error";
+export type IngestStatus = "ingested" | "duplicate" | "quarantined" | "error";
 
 export interface IngestResult {
   status: IngestStatus;
   key?: string;
   id?: string;
   inserted?: boolean;
+  tenant_ids?: string[];
+  quarantined_recipients?: string[];
   reason?: string;
   error?: string;
 }
@@ -59,34 +74,86 @@ export async function ingestS3Object(
 ): Promise<IngestResult> {
   if (!bucket) return { status: "error", key, reason: "no_bucket", error: "worker has no configured inbound bucket" };
   try {
-    if (await deps.store.findMessageIdByKey(key)) return { status: "duplicate", key };
+    const envelopeRecipients = note.recipients ?? [];
+    const route = await deps.store.resolveInboundRecipients(envelopeRecipients);
+    if (route.unresolved.length > 0 || route.groups.length === 0) {
+      await deps.store.quarantineInbound({
+        sourceId: key,
+        bucket,
+        objectKey: key,
+        envelopeRecipients,
+        reason: route.groups.length === 0 ? "no_tenant_route" : "partial_tenant_route",
+        detail: route.unresolved.length > 0
+          ? `${route.unresolved.length} unresolved envelope recipient(s)`
+          : "empty envelope recipients",
+      });
+    }
+    if (route.groups.length === 0) {
+      return { status: "quarantined", key, reason: "no_tenant_route", quarantined_recipients: route.unresolved };
+    }
+
+    const targets: Array<{
+      group: InboundRouteResolution["groups"][number];
+      scoped: Pick<TenantScopedStore, "findMessageIdByKey" | "upsertMessage">;
+      existing: string | null;
+    }> = [];
+    for (const group of route.groups) {
+      const scoped = deps.store.forTenant(group.tenantId);
+      targets.push({ group, scoped, existing: await scoped.findMessageIdByKey(key) });
+    }
+    if (targets.every((target) => target.existing !== null)) {
+      return {
+        status: "duplicate",
+        key,
+        id: targets[0]?.existing ?? undefined,
+        inserted: false,
+        tenant_ids: targets.map((target) => target.group.tenantId),
+      };
+    }
 
     const raw = await deps.fetchObject(bucket, key);
     const parsed = await parseInboundMime(raw);
-    const to = parsed.to_addrs.length > 0 ? parsed.to_addrs : note.recipients ?? [];
     const receivedAt = parsed.received_at ?? note.timestamp ?? deps.now();
-
-    const input: MessageInput = {
-      from_addr: parsed.from_addr || "(unknown sender)",
-      to_addrs: to,
-      cc_addrs: parsed.cc_addrs,
-      subject: parsed.subject || null,
-      body_text: parsed.body_text,
-      body_html: parsed.body_html,
-      status: "received",
-      direction: "inbound",
-      message_id: key,
-      in_reply_to: parsed.in_reply_to,
-      received_at: receivedAt,
-      is_read: false,
-      headers: parsed.headers,
-      attachments: parsed.attachments,
-      // Idempotency key: re-delivery of the same object upserts in place.
-      source_id: key,
+    const tenantIds: string[] = [];
+    const ids: string[] = [];
+    let insertedAny = false;
+    for (const { group, scoped, existing } of targets) {
+      tenantIds.push(group.tenantId);
+      if (existing) {
+        ids.push(existing);
+        continue;
+      }
+      const input: MessageInput = {
+        from_addr: parsed.from_addr || "(unknown sender)",
+        // MIME To/Cc headers are sender-controlled. Tenant selection and the
+        // stored recipient list come only from the trusted SES envelope.
+        to_addrs: group.recipients,
+        cc_addrs: [],
+        subject: parsed.subject || null,
+        body_text: parsed.body_text,
+        body_html: parsed.body_html,
+        status: "received",
+        direction: "inbound",
+        message_id: key,
+        in_reply_to: parsed.in_reply_to,
+        received_at: receivedAt,
+        is_read: false,
+        headers: parsed.headers,
+        attachments: parsed.attachments,
+        source_id: key,
+      };
+      const { record, inserted } = await scoped.upsertMessage(input);
+      ids.push(record.id);
+      insertedAny ||= inserted;
+    }
+    return {
+      status: insertedAny ? "ingested" : "duplicate",
+      key,
+      id: ids[0],
+      inserted: insertedAny,
+      tenant_ids: tenantIds,
+      ...(route.unresolved.length > 0 ? { quarantined_recipients: route.unresolved } : {}),
     };
-
-    const { record, inserted } = await deps.store.upsertMessage(input);
-    return { status: "ingested", key, id: record.id, inserted };
   } catch (err) {
     return { status: "error", key, error: err instanceof Error ? err.message : String(err) };
   }
@@ -98,7 +165,8 @@ export async function ingestS3Object(
  * without AWS or a database.
  *
  * Returns a status the caller uses to decide whether to delete the SQS message:
- * Only `ingested` / `duplicate` are terminal (delete); malformed or incomplete
+ * `ingested`, `duplicate`, and metadata-only `quarantined` are terminal (delete);
+ * malformed or incomplete
  * notifications are errors and remain for SQS redrive/DLQ inspection.
  */
 export async function processInboundNotification(
@@ -134,7 +202,7 @@ export function validateIngestWorkerConfig(config: {
 }
 
 export function shouldDeleteIngestResult(result: IngestResult): boolean {
-  return result.status === "ingested" || result.status === "duplicate";
+  return result.status === "ingested" || result.status === "duplicate" || result.status === "quarantined";
 }
 
 /**
@@ -183,7 +251,7 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
   process.on("SIGTERM", () => stop("SIGTERM"));
   process.on("SIGINT", () => stop("SIGINT"));
 
-  const counts = { ingested: 0, duplicate: 0, skipped: 0, error: 0 };
+  const counts = { ingested: 0, duplicate: 0, quarantined: 0, error: 0 };
   let lastReport = Date.now();
   console.log(
     `[ingest] starting: queue=${configuredQueueUrl.split("/").pop()} region=${region} ` +
@@ -234,7 +302,7 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
     if (Date.now() - lastReport > 30_000) {
       console.log(
         `[ingest] progress ingested=${counts.ingested} duplicate=${counts.duplicate} ` +
-          `skipped=${counts.skipped} error=${counts.error}`,
+          `quarantined=${counts.quarantined} error=${counts.error}`,
       );
       lastReport = Date.now();
     }
@@ -242,7 +310,7 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
 
   console.log(
     `[ingest] stopped. totals ingested=${counts.ingested} duplicate=${counts.duplicate} ` +
-      `skipped=${counts.skipped} error=${counts.error}`,
+      `quarantined=${counts.quarantined} error=${counts.error}`,
   );
   await closeSelfHostedPool();
 }
@@ -252,6 +320,8 @@ interface BackfillOptions {
   prefix?: string;
   region?: string;
   limit?: number;
+  /** Trusted historical envelope recipients for this bounded prefix/backfill. */
+  recipients?: string[];
 }
 
 /**
@@ -265,6 +335,10 @@ export async function runIngestS3Backfill(options: BackfillOptions = {}): Promis
   const prefix = options.prefix ?? process.env["EMAILS_INGEST_S3_PREFIX"] ?? "";
   const envLimit = Number(process.env["EMAILS_INGEST_BACKFILL_LIMIT"] ?? "0");
   const limit = options.limit ?? (Number.isFinite(envLimit) && envLimit > 0 ? envLimit : undefined);
+  const recipients = options.recipients ?? (process.env["EMAILS_INGEST_BACKFILL_RECIPIENTS"] ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
   validateIngestWorkerConfig({
     queueUrl: "backfill",
     bucket,
@@ -284,7 +358,7 @@ export async function runIngestS3Backfill(options: BackfillOptions = {}): Promis
     return Buffer.concat(chunks);
   };
   const deps: IngestDeps = { store, fetchObject, now: () => new Date().toISOString() };
-  const counts = { ingested: 0, duplicate: 0, skipped: 0, error: 0 };
+  const counts = { ingested: 0, duplicate: 0, quarantined: 0, error: 0 };
   let scanned = 0;
   let continuationToken: string | undefined;
   console.log(`[ingest-backfill] starting: region=${region} bucket=${configuredBucket} prefix=${prefix || "(none)"}`);
@@ -299,7 +373,7 @@ export async function runIngestS3Backfill(options: BackfillOptions = {}): Promis
         if (!object.Key) continue;
         if (limit && scanned >= limit) break;
         scanned++;
-        const result = await ingestS3Object(deps, configuredBucket, object.Key);
+        const result = await ingestS3Object(deps, configuredBucket, object.Key, { recipients });
         counts[result.status]++;
         if (result.status === "error") {
           console.error(`[ingest-backfill] error key=${result.key ?? object.Key}: ${result.error}`);
@@ -308,7 +382,10 @@ export async function runIngestS3Backfill(options: BackfillOptions = {}): Promis
       if (limit && scanned >= limit) break;
       continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
     } while (continuationToken);
-    console.log(`[ingest-backfill] done scanned=${scanned} ingested=${counts.ingested} duplicate=${counts.duplicate} error=${counts.error}`);
+    console.log(
+      `[ingest-backfill] done scanned=${scanned} ingested=${counts.ingested} duplicate=${counts.duplicate} ` +
+        `quarantined=${counts.quarantined} error=${counts.error}`,
+    );
   } finally {
     await closeSelfHostedPool();
   }

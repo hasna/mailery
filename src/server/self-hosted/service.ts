@@ -15,6 +15,7 @@ import {
   EmailsSelfHostedStore,
   IdempotencyKeyConflictError,
   CrossTenantReferenceError,
+  InboundDomainRouteConflictError,
   type TenantScopedStore,
   type MessageListRecord,
   type MessageRecord,
@@ -34,6 +35,7 @@ import type { AuthStore } from "./auth/store.js";
 import type { RateLimiter } from "./auth/rate-limit.js";
 import type { AuthMailerConfig } from "./auth/mailer.js";
 import type { SelfHostedKeyStore } from "./keys.js";
+import { canonicalSender } from "../../lib/email-address.js";
 
 interface ReadyResult {
   ok: boolean;
@@ -568,10 +570,20 @@ export async function handleSelfHostedRequest(
       const auth = await authenticate(deps, req, url, write);
       if (!auth.ok) return auth.response;
       const body = await readJsonBody(req);
-      const from = String(body.from ?? "").trim();
-      const to = asStringArray(body.to);
-      if (!from) return json(400, { error: "from is required" });
-      if (to.length === 0) return json(400, { error: "to is required" });
+      const rawFrom = String(body.from ?? "").trim();
+      const rawTo = asStringArray(body.to);
+      if (!rawFrom) return json(400, { error: "from is required" });
+      if (rawTo.length === 0) return json(400, { error: "to is required" });
+      const from = canonicalSender(rawFrom);
+      const rawCc = asStringArray(body.cc);
+      const rawBcc = asStringArray(body.bcc);
+      const parsedRecipients = [...rawTo, ...rawCc, ...rawBcc].map(canonicalSender);
+      if (!from || parsedRecipients.some((value) => value === null)) {
+        return json(400, { error: "from, to, cc, and bcc must each contain one valid mailbox" });
+      }
+      const to = parsedRecipients.slice(0, rawTo.length) as string[];
+      const cc = parsedRecipients.slice(rawTo.length, rawTo.length + rawCc.length) as string[];
+      const bcc = parsedRecipients.slice(rawTo.length + rawCc.length) as string[];
       const subject = String(body.subject ?? "").trim();
       if (!subject) return json(400, { error: "subject is required" });
 
@@ -579,8 +591,6 @@ export async function handleSelfHostedRequest(
       if (!idempotencyKey || idempotencyKey.length > 200) {
         return json(400, { error: "idempotency_key is required and must be at most 200 characters" });
       }
-      const cc = asStringArray(body.cc);
-      const bcc = asStringArray(body.bcc);
       const rawAttachments = asArray(body.attachments) ?? [];
       if (rawAttachments.length > 5) return json(400, { error: "at most 5 inline attachments are allowed" });
       let attachments: Array<{ filename: string; content: string; content_type: string }>;
@@ -627,6 +637,9 @@ export async function handleSelfHostedRequest(
         attachments,
         provider: deps.sender.provider,
       };
+      const sendKeyToken = typeof body.send_key === "string"
+        ? body.send_key.trim()
+        : req.headers.get("x-emails-send-key")?.trim() ?? "";
       let reserved;
       try {
         reserved = await auth.store.reserveSendIntent({
@@ -667,6 +680,14 @@ export async function handleSelfHostedRequest(
           }
           return json(202, { message: publicMessage(reserved.record), provider: deps.sender.provider, in_progress: true });
         }
+        if (reserved.record.send_state === "blocked") {
+          return json(409, {
+            error: "send was blocked by outbound policy",
+            reason: String(reserved.record.headers?.["policy_denial"] ?? "policy_denied"),
+            message: publicMessage(reserved.record),
+            retry_safe: false,
+          });
+        }
         if (reserved.record.send_state !== "pending") {
           return json(409, {
             error: "send outcome is uncertain; reconcile the provider message before any retry",
@@ -674,6 +695,23 @@ export async function handleSelfHostedRequest(
             retry_safe: false,
           });
         }
+      }
+
+      const policy = await auth.store.evaluateOutboundPolicy({
+        from,
+        recipients: [...to, ...cc, ...bcc],
+        sendKeyToken: sendKeyToken || null,
+        allowTenantWideSend:
+          auth.ctx.principalType === "apikey" || auth.ctx.role === "owner" || auth.ctx.role === "admin",
+      });
+      if (!policy.allowed) {
+        const blocked = await auth.store.markSendBlocked(reserved.record.id, policy.code).catch(() => null);
+        return json(policy.status, {
+          error: policy.message,
+          reason: policy.code,
+          message: publicMessage(blocked ?? reserved.record),
+          retry_safe: false,
+        });
       }
 
       const claimed = await auth.store.claimSendIntent(reserved.record.id);
@@ -978,6 +1016,9 @@ export async function handleSelfHostedRequest(
       // A body-supplied FK id pointing at another tenant's row: treat as "not
       // found" for this tenant (no cross-tenant existence is revealed).
       return json(404, { error: `referenced ${err.column} not found`, reason: "cross_tenant_reference" });
+    }
+    if (err instanceof InboundDomainRouteConflictError) {
+      return json(409, { error: "inbound domain route is already claimed", reason: "inbound_route_conflict" });
     }
     if (err instanceof SyntaxError || (err instanceof Error && err.message.includes("JSON"))) {
       return json(400, { error: `invalid request body: ${err.message}` });

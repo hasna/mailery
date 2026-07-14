@@ -24,8 +24,22 @@ function fakeClient(): { client: TypedQueryClient; calls: string[] } {
       if (/SELECT \* FROM domains\b/i.test(sql)) return domains as unknown as T[];
       return [] as T[];
     },
-    async get<T>(sql: string): Promise<T | null> {
+    async get<T>(sql: string, params?: readonly unknown[]): Promise<T | null> {
       calls.push(sql.trim().split("\n")[0]!.trim());
+      if (sql.includes("INSERT INTO domains")) {
+        const rec = {
+          id: String((params ?? [])[0] ?? "generated-id"),
+          domain: String((params ?? [])[1] ?? ""),
+          status: String((params ?? [])[2] ?? "pending"),
+          provider: (params ?? [])[3] ?? null,
+          verified: Boolean((params ?? [])[4]),
+          notes: (params ?? [])[5] ?? null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        domains.push(rec);
+        return rec as unknown as T;
+      }
       if (sql.includes("SELECT 1")) return { ok: 1 } as unknown as T;
       return null;
     },

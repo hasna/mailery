@@ -379,6 +379,35 @@ describe.skipIf(!pgClient)("central outbound enforcement", () => {
     expect(allowed.status).toBe(202);
     expect(sent).toHaveLength(1);
 
+    const memberEmail = `member-send-${crypto.randomUUID()}@hasna.com`;
+    await createVerifiedUser(memberEmail, "sup3rsecret!", tenant.tenantId, "member");
+    const memberLogin = await call(deps, "POST", "/v1/auth/login", {
+      body: { email: memberEmail, password: "sup3rsecret!" },
+    });
+    const memberBypass = await call(deps, "POST", "/v1/messages/send", {
+      token: memberLogin.body.session_token,
+      body: {
+        from: "ready@policy.example",
+        to: ["member-target@example.net"],
+        subject: "member cannot omit sender authorization",
+        idempotency_key: crypto.randomUUID(),
+      },
+    });
+    expect(memberBypass).toMatchObject({ status: 403, body: { reason: "send_key_required" } });
+    expect(sent).toHaveLength(1);
+
+    const ambiguousRecipient = await call(deps, "POST", "/v1/messages/send", {
+      token: tenant.token,
+      body: {
+        from: "ready@policy.example",
+        to: ["first@example.net, second@example.net"],
+        subject: "ambiguous recipient",
+        idempotency_key: crypto.randomUUID(),
+      },
+    });
+    expect(ambiguousRecipient.status).toBe(400);
+    expect(sent).toHaveLength(1);
+
     await call(deps, "POST", "/v1/contacts", {
       token: tenant.token,
       body: { email: "blocked@example.net", suppressed: true },
@@ -387,7 +416,7 @@ describe.skipIf(!pgClient)("central outbound enforcement", () => {
       token: tenant.token,
       body: {
         from: "ready@policy.example",
-        to: ["blocked@example.net"],
+        to: ["Blocked User <blocked@example.net>"],
         subject: "blocked",
         idempotency_key: crypto.randomUUID(),
       },
@@ -430,10 +459,8 @@ describe.skipIf(!pgClient)("envelope-only inbound tenant routing", () => {
     const b = await makeTenant("inbound-route-b");
     const domainA = `route-a-${crypto.randomUUID()}.example`;
     const domainB = `route-b-${crypto.randomUUID()}.example`;
-    await pgClient!.execute(
-      `INSERT INTO inbound_domain_routes (domain, tenant_id) VALUES ($1, $2), ($3, $4)`,
-      [domainA, a.tenantId, domainB, b.tenantId],
-    );
+    await deps.store.forTenant(a.tenantId).createDomain({ domain: domainA, status: "active", verified: true });
+    await deps.store.forTenant(b.tenantId).createDomain({ domain: domainB, status: "active", verified: true });
     const key = `inbound/${crypto.randomUUID()}`;
     const raw = Buffer.from([
       "From: attacker@external.example",
@@ -473,6 +500,45 @@ describe.skipIf(!pgClient)("envelope-only inbound tenant routing", () => {
       `SELECT count(*)::int AS n FROM inbound_quarantine WHERE source_id = $1 AND reason = 'no_tenant_route'`,
       [quarantineKey],
     )).n).toBe(1);
+  });
+
+  it("atomically claims, rejects cross-tenant reassignment, releases, transfers, and suspends routes", async () => {
+    const { deps } = makeDeps();
+    const a = await makeTenant(`route-life-a-${crypto.randomUUID()}`);
+    const b = await makeTenant(`route-life-b-${crypto.randomUUID()}`);
+    const domain = `route-life-${crypto.randomUUID()}.example`;
+    const claimed = await call(deps, "POST", "/v1/domains", {
+      token: a.token,
+      body: { domain, status: "active", verified: true },
+    });
+    expect(claimed.status).toBe(201);
+    const pending = await call(deps, "POST", "/v1/domains", {
+      token: b.token,
+      body: { domain, status: "pending", verified: false },
+    });
+    expect(pending.status).toBe(201);
+    const hijack = await call(deps, "PATCH", `/v1/domains/${pending.body.domain.id}`, {
+      token: b.token,
+      body: { status: "active", verified: true },
+    });
+    expect(hijack).toMatchObject({ status: 409, body: { reason: "inbound_route_conflict" } });
+
+    expect((await call(deps, "DELETE", `/v1/domains/${claimed.body.domain.id}`, { token: a.token })).status).toBe(200);
+    expect((await call(deps, "PATCH", `/v1/domains/${pending.body.domain.id}`, {
+      token: b.token,
+      body: { status: "active", verified: true },
+    })).status).toBe(200);
+    expect((await deps.store.resolveInboundRecipients([`mail@${domain}`])).groups).toEqual([
+      { tenantId: b.tenantId, recipients: [`mail@${domain}`] },
+    ]);
+
+    await pgClient!.execute(`UPDATE tenants SET status = 'suspended' WHERE id = $1`, [b.tenantId]);
+    expect(await deps.store.resolveInboundRecipients([`mail@${domain}`])).toMatchObject({ groups: [], unresolved: [`mail@${domain}`] });
+    await pgClient!.execute(`UPDATE tenants SET status = 'active' WHERE id = $1`, [b.tenantId]);
+    expect((await call(deps, "DELETE", `/v1/domains/${pending.body.domain.id}`, { token: b.token })).status).toBe(200);
+    expect((await pgClient!.one<{ n: number }>(
+      `SELECT count(*)::int AS n FROM inbound_domain_routes WHERE domain = $1`, [domain],
+    )).n).toBe(0);
   });
 });
 

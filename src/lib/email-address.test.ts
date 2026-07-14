@@ -28,6 +28,10 @@ describe("canonicalSender", () => {
     expect(canonicalSender("a@b@c.com")).toBeNull();
     expect(canonicalSender("no-at-sign")).toBeNull();
     expect(canonicalSender("two addrs a@x.com")).toBeNull();
+    expect(canonicalSender("a@x.com (comment)")).toBeNull();
+    expect(canonicalSender("a@x.com, b@y.com")).toBeNull();
+    expect(canonicalSender("a..b@example.com")).toBeNull();
+    expect(canonicalSender("a@-bad.example")).toBeNull();
     expect(canonicalSender("")).toBeNull();
   });
 });

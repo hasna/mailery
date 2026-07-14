@@ -38,5 +38,12 @@ export function canonicalSender(from: string): string | null {
   const at = addr.indexOf("@");
   if (at <= 0 || at !== addr.lastIndexOf("@") || at === addr.length - 1) return null;
   if (/\s/.test(addr)) return null;
+  const local = addr.slice(0, at);
+  const domain = addr.slice(at + 1).toLowerCase();
+  if (local.length > 64 || local.startsWith(".") || local.endsWith(".") || local.includes("..")) return null;
+  if (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+$/i.test(local)) return null;
+  if (domain.length > 253) return null;
+  const labels = domain.split(".");
+  if (labels.some((label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label))) return null;
   return addr.toLowerCase();
 }

@@ -63,6 +63,7 @@ describe("central outbound policy", () => {
     const decision = await policyStore().evaluateOutboundPolicy({
       from: "Sender <sender@example.com>",
       recipients: ["recipient@example.net"],
+      allowTenantWideSend: true,
     });
     expect(decision).toEqual({ allowed: true });
   });
@@ -89,6 +90,7 @@ describe("central outbound policy", () => {
     expect((await policyStore({ suppressed: "blocked@example.net" }).evaluateOutboundPolicy({
       from: "sender@example.com",
       recipients: ["blocked@example.net"],
+      allowTenantWideSend: true,
     }))).toMatchObject({ code: "recipient_suppressed", status: 409 });
     const quotaStore = policyStore({ addressCount: 1 });
     const addressDecision = await policyStore({
@@ -98,19 +100,23 @@ describe("central outbound policy", () => {
         domain_status: "active", domain_verified: true, domain_provisioning_status: "ready",
       },
       addressCount: 1,
-    }).evaluateOutboundPolicy({ from: "sender@example.com", recipients: [] });
+    }).evaluateOutboundPolicy({ from: "sender@example.com", recipients: [], allowTenantWideSend: true });
     expect(addressDecision).toMatchObject({ code: "address_quota_exceeded", status: 429 });
     void quotaStore;
     expect((await policyStore({
       domainCount: 1,
       warming: { target_daily_volume: 0, start_date: new Date().toISOString(), status: "active" },
-    }).evaluateOutboundPolicy({ from: "sender@example.com", recipients: [] }))).toMatchObject({
+    }).evaluateOutboundPolicy({ from: "sender@example.com", recipients: [], allowTenantWideSend: true }))).toMatchObject({
       code: "warming_limit_exceeded",
       status: 429,
     });
   });
 
   test("a supplied send key must be valid and scoped to the sender owner", async () => {
+    expect((await policyStore().evaluateOutboundPolicy({
+      from: "sender@example.com", recipients: [], allowTenantWideSend: false,
+    }))).toMatchObject({ code: "send_key_required" });
+
     const invalid = policyStore();
     invalid.verifySendKey = async () => null;
     expect((await invalid.evaluateOutboundPolicy({

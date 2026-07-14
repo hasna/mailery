@@ -8,6 +8,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { QueryResult, TypedQueryClient, PoolQueryClient } from "../../storage-kit/index.js";
 import type { QueryResultRow } from "pg";
 import type { SelfHostedResourceSpec, ResourceColumn } from "./resources.js";
+import { canonicalSender } from "../../lib/email-address.js";
 
 /** A live pool exposes `transaction()`; an in-memory unit-test shim does not. */
 function isTransactional(client: TypedQueryClient): client is PoolQueryClient {
@@ -176,6 +177,7 @@ export type OutboundPolicyCode =
   | "sender_inactive"
   | "sender_unverified"
   | "sender_not_ready"
+  | "send_key_required"
   | "send_key_invalid"
   | "send_key_forbidden"
   | "recipient_suppressed"
@@ -501,10 +503,7 @@ function hashSendToken(token: string): string {
 
 /** Extract the bare, lowercased address from a From value (drops display name). */
 function canonicalAddress(from: string): string {
-  const value = from.trim();
-  const angled = value.match(/<([^>]+)>/);
-  const bare = (angled ? angled[1]! : value).trim().toLowerCase();
-  return bare.includes("@") ? bare : "";
+  return canonicalSender(from) ?? "";
 }
 
 function warmingLimit(target: number, startDate: string | null, now = new Date()): number | null {
@@ -571,6 +570,14 @@ export class CrossTenantReferenceError extends Error {
   constructor(public readonly column: string) {
     super(`referenced ${column} does not belong to this tenant`);
     this.name = "CrossTenantReferenceError";
+  }
+}
+
+/** A receive-ready physical domain may be claimed by exactly one tenant. */
+export class InboundDomainRouteConflictError extends Error {
+  constructor(public readonly domain: string) {
+    super(`inbound route for ${domain} is already claimed`);
+    this.name = "InboundDomainRouteConflictError";
   }
 }
 
@@ -792,35 +799,74 @@ export class TenantScopedStore {
     notes?: string | null;
   }): Promise<DomainRecord> {
     const id = randomUUID();
-    return this.client.one<DomainRecord>(
-      `INSERT INTO domains (id, domain, status, provider, verified, notes, tenant_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+    const domain = input.domain.trim().toLowerCase();
+    const status = input.status ?? "pending";
+    const verified = input.verified ?? false;
+    const row = await this.client.get<DomainRecord>(
+      `WITH route_claim AS (
+         INSERT INTO inbound_domain_routes (domain, tenant_id)
+         SELECT $2, $7::uuid
+          WHERE $5::boolean = true AND $3::text IN ('active','verified','ready','inbound_ready')
+         ON CONFLICT (domain) DO UPDATE SET domain = EXCLUDED.domain
+           WHERE inbound_domain_routes.tenant_id = EXCLUDED.tenant_id
+         RETURNING domain
+       )
+       INSERT INTO domains (id, domain, status, provider, verified, notes, tenant_id)
+       SELECT $1, $2, $3, $4, $5, $6, $7::uuid
+        WHERE NOT ($5::boolean = true AND $3::text IN ('active','verified','ready','inbound_ready'))
+           OR EXISTS (SELECT 1 FROM route_claim)
        RETURNING *`,
-      [
-        id,
-        input.domain.trim().toLowerCase(),
-        input.status ?? "pending",
-        input.provider ?? null,
-        input.verified ?? false,
-        input.notes ?? null,
-        this.tenantId,
-      ],
+      [id, domain, status, input.provider ?? null, verified, input.notes ?? null, this.tenantId],
     );
+    if (!row) throw new InboundDomainRouteConflictError(domain);
+    return row;
   }
 
   async updateDomain(
     id: string,
     patch: { status?: string; provider?: string | null; verified?: boolean; notes?: string | null },
   ): Promise<DomainRecord | null> {
-    return this.client.get<DomainRecord>(
-      `UPDATE domains SET
-         status   = COALESCE($2, status),
-         provider = COALESCE($3, provider),
-         verified = COALESCE($4, verified),
-         notes    = COALESCE($5, notes),
-         updated_at = now()
-       WHERE id = $1 AND tenant_id = $6
-       RETURNING *`,
+    const result = await this.client.one<{
+      record: DomainRecord | null;
+      route_conflict: boolean;
+    }>(
+      `WITH target AS (
+         SELECT d.*,
+                COALESCE($2::text, d.status) AS next_status,
+                COALESCE($4::boolean, d.verified) AS next_verified
+           FROM domains d WHERE d.id = $1 AND d.tenant_id = $6::uuid FOR UPDATE
+       ), route_claim AS (
+         INSERT INTO inbound_domain_routes (domain, tenant_id)
+         SELECT domain, tenant_id FROM target
+          WHERE next_verified = true AND next_status IN ('active','verified','ready','inbound_ready')
+         ON CONFLICT (domain) DO UPDATE SET domain = EXCLUDED.domain
+           WHERE inbound_domain_routes.tenant_id = EXCLUDED.tenant_id
+         RETURNING domain
+       ), route_release AS (
+         DELETE FROM inbound_domain_routes r USING target t
+          WHERE r.domain = t.domain AND r.tenant_id = t.tenant_id
+            AND NOT (t.next_verified = true AND t.next_status IN ('active','verified','ready','inbound_ready'))
+         RETURNING r.domain
+       ), updated AS (
+         UPDATE domains d SET
+           status   = t.next_status,
+           provider = COALESCE($3, d.provider),
+           verified = t.next_verified,
+           notes    = COALESCE($5, d.notes),
+           updated_at = now()
+          FROM target t
+          WHERE d.id = t.id AND d.tenant_id = t.tenant_id
+            AND (NOT (t.next_verified = true AND t.next_status IN ('active','verified','ready','inbound_ready'))
+                 OR EXISTS (SELECT 1 FROM route_claim))
+          RETURNING d.*
+       )
+       SELECT
+         (SELECT to_jsonb(updated) FROM updated) AS record,
+         EXISTS (
+           SELECT 1 FROM target
+            WHERE next_verified = true AND next_status IN ('active','verified','ready','inbound_ready')
+              AND NOT EXISTS (SELECT 1 FROM route_claim)
+         ) AS route_conflict`,
       [
         id,
         patch.status ?? null,
@@ -830,14 +876,26 @@ export class TenantScopedStore {
         this.tenantId,
       ],
     );
+    if (result.route_conflict) {
+      const current = await this.getDomain(id);
+      throw new InboundDomainRouteConflictError(current?.domain ?? "requested domain");
+    }
+    return result.record;
   }
 
   async deleteDomain(id: string): Promise<boolean> {
-    const rows = await this.client.many<{ id: string }>(
-      `DELETE FROM domains WHERE id = $1 AND tenant_id = $2 RETURNING id`,
+    const result = await this.client.one<{ deleted: boolean }>(
+      `WITH deleted AS (
+         DELETE FROM domains WHERE id = $1 AND tenant_id = $2 RETURNING domain
+       ), route_release AS (
+         DELETE FROM inbound_domain_routes r USING deleted d
+          WHERE r.domain = d.domain AND r.tenant_id = $2
+         RETURNING r.domain
+       )
+       SELECT EXISTS (SELECT 1 FROM deleted) AS deleted`,
       [id, this.tenantId],
     );
-    return rows.length > 0;
+    return result.deleted;
   }
 
   /**
@@ -1175,6 +1233,8 @@ export class TenantScopedStore {
     from: string;
     recipients: string[];
     sendKeyToken?: string | null;
+    /** API keys and tenant owner/admin sessions carry explicit tenant-wide send authority. */
+    allowTenantWideSend?: boolean;
   }): Promise<OutboundPolicyDecision> {
     const from = canonicalAddress(input.from);
     const address = await this.client.get<{
@@ -1221,6 +1281,9 @@ export class TenantScopedStore {
       return { allowed: false, code: "sender_not_ready", message: "sender domain is not ready for outbound mail", status: 403 };
     }
 
+    if (!input.sendKeyToken && !input.allowTenantWideSend) {
+      return { allowed: false, code: "send_key_required", message: "a sender-scoped send key is required", status: 403 };
+    }
     if (input.sendKeyToken) {
       const key = await this.verifySendKey(input.sendKeyToken);
       if (!key) return { allowed: false, code: "send_key_invalid", message: "send key is invalid or revoked", status: 403 };

@@ -1,7 +1,11 @@
 # Design: Multi-Tenancy + User Accounts + Signup/Login for `@hasna/emails`
 
-Status: DRAFT v2 (design only — no source modified). Author: Marcus (architect).
+Status: IMPLEMENTED v3 (integration candidate; production rollout pending). Original author: Marcus (architect).
 Canonical package: `@hasna/emails`. Projects project: `open-emails`. GitHub repository: `hasna/emails`.
+
+> Sections 1–14 preserve the reviewed pre-implementation baseline and threat
+> model. Section 15 is the authoritative reconciliation with the implemented
+> source. Where historical wording conflicts with section 15, section 15 wins.
 
 > **v2 incorporates an independent adversarial security review** (findings C1, H1-H3,
 > M1-M7, L1-L4). The corrections are folded inline and summarized in §14. Build agents:
@@ -866,7 +870,53 @@ the second serving role lands** (H1) and is wired off non-RLS resolution tables 
 per-operation `set_config` (H3, M1); until then it is documented as aspirational, not
 relied upon. Layer 3 (NOT NULL, no default) is sound. The one writeable leak (C1) is closed
 by envelope-only routing through a global single-tenant domain map.
-```
+
+---
+
+## 15. Implementation reconciliation (v3)
+
+The implementation now has exactly two deployment modes: local SQLite and
+operator-owned `self_hosted` PostgreSQL. It has no hosted SaaS control plane and
+no hybrid synchronization mode. Passing an explicit Bun `Database` handle to
+the public library always selects that caller-owned SQLite database, even when
+the process is otherwise configured as a self-hosted client.
+
+The self-hosted schema is additive through migrations 0012–0016:
+
+- 0012 adds tenant/identity/session/membership/API-key binding and tenant-scopes
+  existing resources with a default-tenant backfill;
+- 0013 seals the RLS model, while API startup rejects a superuser or
+  `BYPASSRLS` serving role;
+- 0014 adds indexed message-ID prefix resolution;
+- 0015 adds multiple verified email identities per user, the singleton primary
+  super-admin flag, and an audit-safe bootstrap ledger;
+- 0016 makes inbound-domain ownership atomic and quarantines/removes stale,
+  pending, or unverified legacy routes before new writers run.
+
+User sessions, tenant API keys, invitations, memberships, password reset, email
+verification, tenant switching, and multiple login email identities are wired
+through the HTTP service and formal OpenAPI-generated SDK. Member sessions must
+present a sender-scoped send key; owner/admin sessions and tenant API keys retain
+tenant-wide send authority. Envelope recipients—not spoofable MIME headers—own
+inbound tenant routing.
+
+Primary super-admin bootstrap is deliberately not authorized by matching an
+email alone. The operator configures both an exact lowercase email and one exact
+API-key KID; the endpoint is singleton, race-idempotent, rejects other KIDs, and
+never records or logs the password or token. The generic AWS module exposes the
+email/KID as paired nullable API-only settings and never hardcodes a person or
+accepts the token in Terraform.
+
+Production ordering is a hard gate: drain old API/worker/ingest writers; deploy
+new-code-compatible migration tooling; run migrations through 0016; then start
+only the new API and worker tasks. After 0016, never roll back to an old unscoped
+writer. A rollback may restore the previous new-code-compatible image, but not a
+pre-tenancy writer.
+
+Required release evidence is: full local suite, real PostgreSQL migration +
+multi-tenancy + RLS + message-ID suites, generated SDK sync, public package
+identity/contents, staged secret scan, immutable image scan, primary-super-admin
+idempotency/DB/API proof, local SQLite smoke, and self-hosted HTTPS smoke.
 
 ---
 

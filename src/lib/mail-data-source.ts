@@ -156,6 +156,13 @@ export interface MailDataSource {
   listMailboxSources(opts?: ListMailboxSourcesOptions): Promise<MailboxSourceSummary[]>;
   getMessage(id: string): Promise<TuiMessage | null>;
   getMessageBody(msg: TuiMessage): Promise<MessageBody | null>;
+  /**
+   * Fetch a message AND its body from a SINGLE underlying row read. `read` needs
+   * both, so this collapses getMessage()+getMessageBody() into one round-trip. The
+   * `id` may be a short id prefix (the server resolves it). Returns null when no
+   * message matches (a clean not-found).
+   */
+  getMessageWithBody(id: string): Promise<{ msg: TuiMessage; body: MessageBody } | null>;
   getConversation(msg: TuiMessage): Promise<TuiThreadMessage[]>;
   getConversationBodies(msg: TuiMessage, opts?: ConversationBodyOptions): Promise<TuiThreadBody[]>;
   getAttachmentPaths(id: string): Promise<AttachmentPath[]>;

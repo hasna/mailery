@@ -342,6 +342,27 @@ async function authenticate(
 }
 
 /**
+ * Resolve a `/v1/messages/{id...}` path segment that MAY be a short id PREFIX (the
+ * id printed by `inbox list`) to a full row id, tenant-scoped. Returns a ready-made
+ * error Response on ambiguity (409 `ambiguous_id`) or no match (404); otherwise the
+ * resolved full id. A full id is returned unchanged, so exact-id behavior is
+ * bit-for-bit preserved — a non-existent full id still 404s downstream when the
+ * handler fetches the row. MUST be called after `authenticate` so resolution runs
+ * through the caller's tenant-scoped store (never cross-tenant).
+ */
+async function resolveMessageIdOrError(
+  store: TenantScopedStore,
+  id: string,
+): Promise<{ ok: true; id: string } | { ok: false; response: Response }> {
+  const resolved = await store.resolveMessageId(id);
+  if (resolved === null) return { ok: false, response: json(404, { error: "message not found" }) };
+  if ("ambiguous" in resolved) {
+    return { ok: false, response: json(409, { error: "ambiguous message id prefix", reason: "ambiguous_id" }) };
+  }
+  return { ok: true, id: resolved.id };
+}
+
+/**
  * Route + handle a single request. Returns `null` when the path is not owned by
  * this service (so a caller can fall through to other handlers).
  */
@@ -784,8 +805,10 @@ export async function handleSelfHostedRequest(
       if (method !== "GET") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, read);
       if (!auth.ok) return auth.response;
+      const resolved = await resolveMessageIdOrError(auth.store, decodeURIComponent(attachmentMatch[1]!));
+      if (!resolved.ok) return resolved.response;
       const attachment = await auth.store.getMessageAttachment(
-        decodeURIComponent(attachmentMatch[1]!),
+        resolved.id,
         Number(attachmentMatch[2]),
       );
       return attachment ? json(200, { attachment }) : json(404, { error: "attachment not found" });
@@ -797,7 +820,9 @@ export async function handleSelfHostedRequest(
       if (method !== "GET") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, read);
       if (!auth.ok) return auth.response;
-      const raw = await auth.store.getMessageRaw(decodeURIComponent(rawMatch[1]!));
+      const resolved = await resolveMessageIdOrError(auth.store, decodeURIComponent(rawMatch[1]!));
+      if (!resolved.ok) return resolved.response;
+      const raw = await auth.store.getMessageRaw(resolved.id);
       return raw ? json(200, raw) : json(404, { error: "message not found" });
     }
 
@@ -807,14 +832,18 @@ export async function handleSelfHostedRequest(
       if (method === "GET") {
         const auth = await authenticate(deps, req, url, read);
         if (!auth.ok) return auth.response;
-        const rec = await auth.store.getMessage(id);
+        const resolved = await resolveMessageIdOrError(auth.store, id);
+        if (!resolved.ok) return resolved.response;
+        const rec = await auth.store.getMessage(resolved.id);
         return rec ? json(200, { message: publicMessage(rec) }) : json(404, { error: "message not found" });
       }
       if (method === "PATCH" || method === "PUT") {
         const auth = await authenticate(deps, req, url, write);
         if (!auth.ok) return auth.response;
+        const resolved = await resolveMessageIdOrError(auth.store, id);
+        if (!resolved.ok) return resolved.response;
         const body = await readJsonBody(req);
-        const rec = await auth.store.updateMessageStatus(id, {
+        const rec = await auth.store.updateMessageStatus(resolved.id, {
           status: body.status === undefined ? undefined : String(body.status),
           provider_message_id: body.provider_message_id === undefined ? undefined : (body.provider_message_id as string | null),
           is_read: typeof body.is_read === "boolean" ? body.is_read : undefined,
@@ -828,7 +857,11 @@ export async function handleSelfHostedRequest(
       if (method === "DELETE") {
         const auth = await authenticate(deps, req, url, write);
         if (!auth.ok) return auth.response;
-        return (await auth.store.deleteMessage(id)) ? json(200, { deleted: true, id }) : json(404, { error: "message not found" });
+        const resolved = await resolveMessageIdOrError(auth.store, id);
+        if (!resolved.ok) return resolved.response;
+        return (await auth.store.deleteMessage(resolved.id))
+          ? json(200, { deleted: true, id: resolved.id })
+          : json(404, { error: "message not found" });
       }
       return json(405, { error: "method not allowed" });
     }

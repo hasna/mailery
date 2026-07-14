@@ -388,6 +388,9 @@ describe("self-hosted parity: mail-views", () => {
 
   test("GET /v1/messages/{id}/raw reconstructs MIME, 404 when missing", async () => {
     const d = deps();
+    // The route resolves an id PREFIX first; pass it through so this test isolates
+    // the raw-reconstruction behavior (resolution is covered by its own suite).
+    d.store.resolveMessageId = async (id) => ({ id });
     d.store.getMessageRaw = async (id) => (id === "m1" ? { raw: "From: a@x.com\r\n\r\nhi", message_id: "<m1@x>" } : null);
     const ok = await handleSelfHostedRequest(d, req("GET", "/v1/messages/m1/raw", { token: readToken() }));
     expect(ok?.status).toBe(200);

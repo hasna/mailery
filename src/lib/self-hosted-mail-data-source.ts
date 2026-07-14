@@ -494,6 +494,10 @@ export class SelfHostedMailDataSource implements MailDataSource {
   private async getRaw(id: string): Promise<V1Message | null> {
     const { status, json } = await this.request("GET", `/messages/${encodeURIComponent(id)}`);
     if (status === 404) return null;
+    // The server resolves an id PREFIX and 409s when the prefix is not unique.
+    if (status === 409) {
+      throw new Error(`Ambiguous email id prefix '${id}' — it matches multiple messages. Use a longer id.`);
+    }
     if (status < 200 || status >= 300) {
       throw new Error(`self-hosted emails: GET /messages/<id> failed (HTTP ${status})`);
     }
@@ -506,18 +510,13 @@ export class SelfHostedMailDataSource implements MailDataSource {
   async resolveId(id: string): Promise<string> {
     const trimmed = id.trim();
     if (FULL_ID_RE.test(trimmed)) return trimmed;
-    const rows = await this.scanAll();
-    const matches = new Set<string>();
-    for (const m of rows) {
-      if (m.id === trimmed) return m.id;
-      if (m.id.startsWith(trimmed)) matches.add(m.id);
-    }
-    if (matches.size === 1) return [...matches][0]!;
-    if (matches.size > 1) {
-      throw new Error(`Ambiguous email id prefix '${trimmed}' — it matches ${matches.size} messages. Use a longer id.`);
-    }
-    // No match in-scan: hand back the original so the server returns a clean 404.
-    return trimmed;
+    // The server resolves an id PREFIX itself now (indexed, tenant-scoped), so a
+    // single GET replaces the old full-inbox scanAll() that made short-id reads
+    // take minutes: a hit returns the canonical full id; a miss (404 -> null)
+    // hands back the original so the caller's fetch returns a clean not-found.
+    // An ambiguous prefix (409) throws from getRaw with a "use a longer id" hint.
+    const m = await this.getRaw(trimmed);
+    return m ? m.id : trimmed;
   }
 
   async listMailbox(mailbox: Mailbox, opts?: MailboxListOptions): Promise<TuiMessage[]> {
@@ -599,6 +598,15 @@ export class SelfHostedMailDataSource implements MailDataSource {
   async getMessageBody(msg: TuiMessage): Promise<MessageBody | null> {
     const m = await this.getRaw(msg.id);
     return m ? v1ToMessageBody(m) : null;
+  }
+
+  // Fetch a message AND its body from a SINGLE row read. A `read` needs both, and
+  // the raw row already carries the body, so this collapses the old
+  // getMessage()+getMessageBody() double round-trip into one. The `id` may be a
+  // short prefix — the server resolves it — so `read <shortid>` is one GET.
+  async getMessageWithBody(id: string): Promise<{ msg: TuiMessage; body: MessageBody } | null> {
+    const m = await this.getRaw(id);
+    return m ? { msg: v1ToTuiMessage(m), body: v1ToMessageBody(m) } : null;
   }
 
   async getConversation(msg: TuiMessage): Promise<TuiThreadMessage[]> {

@@ -172,7 +172,15 @@ function fakeServe(
     }
     if (idMatch) {
       const id = decodeURIComponent(idMatch[1]!);
-      if (method === "GET") return rows.has(id) ? ok({ message: rows.get(id) }) : ok({ error: "not found" }, 404);
+      if (method === "GET") {
+        // Mirror the real server: an id may be a PREFIX. Exact id wins; else a
+        // unique startsWith match resolves; multiple -> 409; none -> 404.
+        if (rows.has(id)) return ok({ message: rows.get(id) });
+        const prefixed = [...rows.keys()].filter((key) => key.startsWith(id));
+        if (prefixed.length > 1) return ok({ error: "ambiguous message id prefix", reason: "ambiguous_id" }, 409);
+        if (prefixed.length === 1) return ok({ message: rows.get(prefixed[0]!) });
+        return ok({ error: "not found" }, 404);
+      }
       if (method === "DELETE") { const had = rows.delete(id); deleted.push(id); return had ? ok({ deleted: true }) : ok({ error: "not found" }, 404); }
       if (method === "PATCH") {
         const row = rows.get(id);
@@ -419,16 +427,55 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     });
   });
 
-  it("resolves a full id verbatim and a unique prefix by scan", async () => {
+  it("resolves a full id verbatim with NO request", async () => {
     const full = "31f40200-dc2c-48ba-a348-ed7d4414381e";
     const { ds, serve } = make([v1("2"), { ...v1("9"), id: full }]);
     expect(await ds.resolveId(full)).toBe(full);
     expect(await ds.resolveId(`legacy-inbound:${full}`)).toBe(`legacy-inbound:${full}`);
+    // A full id never touches the network.
     expect(serve.requests).toEqual([]);
+  });
+
+  it("resolves a unique prefix with ONE server GET and NEVER scans the inbox", async () => {
+    const full = "31f40200-dc2c-48ba-a348-ed7d4414381e";
+    // Many rows so a scanAll() (the old behavior) would be obvious as a page fetch.
+    const rows = Array.from({ length: 40 }, (_, i) => v1(String(i + 10)));
+    const { ds, serve } = make([...rows, { ...v1("9"), id: full }]);
     expect(await ds.resolveId("31f40200")).toBe(full);
-    expect(serve.requests.filter((request) => request.startsWith("GET /v1/messages?"))).toEqual([
-      "GET /v1/messages?limit=500&offset=0",
-    ]);
+    // Exactly one GET, and it is the by-id prefix lookup — no `?limit=…&offset=…`
+    // list page was ever fetched (the whole-inbox scan is gone).
+    expect(serve.requests).toEqual(["GET /v1/messages/31f40200"]);
+    expect(serve.requests.some((r) => r.startsWith("GET /v1/messages?"))).toBe(false);
+  });
+
+  it("resolveId of an unknown prefix does ONE GET and hands back the input (clean 404)", async () => {
+    const { ds, serve } = make([v1("2"), v1("5")]);
+    expect(await ds.resolveId("deadbeef")).toBe("deadbeef");
+    expect(serve.requests).toEqual(["GET /v1/messages/deadbeef"]);
+  });
+
+  it("resolveId throws a clear error when a prefix is ambiguous (server 409)", async () => {
+    const { ds } = make([{ ...v1("2"), id: "abc11111" }, { ...v1("5"), id: "abc22222" }]);
+    await expect(ds.resolveId("abc")).rejects.toThrow(/Ambiguous email id prefix/);
+  });
+
+  it("getMessageWithBody fetches the message AND body in a SINGLE round-trip", async () => {
+    const { ds, serve } = make([v1("5", { body_text: "hello world", cc_addrs: ["cc@x.com"] })]);
+    const result = await ds.getMessageWithBody("5");
+    expect(result?.msg.subject).toBe("subject 5");
+    expect(result?.body.text).toBe("hello world");
+    expect(result?.body.cc).toBe("cc@x.com");
+    // One and only one row read — not getMessage()+getMessageBody() (two).
+    expect(serve.requests).toEqual(["GET /v1/messages/5"]);
+  });
+
+  it("getMessageWithBody resolves a short id prefix and returns null on no match", async () => {
+    const full = "aa11bb22-cc33-dd44-ee55-ff6600112233";
+    const { ds } = make([{ ...v1("9"), id: full, body_text: "prefixed body" }]);
+    const hit = await ds.getMessageWithBody("aa11bb22");
+    expect(hit?.msg.id).toBe(full);
+    expect(hit?.body.text).toBe("prefixed body");
+    expect(await ds.getMessageWithBody("nomatch0")).toBeNull();
   });
 
   it("reads provider-prefixed full ids directly without a resolving scan", async () => {

@@ -112,10 +112,11 @@ function seamMessageDetail(msg: TuiMessage, body: MessageBody | null): SeamMailD
 }
 
 async function seamDetailById(ds: MailDataSource, id: string): Promise<SeamMailDetail | null> {
-  const msg = await ds.getMessage(id);
-  if (!msg) return null;
-  const body = await ds.getMessageBody(msg);
-  return seamMessageDetail(msg, body);
+  // Single row read: the message and its body come back together (one round-trip),
+  // and `id` may be a short prefix — the server resolves it.
+  const result = await ds.getMessageWithBody(id);
+  if (!result) return null;
+  return seamMessageDetail(result.msg, result.body);
 }
 
 function parsePositiveIntOption(value: string | undefined, fallback: number, max = MAX_INBOX_CLI_LIMIT): number {
@@ -630,15 +631,18 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
     .action(async (id: string, opts: { keepUnread?: boolean }) => {
       try {
         const ds = resolveMailDataSource();
-        const fullId = await resolveMailId(ds, id);
-        const msg = await ds.getMessage(fullId);
-        if (!msg) {
+        // getMessageWithBody resolves a short id prefix server-side and returns the
+        // message AND its body in ONE round-trip; a read is then a single GET
+        // (+1 write only if it needs marking read) instead of the old whole-inbox
+        // scan followed by two separate row fetches.
+        const detailSource = await ds.getMessageWithBody(id);
+        if (!detailSource) {
           console.error(chalk.red(`Email not found: ${id}`));
           process.exit(1);
         }
+        const { msg, body } = detailSource;
         // Opening an email marks it read unless --keep-unread is set.
-        if (!opts.keepUnread && !msg.is_read) { await ds.setRead(fullId, true); msg.is_read = true; }
-        const body = await ds.getMessageBody(msg);
+        if (!opts.keepUnread && !msg.is_read) { await ds.setRead(msg.id, true); msg.is_read = true; }
         const detail = seamMessageDetail(msg, body);
         output(detail, formatEmailDetail(detail, { mode: ds.mode }));
       } catch (e) {

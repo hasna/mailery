@@ -470,6 +470,21 @@ const server = Bun.serve({
     if (resource === "messages" && id === undefined && req.method === "GET") {
       return json({ messages: listMessages(url.searchParams) });
     }
+    // GET /v1/messages/<id> resolves an id PREFIX, mirroring the real server:
+    // an exact id wins; otherwise a unique startsWith match resolves; multiple
+    // matches -> 409 ambiguous_id; none -> 404. Lets client read/link tests use
+    // the short (8-char) ids that the inbox list command prints.
+    if (resource === "messages" && id !== undefined && parts[3] === undefined && req.method === "GET") {
+      const all = rowsFor("messages");
+      let rec = all.find(function (r) { return String(r.id) === id; });
+      if (!rec) {
+        const pref = all.filter(function (r) { return String(r.id).indexOf(id) === 0; });
+        if (pref.length > 1) return json({ error: "ambiguous message id prefix", reason: "ambiguous_id" }, 409);
+        rec = pref[0];
+      }
+      if (!rec) return json({ error: "message not found" }, 404);
+      return json({ message: rec });
+    }
 
     // Scoped send keys: bespoke mint/verify (matched before the generic matcher so
     // "mint"/"verify" are not read as a send-key id). Mirrors the server: the token

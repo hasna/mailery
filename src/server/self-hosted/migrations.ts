@@ -1878,6 +1878,39 @@ const TENANCY_RLS_AND_SEAL = defineMigration(
   `,
 );
 
+/**
+ * 0014 — index for message-id PREFIX resolution.
+ *
+ * `inbox list` prints an 8-char id prefix; the CLI/MCP now resolve that prefix to
+ * a full id SERVER-SIDE (store.resolveMessageId) for every by-id handler
+ * (read / mark-read / label / archive / star / delete / attachment / raw) via:
+ *
+ *   SELECT id FROM messages WHERE (id)::text LIKE $1 || '%' AND tenant_id = $2 ...
+ *
+ * This adds the matching `text_pattern_ops` index so that anchored prefix LIKE is
+ * an index range scan rather than a full sequential scan over the whole (~160k
+ * row) message table — which is what made `inbox read <shortid>` take minutes.
+ *
+ * `messages.id` is TEXT (see 0001), so `(id)::text` is a no-op cast kept ONLY so
+ * the index expression matches the store query's expression exactly (the planner
+ * needs the expressions to be identical to use the index). Idempotent
+ * (IF NOT EXISTS) and guarded on table existence via to_regclass, so it is a clean
+ * no-op on a re-run or a partially-migrated DB, mirroring the 0002/0009/0012
+ * reconcile discipline.
+ */
+const MESSAGES_ID_PREFIX_INDEX = defineMigration(
+  "0014_messages_id_prefix_index",
+  `
+  DO $$
+  BEGIN
+    IF to_regclass('public.messages') IS NOT NULL THEN
+      CREATE INDEX IF NOT EXISTS messages_id_text_prefix_idx
+        ON public.messages (((id)::text) text_pattern_ops);
+    END IF;
+  END $$;
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -1898,5 +1931,6 @@ export function emailsSelfHostedMigrations(): Migration[] {
     PARITY_RESOURCE_SCHEMA_2,
     TENANCY_IDENTITY_AND_BACKFILL,
     TENANCY_RLS_AND_SEAL,
+    MESSAGES_ID_PREFIX_INDEX,
   ];
 }

@@ -634,6 +634,13 @@ const MESSAGE_UPSERT_ASSIGNMENTS =
  * which also binds a per-operation `app.current_tenant` GUC for the Layer-2 RLS
  * backstop (migration 0013).
  */
+/**
+ * A fully-formed message id (a bare UUID, the shape `messages.id` is generated as).
+ * A value that matches is used verbatim; anything shorter is treated as a PREFIX
+ * to resolve (the 8-char short id `inbox list` prints).
+ */
+const FULL_MESSAGE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export class TenantScopedStore {
   constructor(
     private readonly client: TypedQueryClient,
@@ -995,6 +1002,35 @@ export class TenantScopedStore {
       trash: number(row?.["trash"]), total: number(row?.["total"]),
       latest_received_at: latest instanceof Date ? latest.toISOString() : latest ? String(latest) : null,
     };
+  }
+
+  /**
+   * Resolve a full message id OR a unique id PREFIX (the short id `inbox list`
+   * prints) to a full row id, tenant-scoped. A full UUID is returned verbatim with
+   * NO DB round-trip, so exact-id behavior is unchanged (a non-existent full id
+   * still 404s downstream when the row is fetched). Otherwise the prefix is matched
+   * against the indexed `(id)::text` expression (migration 0014, text_pattern_ops)
+   * WITHIN the tenant (Layer-1 `tenant_id` filter + Layer-2 RLS via the scoped
+   * client): 0 rows -> null (not found), exactly 1 -> `{ id }`, 2+ ->
+   * `{ ambiguous: true }`. `LIMIT 2` is enough to distinguish unique from ambiguous.
+   */
+  async resolveMessageId(idOrPrefix: string): Promise<{ id: string } | { ambiguous: true } | null> {
+    const value = idOrPrefix.trim();
+    if (!value) return null;
+    if (FULL_MESSAGE_ID_RE.test(value)) return { id: value };
+    // Escape LIKE metacharacters (% _ \) so the prefix stays an anchored,
+    // index-served range scan: an unescaped % / _ would otherwise broaden the
+    // match within the tenant, and a leading wildcard would force a non-indexable
+    // scan (adversarial review). Escaping — not a hex-charset reject — keeps
+    // legacy non-UUID message ids (e.g. "legacy-import-…") resolvable by prefix.
+    const likePrefix = value.replace(/[\\%_]/g, "\\$&");
+    const rows = await this.client.many<{ id: string }>(
+      `SELECT id FROM messages WHERE (id)::text LIKE $1 || '%' ESCAPE '\\' AND tenant_id = $2 ORDER BY id LIMIT 2`,
+      [likePrefix, this.tenantId],
+    );
+    if (rows.length === 0) return null;
+    if (rows.length > 1) return { ambiguous: true };
+    return { id: rows[0]!.id };
   }
 
   async getMessage(id: string): Promise<MessageRecord | null> {

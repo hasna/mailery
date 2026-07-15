@@ -19,6 +19,8 @@ export interface MessageListItem { "id": string; "direction": string; "from_addr
 
 export interface Message { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "body_text"?: string | null; "body_html"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "source_id"?: string | null; "send_state"?: string; "send_started_at"?: string | null; "created_at": string; "updated_at": string }
 
+export interface AttachmentContent { "filename": string; "content_type": string; "size": number; "content_base64": string }
+
 export interface Thread { "thread_key": string; "subject"?: string | null; "message_count": number; "unread_count": number; "last_message_at"?: string | null; "first_message_at"?: string | null; "participants"?: Array<string> }
 
 export interface Mailbox { "id": string; "address": string; "display_name"?: string | null; "status"?: string; "total": number; "unread": number }
@@ -82,7 +84,7 @@ export class EmailsSelfHostClient {
       headers["Content-Type"] = "application/json";
       payload = JSON.stringify(opts.body);
     }
-    const response = await this.fetchImpl(url.toString(), { ...opts.init, method, headers, body: payload });
+    const response = await this.fetchImpl(url.toString(), { ...opts.init, method, headers, body: payload, redirect: "error" });
     const text = await response.text();
     const data = text ? (() => { try { return JSON.parse(text); } catch { return text; } })() : undefined;
     if (!response.ok) {
@@ -944,10 +946,10 @@ export class EmailsSelfHostClient {
       });
     }
 
-    async getMessageAttachment(id: string, index: number, init?: RequestInit): Promise<Record<string, unknown>> {
+    async getMessageAttachment(id: string, index: number, query?: { "max_bytes"?: number }, init?: RequestInit): Promise<{ "attachment": AttachmentContent }> {
       return this.request("GET", `/v1/messages/${encodeURIComponent(String(id))}/attachments/${encodeURIComponent(String(index))}`, {
         body: undefined,
-        query: undefined,
+        query,
         init,
       });
     }

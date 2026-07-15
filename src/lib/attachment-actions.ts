@@ -1,4 +1,5 @@
 import { localFileUrl } from "./local-actions.js";
+import { validateAttachmentFilename } from "./attachment-download.js";
 
 export interface AttachmentMetaLike {
   filename: string;
@@ -34,10 +35,11 @@ export function mergeAttachmentDetails(
   meta: readonly AttachmentMetaLike[] = [],
   paths: readonly AttachmentPathLike[] = [],
 ): AttachmentDetail[] {
-  const byName = new Map<string, AttachmentDetail>();
+  const details: AttachmentDetail[] = [];
   for (const attachment of meta) {
     if (!attachment.filename) continue;
-    byName.set(attachment.filename, {
+    validateAttachmentFilename(attachment.filename);
+    details.push({
       filename: attachment.filename,
       content_type: attachment.content_type ?? "application/octet-stream",
       size: Number.isFinite(attachment.size) ? Number(attachment.size) : 0,
@@ -45,9 +47,35 @@ export function mergeAttachmentDetails(
     });
   }
 
-  for (const path of paths) {
+  // Attachment names are not unique. Match each path to one metadata entry so
+  // two same-named attachments keep distinct indexes instead of collapsing in
+  // a filename-keyed map.
+  const usedPaths = new Set<number>();
+  for (const current of details) {
+    const pathIndex = paths.findIndex((path, index) =>
+      !usedPaths.has(index) && path.filename === current.filename,
+    );
+    if (pathIndex < 0) continue;
+    usedPaths.add(pathIndex);
+    const path = paths[pathIndex]!;
+    if (path.local_path) {
+      current.location = path.local_path;
+      current.location_type = "local";
+      current.file_url = localFileUrl(path.local_path);
+      current.openable = true;
+    } else if (path.s3_url) {
+      current.location = path.s3_url;
+      current.location_type = "s3";
+      current.openable = false;
+    }
+  }
+
+  for (let index = 0; index < paths.length; index++) {
+    if (usedPaths.has(index)) continue;
+    const path = paths[index]!;
     if (!path.filename) continue;
-    const current = byName.get(path.filename) ?? {
+    validateAttachmentFilename(path.filename);
+    const current: AttachmentDetail = {
       filename: path.filename,
       content_type: path.content_type ?? "application/octet-stream",
       size: 0,
@@ -63,9 +91,8 @@ export function mergeAttachmentDetails(
       current.location_type = "s3";
       current.openable = false;
     }
-    if (!current.content_type && path.content_type) current.content_type = path.content_type;
-    byName.set(path.filename, current);
+    details.push(current);
   }
 
-  return [...byName.values()];
+  return details;
 }

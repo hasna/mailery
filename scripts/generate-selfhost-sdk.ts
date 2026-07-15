@@ -61,6 +61,12 @@ secureClientCode = replaceRequired(
   '    if (this.bearerToken) headers["Authorization"] = `Bearer ${this.bearerToken}`;\n    else if (this.apiKey) headers["x-api-key"] = this.apiKey;\n',
   "bearer header",
 );
+secureClientCode = replaceRequired(
+  secureClientCode,
+  "    const response = await this.fetchImpl(url.toString(), { ...opts.init, method, headers, body: payload });\n",
+  "    const response = await this.fetchImpl(url.toString(), { ...opts.init, method, headers, body: payload, redirect: \"error\" });\n",
+  "redirect rejection",
+);
 
 const header = `// @generated from src/server/self-hosted/openapi.ts by scripts/generate-selfhost-sdk.ts — DO NOT EDIT.
 // Regenerate: bun run scripts/generate-selfhost-sdk.ts

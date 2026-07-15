@@ -339,6 +339,82 @@ function getAttachmentDir(emailId: string): string {
   return dir;
 }
 
+const MAX_ATTACHMENT_STORAGE_LEAF_BYTES = 240;
+
+interface AttachmentStoragePlan {
+  index: number;
+  filename: string;
+  content_type: string;
+  size: number;
+  content: Buffer;
+  storageLeaf: string;
+}
+
+function truncateUtf8(value: string, byteLimit: number): string {
+  let output = "";
+  let bytes = 0;
+  for (const character of value) {
+    const next = Buffer.byteLength(character, "utf8");
+    if (bytes + next > byteLimit) break;
+    output += character;
+    bytes += next;
+  }
+  return output;
+}
+
+function legacySanitizeAttachmentFilename(filename: string): string {
+  return filename.replace(/[/\\?%*:|"<>]/g, "_");
+}
+
+function attachmentStorageLeaf(index: number, filename: string): string {
+  if (!Number.isSafeInteger(index) || index < 0) throw new Error("attachment index must be a non-negative integer");
+  const prefix = `${String(index).padStart(6, "0")}-`;
+  let sanitized = legacySanitizeAttachmentFilename(filename)
+    .replace(/[\u0000-\u001f\u007f]/g, "_")
+    .trim();
+  if (!sanitized || sanitized === "." || sanitized === "..") sanitized = "attachment";
+  const budget = MAX_ATTACHMENT_STORAGE_LEAF_BYTES - Buffer.byteLength(prefix, "utf8");
+  return `${prefix}${truncateUtf8(sanitized, budget) || "attachment"}`;
+}
+
+function buildAttachmentStoragePlans(
+  attachments: ReadonlyArray<{
+    filename?: string;
+    contentType?: string;
+    size?: number;
+    content: Buffer;
+  }>,
+): AttachmentStoragePlan[] {
+  return attachments.map((attachment, index) => {
+    const filename = attachment.filename ?? `attachment_${index + 1}`;
+    return {
+      index,
+      filename,
+      content_type: attachment.contentType ?? "application/octet-stream",
+      size: attachment.size ?? 0,
+      content: attachment.content,
+      storageLeaf: attachmentStorageLeaf(index, filename),
+    };
+  });
+}
+
+function attachmentS3Key(prefix: string | undefined, emailId: string, storageLeaf: string): string {
+  const root = (prefix?.trim() || "emails").replace(/\/+$/, "");
+  return `${root}/${emailId}/${storageLeaf}`;
+}
+
+function storeLocalAttachment(plan: AttachmentStoragePlan, outputDir: string): AttachmentPath {
+  const filePath = join(outputDir, plan.storageLeaf);
+  writeFileSync(filePath, plan.content);
+  return {
+    index: plan.index,
+    filename: plan.filename,
+    content_type: plan.content_type,
+    size: plan.size,
+    local_path: filePath,
+  };
+}
+
 async function listObjectPage(
   s3: S3Client,
   s3Sdk: S3Sdk,
@@ -405,6 +481,7 @@ async function processS3Object(
   result: S3SyncResult,
 ): Promise<void> {
   const parsed = await fetchAndParseEmail(s3, s3Sdk, bucket, obj.key);
+  const attachmentPlans = buildAttachmentStoragePlans(parsed.attachments ?? []);
 
   const fromAddr = typeof parsed.from?.text === "string"
     ? parsed.from.text
@@ -418,10 +495,10 @@ async function processS3Object(
         a.value?.map((v) => v.address ?? "") ?? [])
     : [];
 
-  const attachmentMeta = (parsed.attachments ?? []).map((a) => ({
-    filename: a.filename ?? "attachment",
-    content_type: a.contentType ?? "application/octet-stream",
-    size: a.size ?? 0,
+  const attachmentMeta = attachmentPlans.map((attachment) => ({
+    filename: attachment.filename,
+    content_type: attachment.content_type,
+    size: attachment.size,
   }));
 
   const headerObj = flattenHeaders(parsed.headers);
@@ -487,63 +564,67 @@ async function processS3Object(
   if (attachmentMeta.length > 0 && syncConfig.attachment_storage !== "none") {
     const paths: AttachmentPath[] = [];
 
-    for (const att of parsed.attachments ?? []) {
-      const filename = att.filename ?? `attachment_${paths.length + 1}`;
-      const safeName = filename.replace(/[/\\?%*:|"<>]/g, "_");
-
+    for (const attachment of attachmentPlans) {
       if (syncConfig.attachment_storage === "s3") {
         if (!syncConfig.s3_bucket) {
-          result.errors.push(`S3 upload ${safeName}: attachment_s3_bucket is required when attachment_storage=s3`);
+          result.errors.push(`S3 upload ${attachment.storageLeaf}: attachment_s3_bucket is required when attachment_storage=s3`);
           continue;
         }
         try {
           const { S3Client: S3C, PutObjectCommand } = await loadS3Sdk();
           const client = new S3C({ region: syncConfig.s3_region ?? "us-east-1" });
-          const s3Key = `${syncConfig.s3_prefix ?? "emails"}/${stored.id}/${safeName}`;
+          const s3Key = attachmentS3Key(syncConfig.s3_prefix, stored.id, attachment.storageLeaf);
           await client.send(new PutObjectCommand({
             Bucket: syncConfig.s3_bucket,
             Key: s3Key,
-            Body: att.content,
-            ContentType: att.contentType ?? "application/octet-stream",
+            Body: attachment.content,
+            ContentType: attachment.content_type,
           }));
-          paths.push({ filename: safeName, content_type: att.contentType ?? "", size: att.size ?? 0, s3_url: `s3://${syncConfig.s3_bucket}/${s3Key}` });
+          paths.push({
+            index: attachment.index,
+            filename: attachment.filename,
+            content_type: attachment.content_type,
+            size: attachment.size,
+            s3_url: `s3://${syncConfig.s3_bucket}/${s3Key}`,
+          });
           emitEmailsEventBestEffort({
             type: "emails.inbound.attachment.saved",
             subject: stored.id,
             severity: "info",
-            dedupeKey: `emails:inbound:attachment:${stored.id}:${safeName}`,
+            dedupeKey: `emails:inbound:attachment:${stored.id}:${attachment.storageLeaf}`,
             message: "Inbound attachment stored",
             data: {
               email_id: stored.id,
-              filename: safeName,
-              content_type: att.contentType ?? "application/octet-stream",
-              size: att.size ?? 0,
+              filename: attachment.filename,
+              storage_leaf: attachment.storageLeaf,
+              content_type: attachment.content_type,
+              size: attachment.size,
               storage: "s3",
               uri: `s3://${syncConfig.s3_bucket}/${s3Key}`,
             },
           });
         } catch (e) {
-          result.errors.push(`S3 upload ${safeName}: ${String(e)}`);
+          result.errors.push(`S3 upload ${attachment.storageLeaf}: ${String(e)}`);
           continue;
         }
       } else if (syncConfig.attachment_storage === "local") {
         const outputDir = getAttachmentDir(stored.id);
-        const filePath = join(outputDir, safeName);
-        writeFileSync(filePath, att.content);
-        paths.push({ filename: safeName, content_type: att.contentType ?? "", size: att.size ?? 0, local_path: filePath });
+        const path = storeLocalAttachment(attachment, outputDir);
+        paths.push(path);
         emitEmailsEventBestEffort({
           type: "emails.inbound.attachment.saved",
           subject: stored.id,
           severity: "info",
-          dedupeKey: `emails:inbound:attachment:${stored.id}:${safeName}`,
+          dedupeKey: `emails:inbound:attachment:${stored.id}:${attachment.storageLeaf}`,
           message: "Inbound attachment stored",
           data: {
             email_id: stored.id,
-            filename: safeName,
-            content_type: att.contentType ?? "application/octet-stream",
-            size: att.size ?? 0,
+            filename: attachment.filename,
+            storage_leaf: attachment.storageLeaf,
+            content_type: attachment.content_type,
+            size: attachment.size,
             storage: "local",
-            uri: filePath,
+            uri: path.local_path,
           },
         });
       }
@@ -553,6 +634,13 @@ async function processS3Object(
     if (paths.length > 0) updateAttachmentPaths(stored.id, paths, db);
   }
 }
+
+/** @internal Pure/local seams for deterministic attachment-storage tests. */
+export const s3SyncLocalTestBoundary = {
+  attachmentS3Key,
+  buildAttachmentStoragePlans,
+  storeLocalAttachment,
+};
 
 /**
  * Download and parse a raw RFC 2822 email from S3.

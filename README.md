@@ -185,7 +185,14 @@ emails config list --verbose     # full redacted config values
 emails config keys --verbose     # include examples for every key
 emails email show <id>           # detail path for one sent email
 emails inbox read <id>           # detail path for one inbound email
+emails inbox attachment <exact-id> --download --index 0 --output-dir ./attachments
 ```
+
+Attachment byte downloads use descriptor-relative, no-overwrite writes so an
+output-directory symlink swap cannot redirect bytes. That secure filesystem
+primitive currently requires Linux (`/proc/self/fd`); macOS and other platforms
+fail closed before writing a file. Metadata-only attachment reads remain
+cross-platform.
 
 `--json` remains the machine-readable path. Broad MCP list tools default to
 their existing bounded summary page size for compatibility; use each tool's

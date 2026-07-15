@@ -5,6 +5,9 @@
 // server-only and fail closed with a clear message.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Command } from "commander";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startV1Stub, type V1Stub } from "../../test-support/v1-stub.js";
 import {
   storeInboundEmail,
@@ -98,6 +101,25 @@ async function runInboxCommandExpectingExit(args: string[]) {
     process.exit = originalExit;
     console.error = originalError;
   }
+}
+
+// Attachment download failures exercise process.exit(1). Run these new
+// security-boundary assertions in an isolated CLI process so one test can
+// never replace or restore another test file's global process.exit hook.
+async function runInboxSubprocessExpectingExit(args: string[]) {
+  const child = Bun.spawn({
+    cmd: [process.execPath, "run", "src/cli/index.tsx", ...args],
+    cwd: process.cwd(),
+    env: { ...process.env },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { exitCode, stdout, stderr };
 }
 
 beforeAll(async () => {
@@ -637,6 +659,121 @@ describe("inbox attachment", () => {
     ]);
     expect(out).toContain("2 KB");
     expect(out).toContain("not downloaded");
+  });
+
+  it("downloads a validated attachment to a collision-proof mode-0600 file", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-attachment-"));
+    try {
+      await stub.seed({ messages: [msgRow({
+        id,
+        attachments: [{
+          filename: "../invoice.txt",
+          content_type: "text/plain",
+          size: 5,
+          content_base64: "aGVsbG8=",
+        }],
+      })] });
+      const { data } = await runInboxCommand([
+        "inbox", "attachment", id, "--download", "--index", "0", "--output-dir", dir, "--max-bytes", "16",
+      ]);
+      const [saved] = data as Array<{ path: string; sha256: string; bytes: number }>;
+      expect(saved).toMatchObject({
+        bytes: 5,
+        sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+      });
+      expect(saved.path.startsWith(`${dir}/`)).toBe(true);
+      expect(readFileSync(saved.path, "utf8")).toBe("hello");
+      expect(statSync(saved.path).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires an explicit single index before creating any download file", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-attachment-"));
+    try {
+      await stub.seed({ messages: [msgRow({
+        id,
+        attachments: [
+          { filename: "one.txt", content_type: "text/plain", size: 3, content_base64: "b25l" },
+          { filename: "two.txt", content_type: "text/plain", size: 3, content_base64: "dHdv" },
+        ],
+      })] });
+      const result = await runInboxSubprocessExpectingExit([
+        "inbox", "attachment", id, "--download", "--output-dir", dir,
+      ]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("--index");
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires the exact full message id for an attachment download", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-attachment-"));
+    try {
+      await stub.seed({ messages: [msgRow({
+        id,
+        attachments: [
+          { filename: "one.txt", content_type: "text/plain", size: 3, content_base64: "b25l" },
+        ],
+      })] });
+      const result = await runInboxSubprocessExpectingExit([
+        "inbox", "attachment", id.slice(0, 8), "--download", "--index", "0", "--output-dir", dir,
+      ]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("exact full message id");
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails a missing explicit index selection without creating any file", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-attachment-"));
+    try {
+      await stub.seed({ messages: [msgRow({
+        id,
+        attachments: [
+          { filename: "one.txt", content_type: "text/plain", size: 3, content_base64: "b25l" },
+        ],
+      })] });
+      const result = await runInboxSubprocessExpectingExit([
+        "inbox", "attachment", id, "--download", "--index", "7", "--output-dir", dir,
+      ]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("No stored attachment metadata");
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("downloads the explicitly selected duplicate filename index only", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-attachment-"));
+    try {
+      await stub.seed({ messages: [msgRow({
+        id,
+        attachments: [
+          { filename: "same.txt", content_type: "text/plain", size: 3, content_base64: "b25l" },
+          { filename: "same.txt", content_type: "text/plain", size: 3, content_base64: "dHdv" },
+        ],
+      })] });
+      const { data } = await runInboxCommand([
+        "inbox", "attachment", id, "--download", "--index", "1", "--filename", "same.txt", "--output-dir", dir,
+      ]);
+      const saved = data as Array<{ index: number; path: string }>;
+      expect(saved.map((item) => item.index)).toEqual([1]);
+      expect(saved.map((item) => readFileSync(item.path, "utf8"))).toEqual(["two"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

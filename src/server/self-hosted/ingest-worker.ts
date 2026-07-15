@@ -24,13 +24,22 @@
 
 import { parseSesNotification } from "../../lib/inbound-realtime.js";
 import { parseInboundMime } from "../../lib/inbound-mime.js";
+import { createHash } from "node:crypto";
 import { getSelfHostedPool, closeSelfHostedPool } from "./env.js";
 import {
   EmailsSelfHostedStore,
   type InboundRouteResolution,
   type TenantScopedStore,
   type MessageInput,
+  type InboundSourceProvenance,
+  type InboundProvenanceAuditResult,
 } from "./store.js";
+import {
+  MAX_ATTACHMENT_REPAIR_RAW_BYTES,
+  normalizeAttachmentRepairCanaryMessageIds,
+  repairExistingS3ObjectAttachments,
+  type AttachmentRepairResult,
+} from "./attachment-repair.js";
 
 /** Minimal store surface the worker needs (kept narrow for testability). */
 export interface IngestStore {
@@ -43,7 +52,10 @@ export interface IngestStore {
     reason: string;
     detail?: string | null;
   }): Promise<void>;
-  forTenant(tenantId: string): Pick<TenantScopedStore, "findMessageIdByKey" | "upsertMessage">;
+  forTenant(tenantId: string): Pick<
+    TenantScopedStore,
+    "findMessageIdByKey" | "getInboundSourceProvenance" | "recordInboundSourceProvenance" | "createInboundMessageWithProvenance"
+  >;
 }
 
 export interface IngestDeps {
@@ -94,14 +106,40 @@ export async function ingestS3Object(
 
     const targets: Array<{
       group: InboundRouteResolution["groups"][number];
-      scoped: Pick<TenantScopedStore, "findMessageIdByKey" | "upsertMessage">;
+      scoped: Pick<
+        TenantScopedStore,
+        "findMessageIdByKey" | "getInboundSourceProvenance" | "recordInboundSourceProvenance" | "createInboundMessageWithProvenance"
+      >;
       existing: string | null;
+      provenance: InboundSourceProvenance | null;
     }> = [];
     for (const group of route.groups) {
       const scoped = deps.store.forTenant(group.tenantId);
-      targets.push({ group, scoped, existing: await scoped.findMessageIdByKey(key) });
+      const existing = await scoped.findMessageIdByKey(key);
+      targets.push({
+        group,
+        scoped,
+        existing,
+        provenance: existing ? await scoped.getInboundSourceProvenance(existing) : null,
+      });
     }
-    if (targets.every((target) => target.existing !== null)) {
+    for (const target of targets) {
+      if (target.provenance && (target.provenance.bucket !== bucket || target.provenance.object_key !== key)) {
+        return { status: "error", key, reason: "provenance_conflict", error: "existing source provenance conflicts with the configured canonical source" };
+      }
+    }
+    const raw = await deps.fetchObject(bucket, key);
+    const rawSha256 = createHash("sha256").update(raw).digest("hex");
+    for (const target of targets) {
+      if (target.provenance && target.provenance.raw_sha256 !== rawSha256) {
+        return { status: "error", key, reason: "provenance_hash_mismatch", error: "canonical source bytes no longer match immutable provenance" };
+      }
+    }
+    // A fully provenanced replay is terminal only after the deployment's
+    // canonical object has been fetched and verified against immutable bytes.
+    // Preserve the fast exit here: matching duplicates are never parsed or
+    // passed through any message/provenance write path.
+    if (targets.every((target) => target.existing !== null && target.provenance !== null)) {
       return {
         status: "duplicate",
         key,
@@ -110,8 +148,31 @@ export async function ingestS3Object(
         tenant_ids: targets.map((target) => target.group.tenantId),
       };
     }
-
-    const raw = await deps.fetchObject(bucket, key);
+    // A legacy row with no provenance is bootstrapped from canonical object
+    // identity only (configured bucket + exact key + raw SHA). Its stored mail
+    // and attachment metadata are never reparsed or rewritten to establish
+    // identity.
+    if (targets.every((target) => target.existing !== null)) {
+      for (const target of targets) {
+        const provenanceResult = await target.scoped.recordInboundSourceProvenance({
+          messageId: target.existing!,
+          bucket,
+          objectKey: key,
+          rawSha256,
+          establishedVia: "canonical_replay",
+        });
+        if (provenanceResult !== "recorded" && provenanceResult !== "existing_match") {
+          throw new Error(`could not establish immutable legacy source provenance (${provenanceResult})`);
+        }
+      }
+      return {
+        status: "duplicate",
+        key,
+        id: targets[0]?.existing ?? undefined,
+        inserted: false,
+        tenant_ids: targets.map((target) => target.group.tenantId),
+      };
+    }
     const parsed = await parseInboundMime(raw);
     const receivedAt = parsed.received_at ?? note.timestamp ?? deps.now();
     const tenantIds: string[] = [];
@@ -121,6 +182,16 @@ export async function ingestS3Object(
       tenantIds.push(group.tenantId);
       if (existing) {
         ids.push(existing);
+        const provenanceResult = await scoped.recordInboundSourceProvenance({
+          messageId: existing,
+          bucket,
+          objectKey: key,
+          rawSha256,
+          establishedVia: "canonical_replay",
+        });
+        if (provenanceResult !== "recorded" && provenanceResult !== "existing_match") {
+          throw new Error(`could not establish immutable legacy source provenance (${provenanceResult})`);
+        }
         continue;
       }
       const input: MessageInput = {
@@ -142,9 +213,14 @@ export async function ingestS3Object(
         attachments: parsed.attachments,
         source_id: key,
       };
-      const { record, inserted } = await scoped.upsertMessage(input);
-      ids.push(record.id);
-      insertedAny ||= inserted;
+      const atomic = await scoped.createInboundMessageWithProvenance(input, {
+        bucket,
+        objectKey: key,
+        rawSha256,
+        establishedVia: "normal_ingest",
+      });
+      ids.push(atomic.record.id);
+      insertedAny ||= atomic.inserted;
     }
     return {
       status: insertedAny ? "ingested" : "duplicate",
@@ -184,7 +260,6 @@ export async function processInboundNotification(
 
 interface WorkerOptions {
   queueUrl?: string;
-  bucket?: string;
   region?: string;
   maxMessages?: number;
   waitTimeSeconds?: number;
@@ -216,7 +291,7 @@ export function shouldDeleteIngestResult(result: IngestResult): boolean {
 export async function runIngestWorker(options: WorkerOptions = {}): Promise<void> {
   const region = options.region ?? process.env["AWS_REGION"] ?? "us-east-1";
   const queueUrl = options.queueUrl ?? process.env["EMAILS_INGEST_QUEUE_URL"];
-  const defaultBucket = options.bucket ?? process.env["EMAILS_INGEST_S3_BUCKET"];
+  const defaultBucket = process.env["EMAILS_INGEST_S3_BUCKET"];
   const maxMessages = options.maxMessages ?? 10;
   const waitTimeSeconds = options.waitTimeSeconds ?? 20;
   const visibilityTimeout = options.visibilityTimeout ?? 120;
@@ -316,7 +391,6 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
 }
 
 interface BackfillOptions {
-  bucket?: string;
   prefix?: string;
   region?: string;
   limit?: number;
@@ -331,7 +405,7 @@ interface BackfillOptions {
  */
 export async function runIngestS3Backfill(options: BackfillOptions = {}): Promise<void> {
   const region = options.region ?? process.env["AWS_REGION"] ?? "us-east-1";
-  const bucket = options.bucket ?? process.env["EMAILS_INGEST_S3_BUCKET"];
+  const bucket = process.env["EMAILS_INGEST_S3_BUCKET"];
   const prefix = options.prefix ?? process.env["EMAILS_INGEST_S3_PREFIX"] ?? "";
   const envLimit = Number(process.env["EMAILS_INGEST_BACKFILL_LIMIT"] ?? "0");
   const limit = options.limit ?? (Number.isFinite(envLimit) && envLimit > 0 ? envLimit : undefined);
@@ -390,6 +464,225 @@ export async function runIngestS3Backfill(options: BackfillOptions = {}): Promis
     await closeSelfHostedPool();
   }
   if (counts.error > 0) process.exitCode = 1;
+}
+
+export interface AttachmentRepairCanaryOptions {
+  region?: string;
+  objectKeys: string[];
+  recipients: string[];
+  canaryMessageIds: string[];
+  /** False by default. The operator must pass --apply deliberately. */
+  apply?: boolean;
+}
+
+export function validateAttachmentRepairCanaryOptions(options: AttachmentRepairCanaryOptions): {
+  objectKey: string;
+  messageIds: string[];
+} {
+  const objectKeys = options.objectKeys.map((value) => value.trim()).filter(Boolean);
+  const messageIds = normalizeAttachmentRepairCanaryMessageIds(options.canaryMessageIds);
+  if (objectKeys.length !== 1) throw new Error("attachment repair requires exactly one --object-key per invocation");
+  if (messageIds.length === 0) throw new Error("attachment repair requires at least one --message-id per invocation");
+  if (options.recipients.length === 0) throw new Error("attachment repair requires trusted --recipient routing evidence");
+  return { objectKey: objectKeys[0]!, messageIds };
+}
+
+export function attachmentRepairResultSucceeded(result: AttachmentRepairResult): boolean {
+  const allowed = result.apply
+    ? new Set(["repaired", "already_complete"])
+    : new Set(["would_repair", "already_complete"]);
+  return result.items.length > 0 && result.items.every((item) => allowed.has(item.status));
+}
+
+export function redactedAttachmentRepairReport(result: AttachmentRepairResult): Record<string, unknown> {
+  return {
+    mode: result.apply ? "apply" : "dry-run",
+    object_key_sha256: createHash("sha256").update(result.key).digest("hex"),
+    items: result.items.map((item) => ({
+      tenant_id: item.tenant_id,
+      ...(item.message_id ? { message_id: item.message_id } : {}),
+      status: item.status,
+      ...(item.attachments === undefined ? {} : { attachments: item.attachments }),
+    })),
+  };
+}
+
+export function finalizeAttachmentRepairCanary(
+  result: AttachmentRepairResult,
+  emit: (line: string) => void = (line) => console.log(line),
+): AttachmentRepairResult[] {
+  emit(JSON.stringify(redactedAttachmentRepairReport(result)));
+  if (!attachmentRepairResultSucceeded(result)) {
+    throw new Error("attachment repair did not complete successfully; no further object was attempted");
+  }
+  return [result];
+}
+
+/**
+ * Bounded historical attachment repair. Unlike ingest-s3-backfill this never
+ * lists a bucket and never invokes the generic message upsert: each requested
+ * object must bind to an exact tenant-scoped canary message id, then an
+ * attachment-only compare-and-swap is dry-run unless `apply` is explicit.
+ */
+export async function runAttachmentRepairCanary(options: AttachmentRepairCanaryOptions): Promise<AttachmentRepairResult[]> {
+  const { objectKey } = validateAttachmentRepairCanaryOptions(options);
+  const region = options.region ?? process.env["AWS_REGION"] ?? "us-east-1";
+  if (!process.env["EMAILS_DATABASE_URL"]) throw new Error("attachment repair requires EMAILS_DATABASE_URL");
+  const canonicalBucket = process.env["EMAILS_INGEST_S3_BUCKET"];
+  if (!canonicalBucket) throw new Error("attachment repair requires EMAILS_INGEST_S3_BUCKET as the canonical source");
+
+  const { client } = getSelfHostedPool();
+  const store = new EmailsSelfHostedStore(client);
+  const { S3Client, GetObjectCommand } = await import("@aws-sdk/client-s3");
+  const s3 = new S3Client({ region });
+  const fetchObject = async (objectBucket: string, key: string): Promise<Buffer> => {
+    const res = await s3.send(new GetObjectCommand({ Bucket: objectBucket, Key: key }));
+    if (!res.Body) throw new Error("S3 object has no body");
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
+    for await (const chunk of res.Body as AsyncIterable<Uint8Array>) {
+      bytes += chunk.byteLength;
+      if (bytes > MAX_ATTACHMENT_REPAIR_RAW_BYTES) {
+        throw new Error(`S3 object exceeds attachment repair source byte limit ${MAX_ATTACHMENT_REPAIR_RAW_BYTES}`);
+      }
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  };
+  try {
+    const result = await repairExistingS3ObjectAttachments({
+      canonicalBucket,
+      resolveInboundRecipients: (recipients) => store.resolveInboundRecipients(recipients),
+      listAttachmentRepairBindings: (bucket, key) => store.listAttachmentRepairBindings(bucket, key),
+      replaceAttachmentPayloadsAtomically: (bindings, updates) =>
+        store.replaceAttachmentPayloadsAtomically(bindings, updates),
+      fetchObject,
+    }, {
+      key: objectKey,
+      recipients: options.recipients,
+      canaryMessageIds: options.canaryMessageIds,
+      apply: options.apply === true,
+    });
+    return finalizeAttachmentRepairCanary(result);
+  } finally {
+    await closeSelfHostedPool();
+  }
+}
+
+export interface InboundProvenanceAuditOptions {
+  since: string;
+}
+
+export function redactedInboundProvenanceFenceReport(fenceAt: string): { fence_at: string } {
+  return { fence_at: fenceAt };
+}
+
+/**
+ * Privacy-safe pre-0017 cutover fence. The only emitted value is the database
+ * clock timestamp used later by the aggregate provenance audit.
+ */
+export async function runInboundProvenanceFence(
+  emit: (line: string) => void = (line) => console.log(line),
+): Promise<string> {
+  if (!process.env["EMAILS_DATABASE_URL"]) throw new Error("inbound provenance fence requires EMAILS_DATABASE_URL");
+  const { client } = getSelfHostedPool();
+  try {
+    const fenceAt = await new EmailsSelfHostedStore(client).captureInboundProvenanceFence();
+    emit(JSON.stringify(redactedInboundProvenanceFenceReport(fenceAt)));
+    return fenceAt;
+  } finally {
+    await closeSelfHostedPool();
+  }
+}
+
+export function validateInboundProvenanceAuditOptions(options: InboundProvenanceAuditOptions): { since: string } {
+  const raw = options.since.trim();
+  if (!raw) throw new Error("inbound provenance audit requires exactly one --since <ISO8601> cutoff");
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:\d{2})$/);
+  if (!match) {
+    throw new Error("inbound provenance audit --since must be a valid ISO 8601 timestamp");
+  }
+  const year = Number(match[1]!);
+  const month = Number(match[2]!);
+  const day = Number(match[3]!);
+  const hour = Number(match[4]!);
+  const minute = Number(match[5]!);
+  const second = Number(match[6]!);
+  const zone = match[8]!;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthDays = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const [offsetHour, offsetMinute] = zone === "Z"
+    ? [0, 0]
+    : zone.slice(1).split(":").map(Number);
+  if (
+    month < 1
+    || month > 12
+    || day < 1
+    || day > monthDays[month - 1]!
+    || hour > 23
+    || minute > 59
+    || second > 59
+    || offsetHour! > 23
+    || offsetMinute! > 59
+  ) {
+    throw new Error("inbound provenance audit --since must be a valid ISO 8601 timestamp");
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) throw new Error("inbound provenance audit --since must be a valid ISO 8601 timestamp");
+  return { since: parsed.toISOString() };
+}
+
+export function inboundProvenanceAuditSucceeded(result: InboundProvenanceAuditResult): boolean {
+  return result.tenants_scanned > 0
+    && result.missing_provenance === 0
+    && result.invalid_provenance === 0
+    && result.candidate_messages === result.valid_provenance;
+}
+
+export function redactedInboundProvenanceAuditReport(
+  result: InboundProvenanceAuditResult,
+): InboundProvenanceAuditResult & { status: "pass" | "fail"; gaps: number } {
+  const gaps = result.missing_provenance + result.invalid_provenance;
+  return {
+    status: inboundProvenanceAuditSucceeded(result) ? "pass" : "fail",
+    ...result,
+    gaps,
+  };
+}
+
+export function finalizeInboundProvenanceAudit(
+  result: InboundProvenanceAuditResult,
+  emit: (line: string) => void = (line) => console.log(line),
+): InboundProvenanceAuditResult {
+  const report = redactedInboundProvenanceAuditReport(result);
+  emit(JSON.stringify(report));
+  if (!inboundProvenanceAuditSucceeded(result)) {
+    throw new Error(`inbound provenance audit found ${report.gaps} gap(s); API activation is forbidden`);
+  }
+  return result;
+}
+
+/**
+ * Privacy-safe, read-only post-fence audit. The canonical bucket comes only
+ * from deployment configuration; output is aggregate counts and a cutoff.
+ */
+export async function runInboundProvenanceAudit(
+  options: InboundProvenanceAuditOptions,
+): Promise<InboundProvenanceAuditResult> {
+  const { since } = validateInboundProvenanceAuditOptions(options);
+  if (!process.env["EMAILS_DATABASE_URL"]) throw new Error("inbound provenance audit requires EMAILS_DATABASE_URL");
+  const canonicalBucket = process.env["EMAILS_INGEST_S3_BUCKET"];
+  if (!canonicalBucket) throw new Error("inbound provenance audit requires EMAILS_INGEST_S3_BUCKET as the canonical source");
+  const { client } = getSelfHostedPool();
+  try {
+    const result = await new EmailsSelfHostedStore(client).auditInboundSourceProvenance({
+      since,
+      canonicalBucket,
+    });
+    return finalizeInboundProvenanceAudit(result);
+  } finally {
+    await closeSelfHostedPool();
+  }
 }
 
 function sleep(ms: number): Promise<void> {

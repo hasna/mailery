@@ -166,9 +166,10 @@ function fakeServe(
       const index = Number(attachmentMatch[2]);
       const metadata = Array.isArray(row?.["attachments"]) ? row!["attachments"] as Record<string, unknown>[] : [];
       const contents = Array.isArray(row?.["_attachment_contents"]) ? row!["_attachment_contents"] as string[] : [];
-      return metadata[index] && contents[index]
+      if (!metadata[index]) return ok({ error: "not found", code: "attachment_not_found" }, 404);
+      return contents[index]
         ? ok({ attachment: { ...metadata[index], content_base64: contents[index] } })
-        : ok({ error: "not found" }, 404);
+        : ok({ error: "attachment content is not stored", code: "attachment_content_unavailable", attachment: metadata[index] }, 409);
     }
     if (idMatch) {
       const id = decodeURIComponent(idMatch[1]!);
@@ -564,6 +565,21 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(await ds.removeLabel("2", "x")).not.toContain("x");
   });
 
+  it("keeps catalog-safe label and mark-read operations idempotent without destructive calls", async () => {
+    const originalAttachments = [{ filename: "invoice.txt", content_type: "text/plain", size: 5 }];
+    const { ds, serve } = make([v1("safe", { attachments: originalAttachments })]);
+    await ds.addLabel("safe", "catalog/action-required");
+    await ds.addLabel("safe", "catalog/action-required");
+    await ds.setRead("safe", true);
+    await ds.setRead("safe", true);
+
+    expect(serve.rows.get("safe")?.["labels"]).toEqual(["catalog/action-required"]);
+    expect(serve.rows.get("safe")?.["is_read"]).toBe(true);
+    expect(serve.rows.get("safe")?.["attachments"]).toEqual(originalAttachments);
+    expect(serve.requests.some((request) => request.startsWith("DELETE "))).toBe(false);
+    expect(serve.requests.some((request) => /archive|trash|spam|remove/i.test(request))).toBe(false);
+  });
+
   it("supports explicit-id bulk mutations and rejects scheduled sends honestly", async () => {
     const { ds, serve } = make([v1("2"), v1("3")]);
     const result = await ds.bulk({ action: "read", ids: ["2", "3"] });
@@ -603,6 +619,106 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
       if (previousHome === undefined) delete process.env["HOME"];
       else process.env["HOME"] = previousHome;
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("downloads one exact attachment through the typed boundary without writing locally", async () => {
+    const id = "attachment-message";
+    const { ds, serve } = make([v1(id, {
+      attachments: [{ filename: "invoice.txt", content_type: "text/plain", size: 5 }],
+      _attachment_contents: ["aGVsbG8="],
+    })]);
+    const content = await ds.getAttachmentContent(id, 0, { maxBytes: 16 });
+    expect(content).toMatchObject({
+      state: "available",
+      index: 0,
+      filename: "invoice.txt",
+      content_type: "text/plain",
+      bytes: 5,
+      sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    });
+    expect(serve.requests).toContain(`GET /v1/messages/${id}/attachments/0?max_bytes=16`);
+  });
+
+  it("returns an explicit metadata-only state and rejects malformed stored payloads", async () => {
+    const { ds } = make([
+      v1("metadata", { attachments: [{ filename: "invoice.pdf", content_type: "application/pdf", size: 12 }] }),
+      v1("malformed", {
+        attachments: [{ filename: "bad.bin", content_type: "application/octet-stream", size: 3 }],
+        _attachment_contents: ["%%%="],
+      }),
+    ]);
+    expect(await ds.getAttachmentContent("metadata", 0, { maxBytes: 1024 })).toEqual({
+      state: "content_unavailable",
+      index: 0,
+      filename: "invoice.pdf",
+      content_type: "application/pdf",
+      bytes: 12,
+    });
+    await expect(ds.getAttachmentContent("malformed", 0, { maxBytes: 1024 })).rejects.toThrow(/base64/i);
+    expect(await ds.getAttachmentContent("metadata", 9, { maxBytes: 1024 })).toEqual({ state: "not_found", index: 9 });
+  });
+
+  it("refuses redirects before reading a response body or allowing fetch to forward the bearer header", async () => {
+    let observedRedirect: RequestInit["redirect"];
+    let bodyReads = 0;
+    let requests = 0;
+    const redirectingFetch: SelfHostedFetch = async (_url, init) => {
+      requests++;
+      observedRedirect = init.redirect;
+      return {
+        status: 302,
+        async text() {
+          bodyReads++;
+          return JSON.stringify({ location: "https://attacker.example/collect" });
+        },
+      };
+    };
+    const ds = new SelfHostedMailDataSource({
+      baseUrl: "https://emails.example/v1",
+      apiKey: "redirect-regression-key",
+      fetchImpl: redirectingFetch,
+    });
+
+    await expect(ds.listMailbox("inbox")).rejects.toThrow(/redirect.*refused/i);
+    expect(observedRedirect).toBe("manual");
+    expect(requests).toBe(1);
+    expect(bodyReads).toBe(0);
+  });
+
+  it("makes zero cross-origin requests when native fetch receives a redirect", async () => {
+    let targetRequests = 0;
+    let targetAuthorization: string | null = null;
+    const target = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        targetRequests++;
+        targetAuthorization = request.headers.get("authorization");
+        return Response.json({ messages: [] });
+      },
+    });
+    const redirector = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        return new Response(null, {
+          status: 302,
+          headers: { location: `http://127.0.0.1:${target.port}/collect` },
+        });
+      },
+    });
+    try {
+      const ds = new SelfHostedMailDataSource({
+        baseUrl: `http://127.0.0.1:${redirector.port}/v1`,
+        apiKey: "native-redirect-regression-key",
+      });
+      await expect(ds.listMailbox("inbox")).rejects.toThrow(/redirect.*refused/i);
+      expect(targetRequests).toBe(0);
+      expect(targetAuthorization).toBeNull();
+    } finally {
+      redirector.stop(true);
+      target.stop(true);
     }
   });
 

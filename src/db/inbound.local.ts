@@ -10,6 +10,8 @@ export interface AttachmentMeta {
 }
 
 export interface AttachmentPath {
+  /** Stable 0-based identity for newly persisted attachment paths. */
+  index?: number;
   filename: string;
   content_type: string;
   size: number;

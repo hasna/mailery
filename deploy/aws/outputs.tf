@@ -18,6 +18,26 @@ output "ecs_cluster_name" {
   value       = aws_ecs_cluster.this.name
 }
 
+output "api_service_name" {
+  description = "Exact API ECS service name for controlled cutover commands."
+  value       = aws_ecs_service.api.name
+}
+
+output "worker_service_name" {
+  description = "Exact inbound-worker ECS service name for controlled cutover commands."
+  value       = aws_ecs_service.worker.name
+}
+
+output "api_task_definition_arn" {
+  description = "Exact API task definition staged from the reviewed image."
+  value       = aws_ecs_task_definition.api.arn
+}
+
+output "worker_task_definition_arn" {
+  description = "Exact worker task definition staged from the reviewed image; also carries the canonical inbound bucket for read-only provenance audit tasks."
+  value       = aws_ecs_task_definition.worker.arn
+}
+
 output "migration_task_definition_arn" {
   description = "One-shot database migration task definition. Run and verify it before enabling services."
   value       = aws_ecs_task_definition.migration.arn

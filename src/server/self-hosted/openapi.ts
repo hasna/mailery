@@ -234,6 +234,25 @@ const messageListItemSchema = {
   required: ["id", "direction", "from_addr", "to_addrs", "status", "created_at", "updated_at"],
 } as const;
 
+const attachmentContentSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    filename: { type: "string" },
+    content_type: { type: "string", description: "Validated MIME type" },
+    size: { type: "integer", minimum: 0, maximum: 26214400 },
+    content_base64: { type: "string", description: "Canonical base64; authenticated response only" },
+  },
+  required: ["filename", "content_type", "size", "content_base64"],
+} as const;
+
+const attachmentContentResponseSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { attachment: { $ref: "#/components/schemas/AttachmentContent" } },
+  required: ["attachment"],
+} as const;
+
 const listParams = [
   { name: "limit", in: "query", required: false, schema: { type: "integer" } },
   { name: "offset", in: "query", required: false, schema: { type: "integer" } },
@@ -1087,10 +1106,18 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
       get: {
         operationId: "getMessageAttachment",
         parameters: [
-          ...idParam,
+          { name: "id", in: "path", required: true, description: "Exact full message ID; prefixes are rejected for attachment content", schema: { type: "string" } },
           { name: "index", in: "path", required: true, schema: { type: "integer", minimum: 0 } },
+          { name: "max_bytes", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 26214400 } },
         ],
-        responses: { "200": { content: { "application/json": { schema: { type: "object" } } } } },
+        responses: {
+          "200": { content: { "application/json": { schema: attachmentContentResponseSchema } } },
+          "400": { description: "Invalid max_bytes attachment byte limit" },
+          "404": { description: "Message or attachment index not found" },
+          "409": { description: "Attachment metadata exists but its content is not stored" },
+          "413": { description: "Attachment exceeds the requested or service byte limit" },
+          "422": { description: "Stored attachment payload is malformed" },
+        },
       },
     },
     "/v1/messages/{id}/raw": {
@@ -1211,6 +1238,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
       Address: addressSchema as never,
       MessageListItem: messageListItemSchema as never,
       Message: messageSchema as never,
+      AttachmentContent: attachmentContentSchema as never,
       Thread: threadSchema as never,
       Mailbox: mailboxSchema as never,
     },

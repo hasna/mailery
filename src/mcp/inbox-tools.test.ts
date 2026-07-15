@@ -2,6 +2,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { startV1Stub, type V1Stub } from "../test-support/v1-stub.js";
 import { listInboundEmails, storeInboundEmail } from "../db/inbound.js";
 import { runInboxTool } from "./tools/inbox-impl.js";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Self-hosted-ONLY: inbox tools route through the mail-data-source seam, which in
 // self_hosted mode reads/writes the /v1 messages store (no local SQLite). The
@@ -121,6 +124,64 @@ describe("MCP inbox tools — self_hosted via seam", () => {
     expect(result.id).toBe(email.id);
     expect(result.is_read).toBe(true);
     expect(result).not.toHaveProperty("text_body");
+  });
+
+  it("download_attachment writes one validated file and never returns bytes", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-mcp-attachment-"));
+    try {
+      await stub.seed({ messages: [{
+        id,
+        direction: "inbound",
+        from_addr: "sender@example.com",
+        to_addrs: ["me@example.com"],
+        subject: "attachment",
+        status: "received",
+        received_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        is_read: false,
+        is_starred: false,
+        labels: [],
+        attachments: [{ filename: "invoice.txt", content_type: "text/plain", size: 5, content_base64: "aGVsbG8=" }],
+      }] });
+      const result = await toolJson("download_attachment", { email_id: id, index: 0, output_dir: dir, max_bytes: 16 });
+      expect(result).not.toHaveProperty("data");
+      expect(result).not.toHaveProperty("content_base64");
+      expect(result).toMatchObject({ bytes: 5, sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" });
+      expect(readFileSync(String(result.path), "utf8")).toBe("hello");
+      expect(statSync(String(result.path)).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("download_attachment rejects an abbreviated message id without creating a file", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-mcp-attachment-"));
+    try {
+      await stub.seed({ messages: [{
+        id,
+        direction: "inbound",
+        from_addr: "sender@example.com",
+        to_addrs: ["me@example.com"],
+        subject: "attachment",
+        status: "received",
+        received_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        is_read: false,
+        is_starred: false,
+        labels: [],
+        attachments: [{ filename: "invoice.txt", content_type: "text/plain", size: 5, content_base64: "aGVsbG8=" }],
+      }] });
+      const result = await runInboxTool("download_attachment", {
+        email_id: id.slice(0, 8), index: 0, output_dir: dir, max_bytes: 16,
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("exact full message id");
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

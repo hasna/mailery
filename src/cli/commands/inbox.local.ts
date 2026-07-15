@@ -12,6 +12,7 @@ import { confirmDestructiveAction, handleError } from "../utils.js";
 import { enrichAddresses } from "../../lib/address-ownership.js";
 import { extractEmailLinks, formatEmailLinks, type ExtractedEmailLink } from "../../lib/email-links.js";
 import { formatAttachmentSize, mergeAttachmentDetails, type AttachmentDetail } from "../../lib/attachment-actions.js";
+import { MAX_ATTACHMENT_DOWNLOAD_BYTES, writeAttachmentFile } from "../../lib/attachment-download.js";
 import { openLocalTarget } from "../../lib/local-actions.js";
 import { resolveAlias } from "../../db/aliases.local.js";
 import { findAddressesByEmail } from "../../db/addresses.local.js";
@@ -894,23 +895,63 @@ export function registerInboxCommands(program: Command, output: (data: unknown, 
   // ─── ATTACHMENT ───────────────────────────────────────────────────────────
   inboxCmd
     .command("attachment <emailId>")
-    .description("Show attachment metadata and downloaded paths for a synced email")
+    .description("Show attachment metadata or deliberately download validated attachment content")
     .option("--filename <name>", "Filter by filename")
-    .action(async (emailId: string, opts: { filename?: string }) => {
+    .option("--index <n>", "Zero-based attachment index")
+    .option("--download", "Download selected attachment content")
+    .option("--output-dir <path>", "Directory for collision-proof mode-0600 files")
+    .option("--max-bytes <n>", `Maximum decoded bytes per attachment (hard cap ${MAX_ATTACHMENT_DOWNLOAD_BYTES})`)
+    .action(async (emailId: string, opts: { filename?: string; index?: string; download?: boolean; outputDir?: string; maxBytes?: string }) => {
       try {
         const ds = resolveMailDataSource();
-        const fullId = await resolveMailId(ds, emailId);
-        const msg = await ds.getMessage(fullId);
-        if (!msg) {
-          console.error(chalk.red(`Email not found: ${emailId}`));
-          process.exit(1);
+        const msg = opts.download ? await ds.getMessage(emailId) : await requireMessage(ds, emailId);
+        if (!msg || (opts.download && msg.id !== emailId)) {
+          throw new Error("attachment download requires the exact full message id");
         }
+        const fullId = msg.id;
         const body = await ds.getMessageBody(msg);
         const paths = await ds.getAttachmentPaths(fullId);
-        const details = mergeAttachmentDetails(body?.attachments ?? [], paths);
-        const filtered = opts.filename ? details.filter((p) => p.filename === opts.filename) : details;
+        const attachmentMetadata = body?.attachments ?? [];
+        const details = mergeAttachmentDetails(attachmentMetadata, paths);
+        const parsedIndex = opts.index === undefined ? undefined : Number(opts.index);
+        if (parsedIndex !== undefined && (!Number.isSafeInteger(parsedIndex) || parsedIndex < 0)) {
+          throw new Error("--index must be a non-negative integer");
+        }
+        if (opts.download && parsedIndex === undefined) {
+          throw new Error("--download requires one explicit --index");
+        }
+        const filtered = details.filter((detail, index) =>
+          (opts.filename === undefined || detail.filename === opts.filename)
+          && (parsedIndex === undefined || index === parsedIndex),
+        );
         if (filtered.length === 0) {
+          if (opts.download) throw new Error("No stored attachment metadata matches the download selection");
           output([], chalk.dim("No attachments found for this email."));
+          return;
+        }
+        if (opts.download) {
+          if (!opts.outputDir) throw new Error("--download requires --output-dir");
+          const maxBytes = opts.maxBytes === undefined ? undefined : Number(opts.maxBytes);
+          // Download indexes come from the authenticated attachment array,
+          // never a presentation merge (names may repeat or paths may be extra).
+          const selected = attachmentMetadata
+            .map((attachment, index) => ({ attachment, index }))
+            .filter(({ attachment, index }) =>
+              (opts.filename === undefined || attachment.filename === opts.filename)
+              && (parsedIndex === undefined || index === parsedIndex),
+            );
+          if (selected.length === 0) throw new Error("No stored attachment metadata matches the download selection");
+          if (selected.length !== 1) throw new Error("attachment download must select exactly one index");
+          const saved = [];
+          for (const item of selected) {
+            const content = await ds.getAttachmentContent(fullId, item.index, { maxBytes });
+            if (content.state === "not_found") throw new Error(`Attachment index ${item.index} not found`);
+            if (content.state === "content_unavailable") {
+              throw new Error(`Attachment index ${item.index} has metadata but no stored content`);
+            }
+            saved.push(await writeAttachmentFile(content, opts.outputDir));
+          }
+          output(saved, saved.map((item) => `${item.index}: ${item.filename} (${formatAttachmentSize(item.bytes)}) ${item.sha256} ${item.path}`).join("\n"));
           return;
         }
         output(filtered, formatAttachmentDetailList(fullId, filtered));

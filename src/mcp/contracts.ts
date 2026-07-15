@@ -127,6 +127,7 @@ export function cliEquivalentForTool(name: string, input: unknown): string {
     star_email: () => `emails inbox star ${id ?? "<inbound-id>"} --json`,
     label_email: () => `emails inbox label ${id ?? "<inbound-id>"} --json`,
     get_attachment: () => `emails inbox attachment ${id ?? "<inbound-id>"}${flag(input, "filename")} --json`,
+    download_attachment: () => `emails inbox attachment ${id ?? "<inbound-id>"} --download${flag(input, "index")}${flag(input, "output_dir", "output-dir")}${flag(input, "max_bytes", "max-bytes")} --json`,
     search_inbound: () => `emails inbox search ${arg(input, "query") ?? "<query>"} --json`,
     get_inbox_sync_status: () => "emails inbox sync-status --json",
 

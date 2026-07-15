@@ -5,6 +5,10 @@ import { formatError } from "../helpers.js";
 import { extractEmailLinks } from "../../lib/email-links.js";
 import { resolveMailDataSource, type MailDataSource } from "../../lib/mail-data-source.js";
 import {
+  MAX_ATTACHMENT_DOWNLOAD_BYTES,
+  writeAttachmentFile,
+} from "../../lib/attachment-download.js";
+import {
   MAILBOXES,
   mailboxSourceFromRef,
   type Mailbox,
@@ -644,7 +648,7 @@ export function registerInboxTools(server: McpServer): void {
 
   server.tool(
   "get_attachment",
-  "Get local path or S3 URL for downloaded attachments on a synced inbound email",
+  "List attachment metadata and any existing local/S3 location. This does not download content.",
   {
     email_id: z.string().describe("Inbound email ID"),
     filename: z.string().optional().describe("Filter by filename (returns all if omitted)"),
@@ -658,6 +662,49 @@ export function registerInboxTools(server: McpServer): void {
       const paths = await ds.getAttachmentPaths(fullId);
       const filtered = filename ? paths.filter((p) => p.filename === filename) : paths;
       return { content: [{ type: "text", text: JSON.stringify(filtered, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
+    }
+  },
+);
+
+  server.tool(
+  "download_attachment",
+  "Deliberately download one attachment from an exact inbound email ID to a safe local file. Writes one collision-proof mode-0600 file and never returns attachment bytes.",
+  {
+    email_id: z.string().describe("Exact full inbound email ID (prefixes are rejected for downloads)"),
+    index: z.number().int().nonnegative().describe("Zero-based attachment index"),
+    output_dir: z.string().min(1).describe("Existing or creatable local output directory"),
+    max_bytes: z.number().int().positive().max(MAX_ATTACHMENT_DOWNLOAD_BYTES).optional()
+      .describe(`Maximum decoded bytes (hard cap ${MAX_ATTACHMENT_DOWNLOAD_BYTES})`),
+  },
+  async ({ email_id, index, output_dir, max_bytes }) => {
+    try {
+      const ds = resolveMailDataSource();
+      const msg = await ds.getMessage(email_id);
+      if (!msg || msg.id !== email_id) {
+        return {
+          content: [{ type: "text", text: "Error: attachment download requires the exact full message id" }],
+          isError: true,
+        };
+      }
+      const content = await ds.getAttachmentContent(email_id, index, { maxBytes: max_bytes });
+      if (content.state === "not_found") {
+        return { content: [{ type: "text", text: `Attachment index ${index} not found` }], isError: true };
+      }
+      if (content.state === "content_unavailable") {
+        return {
+          content: [{ type: "text", text: JSON.stringify({
+            state: content.state,
+            index: content.index,
+            filename: content.filename,
+            content_type: content.content_type,
+            bytes: content.bytes,
+          }, null, 2) }],
+          isError: true,
+        };
+      }
+      return jsonText(await writeAttachmentFile(content, output_dir));
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${formatError(e)}` }], isError: true };
     }
@@ -746,6 +793,7 @@ type InboxToolName =
   | "star_email"
   | "label_email"
   | "get_attachment"
+  | "download_attachment"
   | "search_inbound"
   | "get_inbox_sync_status";
 

@@ -5,6 +5,8 @@ import { SELF_HOSTED_RESOURCES } from "./resources.js";
 type Operation = {
   operationId?: string;
   security?: Array<Record<string, string[]>>;
+  parameters?: Array<{ name?: string; in?: string; schema?: Record<string, unknown> }>;
+  responses?: Record<string, unknown>;
   requestBody?: {
     content?: Record<string, { schema?: { properties?: Record<string, unknown>; required?: string[] } }>;
   };
@@ -95,6 +97,27 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
     expect(schema?.required).toEqual(expect.arrayContaining(["from", "to", "subject", "idempotency_key"]));
     expect(send?.description).toContain("Member sessions must supply");
     expect(send?.description).toContain("owner/admin");
+  });
+
+  it("publishes a bounded typed attachment-content operation", () => {
+    const operation = paths["/v1/messages/{id}/attachments/{index}"]?.get;
+    const schema = emailsSelfHostedOpenApi.components?.schemas?.AttachmentContent as
+      | { additionalProperties?: boolean; required?: string[]; properties?: Record<string, unknown> }
+      | undefined;
+    const maxBytes = operation?.parameters?.find((item) => item.name === "max_bytes");
+
+    expect(operation?.operationId).toBe("getMessageAttachment");
+    expect(maxBytes).toMatchObject({
+      in: "query",
+      schema: { type: "integer", minimum: 1, maximum: 25 * 1024 * 1024 },
+    });
+    expect(Object.keys(operation?.responses ?? {})).toEqual(["200", "400", "404", "409", "413", "422"]);
+    expect(operation?.responses?.["400"]).toMatchObject({
+      description: expect.stringContaining("max_bytes"),
+    });
+    expect(schema?.additionalProperties).toBe(false);
+    expect(schema?.required).toEqual(["filename", "content_type", "size", "content_base64"]);
+    expect(schema?.properties).toHaveProperty("content_base64");
   });
 
   it("enumerates every registry-backed resource in the generated contract", () => {

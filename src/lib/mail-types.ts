@@ -99,6 +99,8 @@ export interface AttachmentInfo {
 
 /** Attachment path metadata as persisted with a message (from src/db/inbound.ts). */
 export interface AttachmentPath {
+  /** Stable 0-based identity for newly persisted attachment paths. */
+  index?: number;
   filename: string;
   content_type: string;
   size: number;
@@ -249,10 +251,25 @@ export interface MessageBody {
 /** Merge attachment metadata with downloaded-path info (local/s3 location). */
 export function mergeAttachments(
   meta: { filename: string; content_type: string; size: number }[],
-  paths: { filename: string; local_path?: string; s3_url?: string }[],
+  paths: { index?: number; filename: string; local_path?: string; s3_url?: string }[],
 ): AttachmentInfo[] {
-  const byName = new Map(paths.map((p) => [p.filename, p.local_path ?? p.s3_url]));
-  return meta.map((a) => ({ filename: a.filename, content_type: a.content_type, size: a.size, location: byName.get(a.filename) }));
+  return meta.map((attachment, index) => {
+    const indexed = paths.filter((path) => path.index === index);
+    let path: (typeof paths)[number] | undefined;
+    if (indexed.length > 0) {
+      if (indexed.length === 1 && indexed[0]!.filename === attachment.filename) path = indexed[0];
+    } else {
+      const legacy = paths.filter((candidate) =>
+        candidate.index === undefined && candidate.filename === attachment.filename);
+      if (legacy.length === 1) path = legacy[0];
+    }
+    return {
+      filename: attachment.filename,
+      content_type: attachment.content_type,
+      size: attachment.size,
+      location: path?.local_path ?? path?.s3_url,
+    };
+  });
 }
 
 export function htmlToPlainText(value: string | null | undefined): string {

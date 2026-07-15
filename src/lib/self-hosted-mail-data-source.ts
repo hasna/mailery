@@ -58,6 +58,11 @@ import {
   type VerificationCodeEmail,
   type VerificationCodeMatch,
 } from "./verification-code.js";
+import {
+  decodeAttachmentPayload,
+  normalizeAttachmentByteLimit,
+  type AttachmentContent,
+} from "./attachment-download.js";
 
 // ── the /v1 message row (snake_case, as the self-hosted serve returns) ────────
 
@@ -325,7 +330,10 @@ export class SelfHostedMailDataSource implements MailDataSource {
       Authorization: `Bearer ${this.apiKey}`,
       Accept: "application/json",
     };
-    const init: RequestInit = { method, headers };
+    // Never let fetch follow a redirect with the bearer header. `manual` keeps
+    // the redirect response at this trust boundary so it can be rejected below
+    // before any response body is read or a second origin is contacted.
+    const init: RequestInit = { method, headers, redirect: "manual" };
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
@@ -342,6 +350,9 @@ export class SelfHostedMailDataSource implements MailDataSource {
         throw new Error(`self-hosted emails: ${method} ${path} timed out after ${this.timeoutMs}ms`);
       }
       throw new Error(`self-hosted emails: cannot reach ${this.baseUrl} for ${method} ${path}`);
+    }
+    if (res.status >= 300 && res.status < 400) {
+      throw new Error(`self-hosted emails: ${method} ${path} redirect refused`);
     }
     const text = await res.text();
     let json: unknown = null;
@@ -624,6 +635,22 @@ export class SelfHostedMailDataSource implements MailDataSource {
   async getAttachmentPaths(id: string): Promise<AttachmentPath[]> {
     const message = await this.getRaw(id);
     return message ? v1AttachmentMetadata(message) : [];
+  }
+
+  async getAttachmentContent(id: string, index: number, opts?: { maxBytes?: number }): Promise<AttachmentContent> {
+    if (!Number.isSafeInteger(index) || index < 0) throw new Error("attachment index must be a non-negative integer");
+    const maxBytes = normalizeAttachmentByteLimit(opts?.maxBytes);
+    const { status, json } = await this.request(
+      "GET",
+      `/messages/${encodeURIComponent(id)}/attachments/${index}?max_bytes=${maxBytes}`,
+    );
+    if (status === 404) return decodeAttachmentPayload({ code: "attachment_not_found" }, index, maxBytes);
+    if (status === 409) return decodeAttachmentPayload(json, index, maxBytes);
+    if (status < 200 || status >= 300) {
+      const body = json && typeof json === "object" ? json as Record<string, unknown> : {};
+      throw new Error(`self-hosted emails: attachment download failed (HTTP ${status}, ${String(body["code"] ?? "unknown_error")})`);
+    }
+    return decodeAttachmentPayload(json, index, maxBytes);
   }
 
   async listLabelSummaries(opts?: ListLabelSummaryOptions): Promise<LabelSummary[]> {

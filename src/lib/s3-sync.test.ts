@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,6 +9,7 @@ import {
   listLiveS3Sources,
 } from "./s3-sync.js";
 import { syncS3Inbox } from "./s3-sync.remote.js";
+import { s3SyncLocalTestBoundary } from "./s3-sync.local.js";
 
 // S3 → mailbox ingestion (syncS3Inbox) runs on the self-hosted server: the thin
 // client has no local inbound store to write into, so it is a loud stub. The S3
@@ -41,6 +42,46 @@ describe("syncS3Inbox (self-hosted stub)", () => {
     await expect(syncS3Inbox({ sourceId: "s3-anything" })).rejects.toThrow(
       /S3 inbound ingestion runs on the self-hosted server/,
     );
+  });
+});
+
+describe("local S3 attachment storage planning", () => {
+  it("keeps colliding sanitized names in distinct indexed local paths and S3 keys", () => {
+    const plans = s3SyncLocalTestBoundary.buildAttachmentStoragePlans([
+      {
+        filename: "invoice?.pdf",
+        contentType: "application/pdf",
+        size: 5,
+        content: Buffer.from("first"),
+      },
+      {
+        filename: "invoice*.pdf",
+        contentType: "application/pdf",
+        size: 6,
+        content: Buffer.from("second"),
+      },
+    ]);
+
+    expect(plans.map((plan) => plan.index)).toEqual([0, 1]);
+    expect(plans.map((plan) => plan.filename)).toEqual(["invoice?.pdf", "invoice*.pdf"]);
+    expect(new Set(plans.map((plan) => plan.storageLeaf)).size).toBe(2);
+    expect(plans[0]!.storageLeaf).toStartWith("000000-");
+    expect(plans[1]!.storageLeaf).toStartWith("000001-");
+    expect(plans.every((plan) => Buffer.byteLength(plan.storageLeaf, "utf8") <= 240)).toBe(true);
+
+    const outputDir = join(tmpHome, "stored-attachments");
+    mkdirSync(outputDir, { recursive: true });
+    const paths = plans.map((plan) => s3SyncLocalTestBoundary.storeLocalAttachment(plan, outputDir));
+    expect(paths.map((path) => path.index)).toEqual([0, 1]);
+    expect(paths.map((path) => path.filename)).toEqual(["invoice?.pdf", "invoice*.pdf"]);
+    expect(new Set(paths.map((path) => path.local_path)).size).toBe(2);
+    expect(readFileSync(paths[0]!.local_path!, "utf8")).toBe("first");
+    expect(readFileSync(paths[1]!.local_path!, "utf8")).toBe("second");
+
+    const keys = plans.map((plan) =>
+      s3SyncLocalTestBoundary.attachmentS3Key("mail/", "message-id", plan.storageLeaf));
+    expect(new Set(keys).size).toBe(2);
+    expect(keys.every((key) => key.startsWith("mail/message-id/"))).toBe(true);
   });
 });
 

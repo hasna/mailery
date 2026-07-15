@@ -46,6 +46,55 @@ describe("server startup contract", () => {
     }
   });
 
+  it("advertises the read-only post-fence provenance audit and validates its cutoff before DB access", () => {
+    const help = Bun.spawnSync({
+      cmd: ["bun", "src/server/index.ts", "--help"],
+      cwd: join(import.meta.dir, "..", ".."),
+      env: { ...process.env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(new TextDecoder().decode(help.stdout)).toContain("inbound-provenance-audit");
+    expect(new TextDecoder().decode(help.stdout)).toContain("--since <ISO8601>");
+
+    const missingCutoff = Bun.spawnSync({
+      cmd: ["bun", "src/server/index.ts", "inbound-provenance-audit"],
+      cwd: join(import.meta.dir, "..", ".."),
+      env: { ...process.env, EMAILS_MODE: "self_hosted", EMAILS_DATABASE_URL: "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const combined = new TextDecoder().decode(missingCutoff.stdout)
+      + new TextDecoder().decode(missingCutoff.stderr);
+    expect(missingCutoff.exitCode).not.toBe(0);
+    expect(combined).toContain("--since");
+    expect(combined).not.toContain("ECONNREFUSED");
+  });
+
+  it("advertises a privacy-safe database-clock fence command and rejects extra options before DB access", () => {
+    const help = Bun.spawnSync({
+      cmd: ["bun", "src/server/index.ts", "--help"],
+      cwd: join(import.meta.dir, "..", ".."),
+      env: { ...process.env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(new TextDecoder().decode(help.stdout)).toContain("inbound-provenance-fence");
+
+    const invalid = Bun.spawnSync({
+      cmd: ["bun", "src/server/index.ts", "inbound-provenance-fence", "--since", "host-clock"],
+      cwd: join(import.meta.dir, "..", ".."),
+      env: { ...process.env, EMAILS_MODE: "self_hosted", EMAILS_DATABASE_URL: "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const combined = new TextDecoder().decode(invalid.stdout)
+      + new TextDecoder().decode(invalid.stderr);
+    expect(invalid.exitCode).not.toBe(0);
+    expect(combined).toContain("accepts no options");
+    expect(combined).not.toContain("ECONNREFUSED");
+  });
+
   it("fails closed on legacy hosted mode variables instead of booting local", () => {
     const result = Bun.spawnSync({
       cmd: ["bun", "src/server/index.ts"],

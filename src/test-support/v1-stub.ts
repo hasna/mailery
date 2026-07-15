@@ -470,6 +470,28 @@ const server = Bun.serve({
     if (resource === "messages" && id === undefined && req.method === "GET") {
       return json({ messages: listMessages(url.searchParams) });
     }
+    if (resource === "messages" && id !== undefined && parts[3] === "attachments" && parts[4] !== undefined && req.method === "GET") {
+      const all = rowsFor("messages");
+      let rec = all.find(function (r) { return String(r.id) === id; });
+      if (!rec) {
+        const pref = all.filter(function (r) { return String(r.id).indexOf(id) === 0; });
+        if (pref.length > 1) return json({ error: "ambiguous message id prefix", reason: "ambiguous_id" }, 409);
+        rec = pref[0];
+      }
+      if (!rec) return json({ error: "message not found", code: "attachment_not_found" }, 404);
+      const index = Number(parts[4]);
+      const attachments = Array.isArray(rec.attachments) ? rec.attachments : [];
+      const attachment = attachments[index];
+      if (!attachment || typeof attachment !== "object") return json({ error: "attachment not found", code: "attachment_not_found" }, 404);
+      if (typeof attachment.content_base64 !== "string") {
+        return json({
+          error: "attachment content is not stored",
+          code: "attachment_content_unavailable",
+          attachment: attachment,
+        }, 409);
+      }
+      return json({ attachment: attachment });
+    }
     // GET /v1/messages/<id> resolves an id PREFIX, mirroring the real server:
     // an exact id wins; otherwise a unique startsWith match resolves; multiple
     // matches -> 409 ambiguous_id; none -> 404. Lets client read/link tests use

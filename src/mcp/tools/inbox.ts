@@ -25,6 +25,7 @@ type InboxToolName =
   | "star_email"
   | "label_email"
   | "get_attachment"
+  | "download_attachment"
   | "search_inbound"
   | "get_inbox_sync_status";
 
@@ -224,12 +225,24 @@ export function registerInboxTools(server: McpServer): void {
 
   server.tool(
     "get_attachment",
-    "Get local path or S3 URL for downloaded attachments on a synced inbound email",
+    "List attachment metadata and any existing local/S3 location. This does not download content.",
     {
       email_id: z.string().describe("Inbound email ID"),
       filename: z.string().optional().describe("Filter by filename (returns all if omitted)"),
     },
     handler("get_attachment"),
+  );
+
+  server.tool(
+    "download_attachment",
+    "Deliberately download one attachment from an exact inbound email ID to a safe local file. Writes one collision-proof mode-0600 file and never returns attachment bytes.",
+    {
+      email_id: z.string().describe("Exact full inbound email ID (prefixes are rejected for downloads)"),
+      index: z.number().int().nonnegative().describe("Zero-based attachment index"),
+      output_dir: z.string().min(1).describe("Existing or creatable local output directory"),
+      max_bytes: z.number().int().positive().max(25 * 1024 * 1024).optional().describe("Maximum decoded bytes (hard cap 25MiB)"),
+    },
+    handler("download_attachment"),
   );
 
   server.tool(

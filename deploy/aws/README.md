@@ -183,6 +183,19 @@ new-code-compatible migrator through 0016, require exit code zero, and verify th
 migration ledger before starting anything. Start only tenant-aware new-code writers
 after the ledger check passes.
 
+Migration 0017 and the 1.2.4 attachment-provenance activation add a second,
+forward-only gate with controlled downtime. Disable automatic rollback, save a
+queue/DLQ snapshot and cutoff, scale the old ingest worker to zero, wait until
+both its running count and SQS in-flight count are zero, then scale the old API
+to zero. Only after both incompatible services are stopped may an isolated 1.2.4
+migration task apply 0017 and a second 1.2.4 `db status --json` task prove
+`pending: []`, the exact ledger ID, and valid checksums. Start only the 1.2.4
+worker, drain/reconcile the SQS buffer, and require the aggregate-only
+`inbound-provenance-audit --since <cutoff>` to exit zero before the API. The
+audit runs from the worker task definition because that definition carries the
+deployment-owned canonical bucket. The executable, evidence-producing commands
+are in `docs/DEPLOYMENT_CUTOVER.md`.
+
 Before draining any writer, apply with
 `enable_automatic_deployment_rollback = false`. Keep automatic rollback disabled
 through 0016 and the first tenant-aware API and worker activation. During this
@@ -268,6 +281,14 @@ pre-tenancy or otherwise unscoped image. A prior digest is eligible only when it
 is known to be tenant-aware and compatible with the migrated schema. Otherwise,
 roll forward to a corrected tenant-aware image, or execute an operator-reviewed
 explicit schema recovery plan while every writer remains stopped.
+
+After migration 0017 commits, 1.2.3 is never an eligible task restart,
+scale-out, automatic rollback, or operator rollback target. Recovery is a
+compatible roll-forward using a reviewed 1.2.4-or-newer image that recognizes
+the 0017 ledger. Start the compatible worker from zero, rerun the post-fence
+provenance audit, then start the API. Preserve the ledger row and keep
+`enable_automatic_deployment_rollback = false` until both 1.2.4 services and
+the complete cutover evidence pass.
 
 After both API and worker complete a tenant-aware deployment and the checks below
 pass, set `enable_automatic_deployment_rollback = true` in a separate reviewed

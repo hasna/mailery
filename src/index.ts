@@ -166,6 +166,21 @@ export { parseCsv } from "./lib/csv.js";
 export { extractEmailLinks, formatEmailLinks } from "./lib/email-links.js";
 export type { ExtractEmailLinksInput, ExtractedEmailLink, EmailLinkSource } from "./lib/email-links.js";
 export {
+  DEFAULT_ATTACHMENT_DOWNLOAD_BYTES,
+  MAX_ATTACHMENT_DOWNLOAD_BYTES,
+  decodeAttachmentPayload,
+  normalizeAttachmentByteLimit,
+  validateAttachmentFilename,
+  writeAttachmentFile,
+} from "./lib/attachment-download.js";
+export type {
+  AttachmentContent,
+  AvailableAttachmentContent,
+  MissingAttachmentContent,
+  SavedAttachment,
+  UnavailableAttachmentContent,
+} from "./lib/attachment-download.js";
+export {
   formatEmailDigest,
   generateEmailDigest,
   loadEmailDigest,

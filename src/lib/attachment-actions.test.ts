@@ -34,4 +34,32 @@ describe("attachment action helpers", () => {
       openable: false,
     });
   });
+
+  it("preserves duplicate filenames as distinct ordered attachments", () => {
+    const attachments = mergeAttachmentDetails(
+      [
+        { filename: "invoice.pdf", content_type: "application/pdf", size: 10 },
+        { filename: "invoice.pdf", content_type: "application/pdf", size: 20 },
+      ],
+      [
+        { filename: "invoice.pdf", local_path: "/tmp/first.pdf" },
+        { filename: "invoice.pdf", local_path: "/tmp/second.pdf" },
+      ],
+    );
+
+    expect(attachments).toHaveLength(2);
+    expect(attachments.map((item) => [item.size, item.location])).toEqual([
+      [10, "/tmp/first.pdf"],
+      [20, "/tmp/second.pdf"],
+    ]);
+  });
+
+  it("rejects terminal and bidi controls before attachment metadata is displayed", () => {
+    expect(() => mergeAttachmentDetails([
+      { filename: "invoice\u001b[31m.pdf", content_type: "application/pdf", size: 10 },
+    ])).toThrow(/unsafe/i);
+    expect(() => mergeAttachmentDetails([], [
+      { filename: "invoice\u202Efdp.exe", local_path: "/tmp/unsafe" },
+    ])).toThrow(/unsafe/i);
+  });
 });

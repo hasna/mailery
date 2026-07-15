@@ -9,6 +9,10 @@ import type { QueryResult, TypedQueryClient, PoolQueryClient } from "../../stora
 import type { QueryResultRow } from "pg";
 import type { SelfHostedResourceSpec, ResourceColumn } from "./resources.js";
 import { canonicalSender } from "../../lib/email-address.js";
+import {
+  MAX_ATTACHMENT_DOWNLOAD_BYTES,
+  decodeAttachmentPayload,
+} from "../../lib/attachment-download.js";
 
 /** A live pool exposes `transaction()`; an in-memory unit-test shim does not. */
 function isTransactional(client: TypedQueryClient): client is PoolQueryClient {
@@ -300,6 +304,52 @@ export interface StoredAttachment {
   content_base64: string;
 }
 
+export type StoredAttachmentLookup =
+  | { state: "available"; attachment: StoredAttachment }
+  | { state: "content_unavailable"; attachment: Omit<StoredAttachment, "content_base64"> }
+  | { state: "invalid"; reason: string };
+
+export interface InboundSourceProvenance {
+  tenant_id: string;
+  message_id: string;
+  bucket: string;
+  object_key: string;
+  raw_sha256: string;
+  established_via: "normal_ingest" | "canonical_replay";
+}
+
+/** Complete tenant/message state bound to one persisted inbound object key. */
+export interface InboundAttachmentRepairBinding {
+  tenantId: string;
+  messageId: string;
+  attachments: unknown[];
+  provenance: InboundSourceProvenance;
+}
+
+/** One attachment-only compare-and-swap within a complete object repair. */
+export interface InboundAttachmentRepairUpdate {
+  tenantId: string;
+  messageId: string;
+  expected: unknown[];
+  replacement: unknown[];
+}
+
+/** Privacy-safe aggregate result for the post-fence, all-tenant S3 audit. */
+export interface InboundProvenanceAuditResult {
+  since: string;
+  tenants_scanned: number;
+  candidate_messages: number;
+  valid_provenance: number;
+  missing_provenance: number;
+  invalid_provenance: number;
+}
+
+export type RecordInboundSourceProvenanceResult =
+  | "recorded"
+  | "existing_match"
+  | "conflict"
+  | "not_found";
+
 /** One subject-rolled-up conversation for the threads mail-view. */
 export interface ThreadRollup {
   /** Normalized (Re:/Fwd:-stripped, lowercased) subject key that groups the thread. */
@@ -403,6 +453,100 @@ function toObject(value: unknown): Record<string, unknown> {
     }
   }
   return {};
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function repairBindingSnapshot(bindings: readonly InboundAttachmentRepairBinding[]): string {
+  return canonicalJson([...bindings]
+    .sort((left, right) => `${left.tenantId}\0${left.messageId}`.localeCompare(`${right.tenantId}\0${right.messageId}`))
+    .map((binding) => ({
+      tenantId: binding.tenantId,
+      messageId: binding.messageId,
+      attachments: binding.attachments,
+      provenance: binding.provenance,
+    })));
+}
+
+class AttachmentRepairConcurrentChangeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AttachmentRepairConcurrentChangeError";
+  }
+}
+
+function isSerializationFailure(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error
+    && (error as { code?: unknown }).code === "40001");
+}
+
+async function listAttachmentRepairBindingsInTransaction(
+  client: TypedQueryClient,
+  bucket: string,
+  objectKey: string,
+): Promise<InboundAttachmentRepairBinding[]> {
+  const tenants = await client.many<{ id: string }>(`SELECT id::text AS id FROM tenants ORDER BY id`);
+  const bindings: InboundAttachmentRepairBinding[] = [];
+  for (const tenant of tenants) {
+    await client.execute(`SELECT set_config('app.current_tenant', $1, true)`, [tenant.id]);
+    const rows = await client.many<{
+      tenant_id: string;
+      message_id: string;
+      source_tenant_id: string | null;
+      source_message_id: string | null;
+      bucket: string | null;
+      object_key: string | null;
+      raw_sha256: string | null;
+      established_via: "normal_ingest" | "canonical_replay" | null;
+      attachments: unknown;
+    }>(
+      `SELECT m.tenant_id::text AS tenant_id, m.id AS message_id, m.attachments,
+              s.tenant_id::text AS source_tenant_id, s.message_id AS source_message_id,
+              s.bucket, s.object_key, s.raw_sha256, s.established_via
+       FROM messages m
+       LEFT JOIN inbound_message_sources s
+         ON s.tenant_id = m.tenant_id AND s.message_id = m.id
+       WHERE m.tenant_id = $1::uuid AND (m.source_id = $2 OR m.message_id = $2)
+       ORDER BY m.id`,
+      [tenant.id, objectKey],
+    );
+    for (const row of rows) {
+      if (row.source_tenant_id !== row.tenant_id
+        || row.source_message_id !== row.message_id
+        || row.bucket !== bucket
+        || row.object_key !== objectKey
+        || !row.raw_sha256
+        || !/^[0-9a-f]{64}$/.test(row.raw_sha256)
+        || !row.established_via) {
+        throw new Error("attachment repair complete binding provenance is missing or conflicts with the canonical object");
+      }
+      const attachments = typeof row.attachments === "string"
+        ? JSON.parse(row.attachments) as unknown
+        : row.attachments;
+      bindings.push({
+        tenantId: row.tenant_id,
+        messageId: row.message_id,
+        attachments: Array.isArray(attachments) ? attachments : [],
+        provenance: {
+          tenant_id: row.tenant_id,
+          message_id: row.message_id,
+          bucket: row.bucket,
+          object_key: row.object_key,
+          raw_sha256: row.raw_sha256,
+          established_via: row.established_via,
+        },
+      });
+    }
+  }
+  return bindings;
 }
 
 /** Normalize a TIMESTAMPTZ column (Date or string from the driver) to ISO 8601. */
@@ -601,7 +745,11 @@ export class EmailsSelfHostedStore {
     // Hand the scoped store a client that sets `app.current_tenant` per operation
     // (Layer 2 RLS backstop). Layer 1 (the AND tenant_id = $tenant in every query)
     // still holds unconditionally; this makes forgetting it a DB-enforced failure.
-    return new TenantScopedStore(tenantScopedClient(this.client, tenantId), tenantId);
+    return new TenantScopedStore(
+      tenantScopedClient(this.client, tenantId),
+      tenantId,
+      isTransactional(this.client) ? this.client : undefined,
+    );
   }
 
   // ---- global inbound resolution (before a tenant is known) -----------------
@@ -682,6 +830,197 @@ export class EmailsSelfHostedStore {
       ],
     );
   }
+
+  /**
+   * Read the COMPLETE persisted tenant/message binding set for one object key.
+   * FORCE RLS stays enabled: the transaction deliberately visits every tenant
+   * scope instead of using a bypass-RLS role or trusting envelope recipients as
+   * a proxy for persisted state.
+   */
+  async listAttachmentRepairBindings(bucket: string, objectKey: string): Promise<InboundAttachmentRepairBinding[]> {
+    if (!bucket || !objectKey || !isTransactional(this.client)) {
+      throw new Error("global attachment binding discovery requires a transactional store");
+    }
+    return this.client.transaction(async (tx) => {
+      await tx.execute(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`);
+      return listAttachmentRepairBindingsInTransaction(tx, bucket, objectKey);
+    });
+  }
+
+  /**
+   * Capture a cutover fence from PostgreSQL's own clock. This query deliberately
+   * depends on no post-0016 table, so an exact 1.2.4 task can run it before the
+   * 0017 ledger advance while old writers are still live.
+   */
+  async captureInboundProvenanceFence(): Promise<string> {
+    if (!isTransactional(this.client)) {
+      throw new Error("inbound provenance fence requires a transactional store");
+    }
+    return this.client.transaction(async (tx) => {
+      await tx.execute(`SET TRANSACTION READ ONLY`);
+      const row = await tx.one<{ fence_at: Date | string }>(
+        `SELECT clock_timestamp() AS fence_at`,
+      );
+      const fenceAt = toIso(row.fence_at);
+      if (!fenceAt) throw new Error("PostgreSQL did not return a valid provenance fence timestamp");
+      return fenceAt;
+    });
+  }
+
+  /**
+   * Audit every tenant for S3-shaped inbound rows written at or after a cutover
+   * fence. FORCE RLS remains active: one read-only transaction visits each
+   * tenant scope and returns aggregate counts only. No tenant, message, object,
+   * address, subject, attachment, or raw-hash identity leaves this method.
+   */
+  async auditInboundSourceProvenance(input: {
+    since: string;
+    canonicalBucket: string;
+  }): Promise<InboundProvenanceAuditResult> {
+    const since = new Date(input.since);
+    if (!input.since || Number.isNaN(since.getTime()) || !input.canonicalBucket) {
+      throw new Error("inbound provenance audit requires a valid cutoff and canonical bucket");
+    }
+    if (!isTransactional(this.client)) {
+      throw new Error("all-tenant inbound provenance audit requires a transactional store");
+    }
+    return this.client.transaction(async (tx) => {
+      await tx.execute(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`);
+      const tenants = await tx.many<{ id: string }>(`SELECT id::text AS id FROM tenants ORDER BY id`);
+      const result: InboundProvenanceAuditResult = {
+        since: since.toISOString(),
+        tenants_scanned: tenants.length,
+        candidate_messages: 0,
+        valid_provenance: 0,
+        missing_provenance: 0,
+        invalid_provenance: 0,
+      };
+      for (const tenant of tenants) {
+        await tx.execute(`SELECT set_config('app.current_tenant', $1, true)`, [tenant.id]);
+        const row = await tx.one<{
+          candidate_messages: number;
+          valid_provenance: number;
+          missing_provenance: number;
+          invalid_provenance: number;
+        }>(
+          `WITH candidates AS (
+             SELECT m.id, m.source_id, s.message_id AS source_message_id,
+                    s.bucket, s.object_key, s.raw_sha256
+             FROM messages m
+             LEFT JOIN inbound_message_sources s
+               ON s.tenant_id = m.tenant_id AND s.message_id = m.id
+             WHERE m.tenant_id = $1::uuid
+               AND lower(COALESCE(m.direction, '')) <> 'outbound'
+               AND m.source_id IS NOT NULL AND m.source_id <> ''
+               AND m.message_id = m.source_id
+               AND m.created_at >= $2::timestamptz
+           )
+           SELECT
+             count(*)::int AS candidate_messages,
+             count(*) FILTER (
+               WHERE source_message_id IS NOT NULL
+                 AND bucket = $3
+                 AND object_key = source_id
+                 AND raw_sha256 ~ '^[0-9a-f]{64}$'
+             )::int AS valid_provenance,
+             count(*) FILTER (WHERE source_message_id IS NULL)::int AS missing_provenance,
+             count(*) FILTER (
+               WHERE source_message_id IS NOT NULL
+                 AND NOT (
+                   bucket = $3
+                   AND object_key = source_id
+                   AND raw_sha256 ~ '^[0-9a-f]{64}$'
+                 )
+             )::int AS invalid_provenance
+           FROM candidates`,
+          [tenant.id, result.since, input.canonicalBucket],
+        );
+        result.candidate_messages += Number(row.candidate_messages);
+        result.valid_provenance += Number(row.valid_provenance);
+        result.missing_provenance += Number(row.missing_provenance);
+        result.invalid_provenance += Number(row.invalid_provenance);
+      }
+      return result;
+    });
+  }
+
+  /**
+   * Recheck the complete object binding set and apply every permitted attachment
+   * CAS in ONE serializable transaction. Any changed/missing row throws inside
+   * the transaction, so the caller receives false and zero rows commit.
+   */
+  async replaceAttachmentPayloadsAtomically(
+    expectedBindings: readonly InboundAttachmentRepairBinding[],
+    updates: readonly InboundAttachmentRepairUpdate[],
+  ): Promise<boolean> {
+    if (expectedBindings.length === 0 || !isTransactional(this.client)) return false;
+    const objectKey = expectedBindings[0]!.provenance.object_key;
+    const bucket = expectedBindings[0]!.provenance.bucket;
+    const expectedById = new Set(expectedBindings.map((binding) => `${binding.tenantId}\0${binding.messageId}`));
+    const updateById = new Set(updates.map((update) => `${update.tenantId}\0${update.messageId}`));
+    if (expectedById.size !== expectedBindings.length
+      || expectedBindings.some((binding) => binding.provenance.object_key !== objectKey)
+      || expectedBindings.some((binding) => binding.provenance.bucket !== bucket)
+      || updateById.size !== updates.length
+      || updateById.size !== expectedById.size
+      || [...expectedById].some((identity) => !updateById.has(identity))) {
+      return false;
+    }
+    try {
+      return await this.client.transaction(async (tx) => {
+        await tx.execute(`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
+        // PostgreSQL text cannot contain NUL. Keep the exact, unambiguous
+        // bucket\0object-key byte identity as bytea, then hash its lossless hex
+        // representation for the transaction-scoped advisory lock.
+        const objectIdentity = Buffer.from(`${bucket}\0${objectKey}`, "utf8");
+        await tx.execute(
+          `SELECT pg_advisory_xact_lock(hashtextextended(encode($1::bytea, 'hex'), 0))`,
+          [objectIdentity],
+        );
+        const current = await listAttachmentRepairBindingsInTransaction(tx, bucket, objectKey);
+        if (repairBindingSnapshot(current) !== repairBindingSnapshot(expectedBindings)) {
+          throw new AttachmentRepairConcurrentChangeError("attachment binding set changed concurrently");
+        }
+        for (const update of updates) {
+          const binding = expectedBindings.find((candidate) =>
+            candidate.tenantId === update.tenantId && candidate.messageId === update.messageId);
+          if (!binding) throw new Error("attachment repair update is outside the expected binding set");
+          if (canonicalJson(update.expected) === canonicalJson(update.replacement)) continue;
+          await tx.execute(`SELECT set_config('app.current_tenant', $1, true)`, [update.tenantId]);
+          const result = await tx.query<{ id: string }>(
+            `UPDATE messages SET attachments = $1::jsonb
+             WHERE id = $2 AND tenant_id = $3::uuid
+               AND (source_id = $4 OR message_id = $4)
+               AND attachments = $5::jsonb
+               AND EXISTS (
+                 SELECT 1 FROM inbound_message_sources s
+                 WHERE s.tenant_id = $3::uuid AND s.message_id = $2
+                   AND s.bucket = $6 AND s.object_key = $4 AND s.raw_sha256 = $7
+               )
+             RETURNING id`,
+            [
+              JSON.stringify(update.replacement),
+              update.messageId,
+              update.tenantId,
+              objectKey,
+              JSON.stringify(update.expected),
+              binding.provenance.bucket,
+              binding.provenance.raw_sha256,
+            ],
+          );
+          if (result.rowCount !== 1) {
+            throw new AttachmentRepairConcurrentChangeError("attachment row changed concurrently");
+          }
+        }
+        return true;
+      });
+    } catch (error) {
+      if (error instanceof AttachmentRepairConcurrentChangeError || isSerializationFailure(error)) {
+        return false;
+      }
+      throw error;
+    }
+  }
 }
 
 /** The EXCLUDED assignment list shared by both upsertMessage variants. */
@@ -725,6 +1064,7 @@ export class TenantScopedStore {
   constructor(
     private readonly client: TypedQueryClient,
     private readonly tenantId: string,
+    private readonly atomicClient?: PoolQueryClient,
   ) {}
 
   /**
@@ -1172,7 +1512,7 @@ export class TenantScopedStore {
     return row ? mapMessageRow(row) : null;
   }
 
-  async getMessageAttachment(id: string, index: number): Promise<StoredAttachment | null> {
+  async getMessageAttachment(id: string, index: number, maxBytes = MAX_ATTACHMENT_DOWNLOAD_BYTES): Promise<StoredAttachmentLookup | null> {
     if (!Number.isInteger(index) || index < 0) return null;
     const row = await this.client.get<{ attachment: unknown }>(
       `SELECT attachments -> $2::int AS attachment FROM messages WHERE id = $1 AND tenant_id = $3`,
@@ -1180,16 +1520,172 @@ export class TenantScopedStore {
     );
     const value = row?.attachment;
     let attachment: unknown;
-    try { attachment = typeof value === "string" ? JSON.parse(value) : value; } catch { return null; }
+    try { attachment = typeof value === "string" ? JSON.parse(value) : value; } catch { return { state: "invalid", reason: "attachment JSON is malformed" }; }
     if (!attachment || typeof attachment !== "object" || Array.isArray(attachment)) return null;
     const record = attachment as Record<string, unknown>;
-    if (typeof record["content_base64"] !== "string") return null;
-    return {
-      filename: String(record["filename"] ?? `attachment-${index + 1}`),
-      content_type: String(record["content_type"] ?? "application/octet-stream"),
-      size: Number(record["size"] ?? 0) || 0,
-      content_base64: record["content_base64"],
+    const metadata = {
+      filename: record["filename"],
+      content_type: record["content_type"],
+      size: record["size"],
     };
+    if (typeof record["content_base64"] !== "string") {
+      try {
+        const unavailable = decodeAttachmentPayload({ code: "attachment_content_unavailable", attachment: metadata }, index, maxBytes);
+        if (unavailable.state !== "content_unavailable") throw new Error("unexpected attachment state");
+        return {
+          state: "content_unavailable",
+          attachment: {
+            filename: unavailable.filename,
+            content_type: unavailable.content_type,
+            size: unavailable.bytes,
+          },
+        };
+      } catch (error) {
+        return { state: "invalid", reason: error instanceof Error ? error.message : "attachment metadata is invalid" };
+      }
+    }
+    try {
+      const available = decodeAttachmentPayload({ attachment: record }, index, maxBytes);
+      if (available.state !== "available") throw new Error("unexpected attachment state");
+      return {
+        state: "available",
+        attachment: {
+          filename: available.filename,
+          content_type: available.content_type,
+          size: available.bytes,
+          content_base64: record["content_base64"],
+        },
+      };
+    } catch (error) {
+      return { state: "invalid", reason: error instanceof Error ? error.message : "attachment content is invalid" };
+    }
+  }
+
+  async getInboundSourceProvenance(id: string): Promise<InboundSourceProvenance | null> {
+    if (!id) return null;
+    return this.client.get<InboundSourceProvenance>(
+      `SELECT tenant_id, message_id, bucket, object_key, raw_sha256, established_via
+       FROM inbound_message_sources WHERE tenant_id = $1 AND message_id = $2`,
+      [this.tenantId, id],
+    );
+  }
+
+  /**
+   * Establish immutable provenance only for an exact tenant/message/source-key
+   * row. Conflicting provenance is never overwritten.
+   */
+  async recordInboundSourceProvenance(input: {
+    messageId: string;
+    bucket: string;
+    objectKey: string;
+    rawSha256: string;
+    establishedVia: "normal_ingest" | "canonical_replay";
+  }): Promise<RecordInboundSourceProvenanceResult> {
+    if (!input.messageId || !input.bucket || !input.objectKey || !/^[0-9a-f]{64}$/.test(input.rawSha256)) {
+      return "not_found";
+    }
+    const inserted = await this.client.get<InboundSourceProvenance>(
+      `INSERT INTO inbound_message_sources (
+         tenant_id, message_id, bucket, object_key, raw_sha256, established_via
+       )
+       SELECT $1, m.id, $3, $4, $5, $6
+       FROM messages m
+       WHERE m.tenant_id = $1 AND m.id = $2 AND (m.source_id = $4 OR m.message_id = $4)
+       ON CONFLICT DO NOTHING
+       RETURNING tenant_id, message_id, bucket, object_key, raw_sha256, established_via`,
+      [
+        this.tenantId,
+        input.messageId,
+        input.bucket,
+        input.objectKey,
+        input.rawSha256,
+        input.establishedVia,
+      ],
+    );
+    if (inserted) return "recorded";
+    const existing = await this.getInboundSourceProvenance(input.messageId);
+    if (!existing) return "not_found";
+    return existing.bucket === input.bucket
+      && existing.object_key === input.objectKey
+      && existing.raw_sha256 === input.rawSha256
+      ? "existing_match"
+      : "conflict";
+  }
+
+  /** Exact tenant + message-id + source-key lookup for attachment-only repair. */
+  async getAttachmentRepairState(id: string, sourceKey: string): Promise<{
+    attachments: unknown[];
+    provenance: InboundSourceProvenance | null;
+  } | null> {
+    if (!id || !sourceKey) return null;
+    const row = await this.client.get<{
+      attachments: unknown;
+      source_tenant_id: string | null;
+      source_message_id: string | null;
+      bucket: string | null;
+      object_key: string | null;
+      raw_sha256: string | null;
+      established_via: "normal_ingest" | "canonical_replay" | null;
+    }>(
+      `SELECT m.attachments,
+              s.tenant_id AS source_tenant_id, s.message_id AS source_message_id,
+              s.bucket, s.object_key, s.raw_sha256, s.established_via
+       FROM messages m
+       LEFT JOIN inbound_message_sources s
+         ON s.tenant_id = m.tenant_id AND s.message_id = m.id
+       WHERE m.id = $1 AND m.tenant_id = $2 AND (m.source_id = $3 OR m.message_id = $3)`,
+      [id, this.tenantId, sourceKey],
+    );
+    if (!row) return null;
+    const raw = row.attachments;
+    try {
+      const attachments = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (!Array.isArray(attachments)) return null;
+      const provenance = row.source_tenant_id && row.source_message_id && row.bucket
+        && row.object_key && row.raw_sha256 && row.established_via
+        ? {
+            tenant_id: row.source_tenant_id,
+            message_id: row.source_message_id,
+            bucket: row.bucket,
+            object_key: row.object_key,
+            raw_sha256: row.raw_sha256,
+            established_via: row.established_via,
+          }
+        : null;
+      return { attachments, provenance };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Compare-and-swap ONLY the attachment JSON. `updated_at` and every message /
+   * mailbox field are intentionally untouched.
+   */
+  async replaceAttachmentPayload(
+    id: string,
+    sourceKey: string,
+    provenance: InboundSourceProvenance,
+    expected: unknown[],
+    replacement: unknown[],
+  ): Promise<boolean> {
+    if (!id || !sourceKey) return false;
+    const row = await this.client.get<{ id: string }>(
+      `UPDATE messages SET attachments = $1::jsonb
+       WHERE id = $2 AND tenant_id = $3 AND (source_id = $4 OR message_id = $4)
+         AND EXISTS (
+           SELECT 1 FROM inbound_message_sources s
+           WHERE s.tenant_id = $3 AND s.message_id = $2
+             AND s.bucket = $5 AND s.object_key = $4 AND s.raw_sha256 = $6
+         )
+         AND attachments = $7::jsonb
+       RETURNING id`,
+      [
+        JSON.stringify(replacement), id, this.tenantId, sourceKey,
+        provenance.bucket, provenance.raw_sha256, JSON.stringify(expected),
+      ],
+    );
+    return Boolean(row);
   }
 
   /**
@@ -1213,6 +1709,85 @@ export class TenantScopedStore {
       [...messageInsertParams(input), this.tenantId],
     );
     return mapMessageRow(row);
+  }
+
+  /**
+   * Insert a new inbound row (or observe a concurrent exact-source insert) and
+   * establish immutable provenance in the SAME database transaction. A source
+   * conflict aborts the transaction, so an unprovenanced new message cannot leak.
+   */
+  async createInboundMessageWithProvenance(
+    input: MessageInput,
+    provenance: {
+      bucket: string;
+      objectKey: string;
+      rawSha256: string;
+      establishedVia: "normal_ingest";
+    },
+  ): Promise<{
+    record: MessageRecord;
+    inserted: boolean;
+    provenance: "recorded" | "existing_match";
+  }> {
+    if (!input.source_id || input.source_id !== provenance.objectKey
+      || !provenance.bucket || !/^[0-9a-f]{64}$/.test(provenance.rawSha256)
+      || !this.atomicClient) {
+      throw new Error("atomic inbound message provenance requires an exact source and transactional store");
+    }
+    return this.atomicClient.transaction(async (tx) => {
+      await tx.execute(`SELECT set_config('app.current_tenant', $1, true)`, [this.tenantId]);
+      const insertedRow = await tx.get<Record<string, unknown>>(
+        `INSERT INTO messages (${MESSAGE_INSERT_COLS}, tenant_id)
+         VALUES (${MESSAGE_INSERT_VALUES}, $24)
+         ON CONFLICT (tenant_id, source_id) WHERE source_id IS NOT NULL DO NOTHING
+         RETURNING ${MESSAGE_COLUMNS}`,
+        [...messageInsertParams(input), this.tenantId],
+      );
+      const row = insertedRow ?? await tx.get<Record<string, unknown>>(
+        `SELECT ${MESSAGE_COLUMNS} FROM messages
+         WHERE tenant_id = $1::uuid AND source_id = $2
+         FOR UPDATE`,
+        [this.tenantId, provenance.objectKey],
+      );
+      if (!row || (row["source_id"] !== provenance.objectKey && row["message_id"] !== provenance.objectKey)) {
+        throw new Error("could not bind inbound message to the exact source object");
+      }
+      const messageId = String(row["id"]);
+      const insertedSource = await tx.get<InboundSourceProvenance>(
+        `INSERT INTO inbound_message_sources (
+           tenant_id, message_id, bucket, object_key, raw_sha256, established_via
+         ) VALUES ($1::uuid, $2, $3, $4, $5, $6)
+         ON CONFLICT DO NOTHING
+         RETURNING tenant_id::text AS tenant_id, message_id, bucket, object_key, raw_sha256, established_via`,
+        [
+          this.tenantId,
+          messageId,
+          provenance.bucket,
+          provenance.objectKey,
+          provenance.rawSha256,
+          provenance.establishedVia,
+        ],
+      );
+      let sourceState: "recorded" | "existing_match" = "recorded";
+      if (!insertedSource) {
+        const existing = await tx.get<InboundSourceProvenance>(
+          `SELECT tenant_id::text AS tenant_id, message_id, bucket, object_key, raw_sha256, established_via
+           FROM inbound_message_sources WHERE tenant_id = $1::uuid AND message_id = $2`,
+          [this.tenantId, messageId],
+        );
+        if (!existing || existing.bucket !== provenance.bucket
+          || existing.object_key !== provenance.objectKey
+          || existing.raw_sha256 !== provenance.rawSha256) {
+          throw new Error("inbound source provenance conflicts with the exact object");
+        }
+        sourceState = "existing_match";
+      }
+      return {
+        record: mapMessageRow(row),
+        inserted: Boolean(insertedRow),
+        provenance: sourceState,
+      };
+    });
   }
 
   /** Return an existing tenant-scoped send intent without exposing another tenant. */

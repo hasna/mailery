@@ -26,7 +26,7 @@ import { RateLimiter } from "./auth/rate-limit.js";
 import { hashPassword } from "./auth/password.js";
 import type { AuthMailerConfig } from "./auth/mailer.js";
 import type { SelfHostedKeyStore } from "./keys.js";
-import { ingestS3Object } from "./ingest-worker.js";
+import { ingestS3Object, shouldDeleteIngestResult } from "./ingest-worker.js";
 
 const SIGNING_SECRET = "test-signing-secret-do-not-use-in-prod-0123456789";
 const databaseUrl = process.env["EMAILS_TEST_POSTGRES_URL"];
@@ -480,13 +480,65 @@ describe.skipIf(!pgClient)("envelope-only inbound tenant routing", () => {
     expect((await deps.store.forTenant(a.tenantId).listMessages())[0]!.to_addrs).toEqual([`alpha@${domainA}`]);
     expect((await deps.store.forTenant(b.tenantId).listMessages())[0]!.to_addrs).toEqual([`beta@${domainB}`]);
 
+    const rowsBeforeReplay = await pgClient!.many<{ row: Record<string, unknown> }>(
+      `SELECT to_jsonb(messages) AS row FROM messages WHERE source_id = $1 ORDER BY tenant_id`,
+      [key],
+    );
+    const sourcesBeforeReplay = await pgClient!.many<{ row: Record<string, unknown> }>(
+      `SELECT to_jsonb(inbound_message_sources) AS row
+       FROM inbound_message_sources WHERE bucket = $1 AND object_key = $2 ORDER BY tenant_id, message_id`,
+      ["test-bucket", key],
+    );
+    const replayFetches: string[] = [];
     const replay = await ingestS3Object(
-      { store: deps.store, fetchObject: async () => { throw new Error("duplicate must not fetch"); }, now: () => new Date().toISOString() },
+      {
+        store: deps.store,
+        fetchObject: async (bucket, objectKey) => { replayFetches.push(`${bucket}/${objectKey}`); return raw; },
+        now: () => new Date().toISOString(),
+      },
       "test-bucket",
       key,
       { recipients: [`alpha@${domainA}`, `beta@${domainB}`] },
     );
     expect(replay.status).toBe("duplicate");
+    expect(replayFetches).toEqual([`test-bucket/${key}`]);
+    expect(shouldDeleteIngestResult(replay)).toBe(true);
+    expect(await pgClient!.many<{ row: Record<string, unknown> }>(
+      `SELECT to_jsonb(messages) AS row FROM messages WHERE source_id = $1 ORDER BY tenant_id`,
+      [key],
+    )).toEqual(rowsBeforeReplay);
+    expect(await pgClient!.many<{ row: Record<string, unknown> }>(
+      `SELECT to_jsonb(inbound_message_sources) AS row
+       FROM inbound_message_sources WHERE bucket = $1 AND object_key = $2 ORDER BY tenant_id, message_id`,
+      ["test-bucket", key],
+    )).toEqual(sourcesBeforeReplay);
+
+    const mismatchFetches: string[] = [];
+    const mismatch = await ingestS3Object(
+      {
+        store: deps.store,
+        fetchObject: async (bucket, objectKey) => {
+          mismatchFetches.push(`${bucket}/${objectKey}`);
+          return Buffer.from("different canonical bytes");
+        },
+        now: () => new Date().toISOString(),
+      },
+      "test-bucket",
+      key,
+      { recipients: [`alpha@${domainA}`, `beta@${domainB}`] },
+    );
+    expect(mismatch).toMatchObject({ status: "error", reason: "provenance_hash_mismatch" });
+    expect(mismatchFetches).toEqual([`test-bucket/${key}`]);
+    expect(shouldDeleteIngestResult(mismatch)).toBe(false);
+    expect(await pgClient!.many<{ row: Record<string, unknown> }>(
+      `SELECT to_jsonb(messages) AS row FROM messages WHERE source_id = $1 ORDER BY tenant_id`,
+      [key],
+    )).toEqual(rowsBeforeReplay);
+    expect(await pgClient!.many<{ row: Record<string, unknown> }>(
+      `SELECT to_jsonb(inbound_message_sources) AS row
+       FROM inbound_message_sources WHERE bucket = $1 AND object_key = $2 ORDER BY tenant_id, message_id`,
+      ["test-bucket", key],
+    )).toEqual(sourcesBeforeReplay);
 
     const quarantineKey = `inbound/${crypto.randomUUID()}`;
     const quarantined = await ingestS3Object(

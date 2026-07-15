@@ -1,8 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import { afterAll, describe, expect, it } from "bun:test";
-import { createPgPool, createQueryClient, MigrationLedger } from "../../storage-kit/index.js";
+import {
+  createPgPool,
+  createQueryClient,
+  MigrationLedger,
+  type PoolQueryClient,
+  type TypedQueryClient,
+} from "../../storage-kit/index.js";
 import { DEFAULT_TENANT_ID, emailsSelfHostedMigrations } from "./migrations.js";
-import { EmailsSelfHostedStore, type TenantScopedStore } from "./store.js";
+import { EmailsSelfHostedStore, type MessageInput, type TenantScopedStore } from "./store.js";
 import { resourceSpecForPath, SELF_HOSTED_RESOURCES } from "./resources.js";
 
 const databaseUrl = process.env["EMAILS_TEST_POSTGRES_URL"];
@@ -1133,5 +1139,499 @@ describe("self-hosted Postgres integration", () => {
       [tenantId],
     );
     expect(routes.map((route) => route.domain)).toEqual(["active-route.example"]);
+  });
+
+  it.skipIf(!client)("0017 makes source provenance immutable, cascade-safe, and tenant-isolated", async () => {
+    await resetPublicSchema();
+    await client!.execute("DROP ROLE IF EXISTS emails_source_probe");
+    await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    const tenantA = "44444444-4444-4444-4444-444444444444";
+    const tenantB = "55555555-5555-5555-5555-555555555555";
+    const hashA = "a".repeat(64);
+    const hashB = "b".repeat(64);
+
+    await client!.execute(
+      `INSERT INTO tenants (id, slug, name) VALUES
+         ($1, 'source-a', 'Source A'), ($2, 'source-b', 'Source B')`,
+      [tenantA, tenantB],
+    );
+    await client!.execute(
+      `INSERT INTO messages (id, from_addr, source_id, tenant_id) VALUES
+         ('source-message-a', 'a@example.test', 'source/key-a', $1),
+         ('source-message-b', 'b@example.test', 'source/key-b', $2)`,
+      [tenantA, tenantB],
+    );
+    await client!.execute(
+      `INSERT INTO inbound_message_sources
+         (tenant_id, message_id, bucket, object_key, raw_sha256, established_via)
+       VALUES
+         ($1, 'source-message-a', 'canonical-a', 'source/key-a', $3, 'normal_ingest'),
+         ($2, 'source-message-b', 'canonical-b', 'source/key-b', $4, 'canonical_replay')`,
+      [tenantA, tenantB, hashA, hashB],
+    );
+
+    await expect(client!.execute(
+      `INSERT INTO inbound_message_sources
+         (tenant_id, message_id, bucket, object_key, raw_sha256, established_via)
+       VALUES ($1, 'source-message-b', 'forged-cross-tenant', 'source/forged', $2, 'normal_ingest')`,
+      [tenantA, hashA],
+    )).rejects.toThrow(/foreign key/i);
+
+    await expect(client!.execute(
+      `UPDATE inbound_message_sources SET bucket = 'forged' WHERE message_id = 'source-message-a'`,
+    )).rejects.toThrow(/provenance is immutable/i);
+    await expect(client!.execute(
+      `DELETE FROM inbound_message_sources WHERE message_id = 'source-message-a'`,
+    )).rejects.toThrow(/cannot be deleted independently/i);
+
+    // Parent deletion must remain possible: the FK cascade removes provenance
+    // only after the owning message is gone.
+    await client!.execute(`DELETE FROM messages WHERE id = 'source-message-a' AND tenant_id = $1`, [tenantA]);
+    expect((await client!.one<{ n: number }>(
+      `SELECT count(*)::int AS n FROM inbound_message_sources WHERE message_id = 'source-message-a'`,
+    )).n).toBe(0);
+    await client!.execute(
+      `INSERT INTO messages (id, from_addr, source_id, tenant_id)
+       VALUES ('source-message-a2', 'a2@example.test', 'source/key-a2', $1)`,
+      [tenantA],
+    );
+    await client!.execute(
+      `INSERT INTO inbound_message_sources
+         (tenant_id, message_id, bucket, object_key, raw_sha256, established_via)
+       VALUES ($1, 'source-message-a2', 'canonical-a', 'source/key-a2', $2, 'normal_ingest')`,
+      [tenantA, hashA],
+    );
+
+    await client!.execute(`CREATE ROLE emails_source_probe NOLOGIN NOSUPERUSER NOBYPASSRLS`);
+    await client!.execute(`GRANT USAGE ON SCHEMA public TO emails_source_probe`);
+    await client!.execute(`ALTER TABLE inbound_message_sources OWNER TO emails_source_probe`);
+    const visibleSources = (tenantId: string | null) => client!.transaction(async (tx) => {
+      await tx.execute(`SET LOCAL ROLE emails_source_probe`);
+      if (tenantId !== null) {
+        await tx.execute(`SELECT set_config('app.current_tenant', $1, true)`, [tenantId]);
+      }
+      return tx.many<{ tenant_id: string; message_id: string }>(
+        `SELECT tenant_id, message_id FROM inbound_message_sources ORDER BY message_id`,
+      );
+    });
+
+    expect(await visibleSources(null)).toEqual([]);
+    expect(await visibleSources(tenantA)).toEqual([
+      { tenant_id: tenantA, message_id: "source-message-a2" },
+    ]);
+    expect(await visibleSources(tenantB)).toEqual([
+      { tenant_id: tenantB, message_id: "source-message-b" },
+    ]);
+
+    // Leave the shared ephemeral test database clean for any later test file.
+    await resetPublicSchema();
+    await client!.execute("DROP ROLE IF EXISTS emails_source_probe");
+  });
+
+  it.skipIf(!client)("captures the cutover fence from PostgreSQL before migration 0017 exists", async () => {
+    await resetPublicSchema();
+    const before = await client!.one<{ at: Date }>(`SELECT clock_timestamp() AS at`);
+    const fenceAt = await new EmailsSelfHostedStore(client!).captureInboundProvenanceFence();
+    const after = await client!.one<{ at: Date }>(`SELECT clock_timestamp() AS at`);
+    const parsed = new Date(fenceAt);
+    expect(parsed.toISOString()).toBe(fenceAt);
+    expect(parsed.getTime()).toBeGreaterThanOrEqual(new Date(before.at).getTime());
+    expect(parsed.getTime()).toBeLessThanOrEqual(new Date(after.at).getTime());
+  });
+
+  it.skipIf(!client)("proves a pre-fence writer can commit after the cutoff yet remain outside the audit", async () => {
+    await resetPublicSchema();
+    await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    const tenantId = "77777777-7777-4777-8777-777777777777";
+    const canonicalBucket = "canonical-fence-bucket";
+    await client!.execute(
+      `INSERT INTO tenants (id, slug, name) VALUES ($1, 'fence-writer', 'Fence Writer')`,
+      [tenantId],
+    );
+
+    let writerInjected = false;
+    const coordinatedClient: PoolQueryClient = {
+      ...client!,
+      async transaction<T>(fn: (tx: TypedQueryClient) => Promise<T>): Promise<T> {
+        return client!.transaction(async (fenceTx) => {
+          if (!writerInjected) {
+            writerInjected = true;
+            let confirmWriterStarted!: () => void;
+            let releaseWriter!: () => void;
+            const writerStarted = new Promise<void>((resolve) => { confirmWriterStarted = resolve; });
+            const writerMayCommit = new Promise<void>((resolve) => { releaseWriter = resolve; });
+            // This writer begins after the fence transaction begins, but before
+            // the fence query runs. It remains open until after the fence query,
+            // so PostgreSQL fixes created_at's default now() before the returned
+            // cutoff even though the write commits afterward.
+            const writer = client!.transaction(async (writerTx) => {
+              await writerTx.execute(
+                `INSERT INTO messages
+                   (id, from_addr, direction, source_id, message_id, tenant_id)
+                 VALUES
+                   ('audit-fence-race', 'race@example.test', 'inbound',
+                    'source/audit-fence-race', 'source/audit-fence-race', $1)`,
+                [tenantId],
+              );
+              confirmWriterStarted();
+              await writerMayCommit;
+            });
+            await writerStarted;
+            let result!: T;
+            try {
+              result = await fn(fenceTx);
+            } finally {
+              releaseWriter();
+              await writer;
+            }
+            return result;
+          }
+          return fn(fenceTx);
+        });
+      },
+    };
+
+    const fenceAt = await new EmailsSelfHostedStore(coordinatedClient).captureInboundProvenanceFence();
+    const committedWriter = await client!.one<{ created_at: Date }>(
+      `SELECT created_at FROM messages WHERE id = 'audit-fence-race'`,
+    );
+    const result = await new EmailsSelfHostedStore(client!).auditInboundSourceProvenance({
+      since: fenceAt,
+      canonicalBucket,
+    });
+    expect(writerInjected).toBe(true);
+    expect(new Date(committedWriter.created_at).getTime()).toBeLessThan(new Date(fenceAt).getTime());
+    // The audit correctly applies its time predicate; this intentionally proves
+    // why all old writer tasks must be machine-verified at zero before the
+    // operator captures the cutoff.
+    expect(result).toMatchObject({
+      since: fenceAt,
+      candidate_messages: 0,
+      valid_provenance: 0,
+      missing_provenance: 0,
+      invalid_provenance: 0,
+    });
+
+    await resetPublicSchema();
+  });
+
+  it.skipIf(!client)("audits every tenant for post-fence S3 provenance without returning row identities", async () => {
+    await resetPublicSchema();
+    await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    const tenantA = "88888888-8888-8888-8888-888888888888";
+    const tenantB = "99999999-9999-9999-9999-999999999999";
+    const canonicalBucket = "canonical-audit-bucket";
+    const cutoff = "2026-07-15T11:00:00.000Z";
+    await client!.execute(
+      `INSERT INTO tenants (id, slug, name) VALUES
+         ($1, 'audit-a', 'Audit A'), ($2, 'audit-b', 'Audit B')`,
+      [tenantA, tenantB],
+    );
+    await client!.execute(
+      `INSERT INTO messages
+         (id, from_addr, direction, source_id, message_id, tenant_id, created_at, updated_at)
+       VALUES
+         ('audit-valid', 'valid@example.test', 'inbound', 'source/audit-valid', 'source/audit-valid', $1,
+          '2026-07-15T11:01:00Z', '2026-07-15T11:01:00Z'),
+         ('audit-missing', 'missing@example.test', 'inbound', 'source/audit-missing', 'source/audit-missing', $2,
+          '2026-07-15T11:02:00Z', '2026-07-15T11:02:00Z'),
+         ('audit-invalid', 'invalid@example.test', 'inbound', 'source/audit-invalid', 'source/audit-invalid', $1,
+          '2026-07-15T11:03:00Z', '2026-07-15T11:03:00Z'),
+         ('audit-before', 'before@example.test', 'inbound', 'source/audit-before', 'source/audit-before', $2,
+          '2026-07-15T10:59:59Z', '2026-07-15T10:59:59Z'),
+         ('audit-outbound', 'outbound@example.test', 'outbound', 'source/audit-outbound', 'source/audit-outbound', $2,
+          '2026-07-15T11:04:00Z', '2026-07-15T11:04:00Z'),
+         ('audit-non-s3', 'api@example.test', 'inbound', 'api-source', 'rfc-message-id', $2,
+          '2026-07-15T11:05:00Z', '2026-07-15T11:05:00Z')`,
+      [tenantA, tenantB],
+    );
+    await client!.execute(
+      `INSERT INTO inbound_message_sources
+         (tenant_id, message_id, bucket, object_key, raw_sha256, established_via)
+       VALUES
+         ($1, 'audit-valid', $2, 'source/audit-valid', $3, 'normal_ingest'),
+         ($1, 'audit-invalid', 'wrong-audit-bucket', 'source/audit-invalid', $4, 'normal_ingest')`,
+      [tenantA, canonicalBucket, "a".repeat(64), "b".repeat(64)],
+    );
+
+    const result = await new EmailsSelfHostedStore(client!).auditInboundSourceProvenance({
+      since: cutoff,
+      canonicalBucket,
+    });
+    expect(result).toMatchObject({
+      since: cutoff,
+      candidate_messages: 3,
+      valid_provenance: 1,
+      missing_provenance: 1,
+      invalid_provenance: 1,
+    });
+    expect(result.tenants_scanned).toBeGreaterThanOrEqual(2);
+    expect(Object.keys(result).sort()).toEqual([
+      "candidate_messages",
+      "invalid_provenance",
+      "missing_provenance",
+      "since",
+      "tenants_scanned",
+      "valid_provenance",
+    ]);
+    expect(JSON.stringify(result)).not.toContain(tenantA);
+    expect(JSON.stringify(result)).not.toContain(tenantB);
+    expect(JSON.stringify(result)).not.toContain("source/audit-");
+    expect(JSON.stringify(result)).not.toContain(canonicalBucket);
+
+    await resetPublicSchema();
+  });
+
+  it.skipIf(!client)("fails global repair discovery when any exact-source row lacks or conflicts with provenance", async () => {
+    await resetPublicSchema();
+    await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    const tenantA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const tenantB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const tenantC = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const bucket = "canonical-complete-binding";
+    const key = "source/complete-binding";
+    await client!.execute(
+      `INSERT INTO tenants (id, slug, name) VALUES
+         ($1, 'complete-a', 'Complete A'), ($2, 'complete-b', 'Complete B'),
+         ($3, 'complete-c', 'Complete C')`,
+      [tenantA, tenantB, tenantC],
+    );
+    await client!.execute(
+      `INSERT INTO messages (id, from_addr, direction, source_id, message_id, attachments, tenant_id) VALUES
+         ('complete-provenanced', 'a@example.test', 'inbound', $1, $1,
+          '[{"filename":"a.txt","content_type":"text/plain","size":1}]'::jsonb, $2),
+         ('complete-missing', 'b@example.test', 'inbound', $1, $1,
+          '[{"filename":"b.txt","content_type":"text/plain","size":1}]'::jsonb, $3)`,
+      [key, tenantA, tenantB],
+    );
+    await client!.execute(
+      `INSERT INTO inbound_message_sources
+         (tenant_id, message_id, bucket, object_key, raw_sha256, established_via)
+       VALUES ($1, 'complete-provenanced', $2, $3, $4, 'normal_ingest')`,
+      [tenantA, bucket, key, "a".repeat(64)],
+    );
+    const root = new EmailsSelfHostedStore(client!);
+
+    await expect(root.listAttachmentRepairBindings(bucket, key)).rejects.toThrow(/complete.*provenance|missing.*provenance/i);
+
+    expect(await root.forTenant(tenantB).recordInboundSourceProvenance({
+      messageId: "complete-missing",
+      bucket,
+      objectKey: key,
+      rawSha256: "b".repeat(64),
+      establishedVia: "canonical_replay",
+    })).toBe("recorded");
+
+    const expectedBindings = await root.listAttachmentRepairBindings(bucket, key);
+    await client!.execute(
+      `INSERT INTO messages (id, from_addr, direction, source_id, message_id, attachments, tenant_id)
+       VALUES ('complete-late', 'late@example.test', 'inbound', $1, $1,
+         '[{"filename":"late.txt","content_type":"text/plain","size":1}]'::jsonb, $2)`,
+      [key, tenantC],
+    );
+    const beforeRows = await client!.many<{ row: Record<string, unknown> }>(
+      `SELECT to_jsonb(messages) AS row FROM messages WHERE source_id = $1 ORDER BY id`,
+      [key],
+    );
+    const updates = expectedBindings.map((binding) => ({
+      tenantId: binding.tenantId,
+      messageId: binding.messageId,
+      expected: binding.attachments,
+      replacement: [{ ...(binding.attachments[0] as Record<string, unknown>), content_base64: "eA==" }],
+    }));
+    await expect(root.replaceAttachmentPayloadsAtomically(expectedBindings, updates))
+      .rejects.toThrow(/complete.*provenance|missing.*provenance/i);
+    expect(await client!.many<{ row: Record<string, unknown> }>(
+      `SELECT to_jsonb(messages) AS row FROM messages WHERE source_id = $1 ORDER BY id`,
+      [key],
+    )).toEqual(beforeRows);
+
+    expect(await root.forTenant(tenantC).recordInboundSourceProvenance({
+      messageId: "complete-late",
+      bucket: "conflicting-bucket",
+      objectKey: key,
+      rawSha256: "c".repeat(64),
+      establishedVia: "canonical_replay",
+    })).toBe("recorded");
+    await expect(root.listAttachmentRepairBindings(bucket, key)).rejects.toThrow(/complete.*provenance|conflict/i);
+
+    await resetPublicSchema();
+  });
+
+  it.skipIf(!client)("atomically couples ingest provenance and globally repairs same-object rows under concurrency", async () => {
+    await resetPublicSchema();
+    await new MigrationLedger(client!, emailsSelfHostedMigrations()).migrate();
+    const tenantA = "66666666-6666-6666-6666-666666666666";
+    const tenantB = "77777777-7777-7777-7777-777777777777";
+    const bucket = "canonical-concurrency";
+    const key = "source/concurrent-object";
+    const rawSha256 = "c".repeat(64);
+    await client!.execute(
+      `INSERT INTO tenants (id, slug, name) VALUES
+         ($1, 'atomic-a', 'Atomic A'), ($2, 'atomic-b', 'Atomic B')`,
+      [tenantA, tenantB],
+    );
+    const root = new EmailsSelfHostedStore(client!);
+    const messageInput = (tenant: string, subject: string): MessageInput => ({
+      from_addr: `${tenant}@example.test`,
+      to_addrs: [`owner-${tenant}@example.test`],
+      subject,
+      direction: "inbound",
+      status: "received",
+      source_id: key,
+      message_id: key,
+      is_read: false,
+      is_starred: true,
+      labels: ["existing"],
+      headers: { "x-stable": tenant },
+      attachments: [{ filename: "invoice.txt", content_type: "text/plain", size: 5 }],
+    });
+
+    const [concurrentA, concurrentB] = await Promise.all([
+      root.forTenant(tenantA).createInboundMessageWithProvenance(messageInput("a", "winner-a"), {
+        bucket, objectKey: key, rawSha256, establishedVia: "normal_ingest",
+      }),
+      root.forTenant(tenantA).createInboundMessageWithProvenance(messageInput("a", "winner-b"), {
+        bucket, objectKey: key, rawSha256, establishedVia: "normal_ingest",
+      }),
+    ]);
+    expect([concurrentA.inserted, concurrentB.inserted].sort()).toEqual([false, true]);
+    expect(concurrentA.record.id).toBe(concurrentB.record.id);
+    expect((await client!.one<{ n: number }>(
+      `SELECT count(*)::int AS n FROM messages WHERE tenant_id = $1 AND source_id = $2`,
+      [tenantA, key],
+    )).n).toBe(1);
+    expect((await client!.one<{ n: number }>(
+      `SELECT count(*)::int AS n FROM inbound_message_sources WHERE tenant_id = $1 AND object_key = $2`,
+      [tenantA, key],
+    )).n).toBe(1);
+
+    await root.forTenant(tenantB).createInboundMessageWithProvenance(messageInput("b", "tenant-b"), {
+      bucket, objectKey: key, rawSha256, establishedVia: "normal_ingest",
+    });
+    const bindings = await root.listAttachmentRepairBindings(bucket, key);
+    expect(bindings.map((binding) => [binding.tenantId, binding.messageId])).toEqual([
+      [tenantA, concurrentA.record.id],
+      [tenantB, expect.any(String)],
+    ]);
+    const beforeRows = await client!.many<{ id: string; row: Record<string, unknown> }>(
+      `SELECT id, to_jsonb(messages) AS row FROM messages WHERE tenant_id IN ($1, $2) ORDER BY tenant_id`,
+      [tenantA, tenantB],
+    );
+    const beforeSources = await client!.many<{ row: Record<string, unknown> }>(
+      `SELECT to_jsonb(inbound_message_sources) AS row
+       FROM inbound_message_sources WHERE bucket = $1 AND object_key = $2 ORDER BY tenant_id, message_id`,
+      [bucket, key],
+    );
+    const replacementA = bindings.map((binding) => ({
+      tenantId: binding.tenantId,
+      messageId: binding.messageId,
+      expected: binding.attachments,
+      replacement: [{ ...binding.attachments[0] as Record<string, unknown>, content_base64: "aGVsbG8=" }],
+    }));
+    const replacementB = bindings.map((binding) => ({
+      tenantId: binding.tenantId,
+      messageId: binding.messageId,
+      expected: binding.attachments,
+      replacement: [{ ...binding.attachments[0] as Record<string, unknown>, content_base64: "d29ybGQ=" }],
+    }));
+    const concurrentRepairs = await Promise.all([
+      root.replaceAttachmentPayloadsAtomically(bindings, replacementA),
+      root.replaceAttachmentPayloadsAtomically(bindings, replacementB),
+    ]);
+    expect(concurrentRepairs.sort()).toEqual([false, true]);
+    const afterRows = await client!.many<{ id: string; row: Record<string, unknown> }>(
+      `SELECT id, to_jsonb(messages) AS row FROM messages WHERE tenant_id IN ($1, $2) ORDER BY tenant_id`,
+      [tenantA, tenantB],
+    );
+    const payloads = new Set(afterRows.map(({ row }) => JSON.stringify((row["attachments"] as unknown[])[0])));
+    expect(payloads.size).toBe(1);
+    for (let index = 0; index < beforeRows.length; index++) {
+      const before = { ...beforeRows[index]!.row, attachments: afterRows[index]!.row["attachments"] };
+      expect(afterRows[index]!.row).toEqual(before);
+    }
+    expect(await client!.many<{ row: Record<string, unknown> }>(
+      `SELECT to_jsonb(inbound_message_sources) AS row
+       FROM inbound_message_sources WHERE bucket = $1 AND object_key = $2 ORDER BY tenant_id, message_id`,
+      [bucket, key],
+    )).toEqual(beforeSources);
+
+    // A retry of the winning raw object against fresh state is an atomic,
+    // idempotent no-op: it succeeds without changing messages or provenance.
+    const retryBindings = await root.listAttachmentRepairBindings(bucket, key);
+    const retryUpdates = retryBindings.map((binding) => ({
+      tenantId: binding.tenantId,
+      messageId: binding.messageId,
+      expected: binding.attachments,
+      replacement: binding.attachments,
+    }));
+    expect(await root.replaceAttachmentPayloadsAtomically(retryBindings, retryUpdates)).toBe(true);
+    expect(await client!.many<{ id: string; row: Record<string, unknown> }>(
+      `SELECT id, to_jsonb(messages) AS row FROM messages WHERE tenant_id IN ($1, $2) ORDER BY tenant_id`,
+      [tenantA, tenantB],
+    )).toEqual(afterRows);
+    expect(await client!.many<{ row: Record<string, unknown> }>(
+      `SELECT to_jsonb(inbound_message_sources) AS row
+       FROM inbound_message_sources WHERE bucket = $1 AND object_key = $2 ORDER BY tenant_id, message_id`,
+      [bucket, key],
+    )).toEqual(beforeSources);
+
+    // A legacy row acquires canonical provenance without ANY message-column drift.
+    const legacyKey = "source/legacy-no-drift";
+    await client!.execute(
+      `INSERT INTO messages
+         (id, from_addr, to_addrs, subject, body_text, direction, status, source_id,
+          message_id, is_read, is_starred, labels, headers, attachments, tenant_id, updated_at)
+       VALUES
+         ('legacy-no-drift', 'legacy@example.test', '["owner@example.test"]'::jsonb,
+          'legacy subject', 'legacy body', 'inbound', 'received', $1, $1, true, true,
+          '["keep"]'::jsonb, '{"x-legacy":"keep"}'::jsonb,
+          '[{"filename":"legacy.txt","content_type":"text/plain","size":5}]'::jsonb,
+          $2, '2026-01-02T03:04:05Z')`,
+      [legacyKey, tenantA],
+    );
+    const legacyBefore = await client!.one<{ row: Record<string, unknown> }>(
+      `SELECT to_jsonb(messages) AS row FROM messages WHERE id = 'legacy-no-drift'`,
+    );
+    expect(await root.forTenant(tenantA).recordInboundSourceProvenance({
+      messageId: "legacy-no-drift",
+      bucket,
+      objectKey: legacyKey,
+      rawSha256: "d".repeat(64),
+      establishedVia: "canonical_replay",
+    })).toBe("recorded");
+    const legacyAfter = await client!.one<{ row: Record<string, unknown> }>(
+      `SELECT to_jsonb(messages) AS row FROM messages WHERE id = 'legacy-no-drift'`,
+    );
+    expect(legacyAfter.row).toEqual(legacyBefore.row);
+
+    // If provenance conflicts after a tentative INSERT, the whole transaction
+    // rolls back and leaves no orphan message behind.
+    const rollbackKey = "source/rollback-object";
+    await client!.execute(
+      `INSERT INTO messages (id, from_addr, source_id, message_id, tenant_id)
+       VALUES ('rollback-owner', 'owner@example.test', 'different-source', $1, $2)`,
+      [rollbackKey, tenantA],
+    );
+    await client!.execute(
+      `INSERT INTO inbound_message_sources
+         (tenant_id, message_id, bucket, object_key, raw_sha256, established_via)
+       VALUES ($1, 'rollback-owner', $2, $3, $4, 'canonical_replay')`,
+      [tenantA, bucket, rollbackKey, "e".repeat(64)],
+    );
+    await expect(root.forTenant(tenantA).createInboundMessageWithProvenance({
+      ...messageInput("rollback", "must roll back"),
+      source_id: rollbackKey,
+      message_id: rollbackKey,
+    }, {
+      bucket,
+      objectKey: rollbackKey,
+      rawSha256: "f".repeat(64),
+      establishedVia: "normal_ingest",
+    })).rejects.toThrow(/provenance conflicts/i);
+    expect((await client!.one<{ n: number }>(
+      `SELECT count(*)::int AS n FROM messages WHERE tenant_id = $1 AND source_id = $2`,
+      [tenantA, rollbackKey],
+    )).n).toBe(0);
   });
 });

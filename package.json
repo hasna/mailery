@@ -1,6 +1,6 @@
 {
   "name": "@hasna/emails",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Local SQLite and self-hosted email management CLI, MCP server, and library",
   "type": "module",
   "repository": {

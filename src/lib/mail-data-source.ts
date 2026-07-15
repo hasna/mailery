@@ -59,6 +59,14 @@ import type {
   VerificationCodeMatch,
 } from "./verification-code.js";
 import { findVerificationCode, listVerificationCodeCandidates } from "./verification-code.local.js";
+import {
+  decodeAttachmentPayload,
+  normalizeAttachmentByteLimit,
+  type AttachmentContent,
+} from "./attachment-download.js";
+import { constants as fsConstants } from "node:fs";
+import { open as openFile } from "node:fs/promises";
+import { basename } from "node:path";
 
 // ── seam-level DTOs (backend-agnostic) ───────────────────────────────────────
 
@@ -190,6 +198,7 @@ export interface MailDataSource {
   getConversation(msg: TuiMessage): Promise<TuiThreadMessage[]>;
   getConversationBodies(msg: TuiMessage, opts?: ConversationBodyOptions): Promise<TuiThreadBody[]>;
   getAttachmentPaths(id: string): Promise<AttachmentPath[]>;
+  getAttachmentContent(id: string, index: number, opts?: { maxBytes?: number }): Promise<AttachmentContent>;
   listLabelSummaries(opts?: ListLabelSummaryOptions): Promise<LabelSummary[]>;
   verificationCandidates(address: string, opts?: VerificationCodeCandidateOptions): Promise<VerificationCodeEmail[]>;
   findLatest(address: string, opts?: VerificationCodeCandidateOptions & { from?: string; subject?: string }): Promise<VerificationCodeMatch<VerificationCodeEmail> | null>;
@@ -290,6 +299,83 @@ export class SqliteMailDataSource implements MailDataSource {
 
   async getAttachmentPaths(id: string): Promise<AttachmentPath[]> {
     return getInboundAttachmentPaths(id) ?? [];
+  }
+
+  async getAttachmentContent(id: string, index: number, opts?: { maxBytes?: number }): Promise<AttachmentContent> {
+    const limit = normalizeAttachmentByteLimit(opts?.maxBytes);
+    if (!Number.isSafeInteger(index) || index < 0) throw new Error("attachment index must be a non-negative integer");
+    const msg = await this.getMessage(id);
+    if (!msg) return { state: "not_found", index };
+    const body = await this.getMessageBody(msg);
+    const metadata = body?.attachments[index];
+    if (!metadata) return { state: "not_found", index };
+    const paths = await this.getAttachmentPaths(id);
+    const unavailable = () => decodeAttachmentPayload(
+      { code: "attachment_content_unavailable", attachment: metadata },
+      index,
+      limit,
+    );
+    const indexed = paths.filter((entry) => entry.index === index);
+    let path: string | undefined;
+    if (indexed.length > 0) {
+      if (indexed.length !== 1) return unavailable();
+      const candidate = indexed[0]!;
+      if (candidate.filename !== metadata.filename
+        || candidate.content_type !== metadata.content_type
+        || candidate.size !== metadata.size) {
+        return unavailable();
+      }
+      path = candidate.local_path;
+    } else {
+      const legacySanitize = (filename: string) => filename.replace(/[/\\?%*:|"<>]/g, "_");
+      const targetAliases = new Set([metadata.filename, legacySanitize(metadata.filename)]);
+      const matchingMetadata = body!.attachments.filter((entry) => {
+        const aliases = [entry.filename, legacySanitize(entry.filename)];
+        return aliases.some((alias) => targetAliases.has(alias));
+      });
+      const legacyPaths = paths.filter((entry) => {
+        if (entry.index !== undefined) return false;
+        const aliases = [
+          entry.filename,
+          entry.local_path ? basename(entry.local_path) : undefined,
+          entry.s3_url ? basename(entry.s3_url) : undefined,
+        ].filter((alias): alias is string => typeof alias === "string");
+        return aliases.some((alias) => targetAliases.has(alias));
+      });
+      if (matchingMetadata.length !== 1 || matchingMetadata[0] !== metadata || legacyPaths.length !== 1) {
+        return unavailable();
+      }
+      const candidate = legacyPaths[0]!;
+      if ((candidate.content_type && candidate.content_type !== metadata.content_type)
+        || candidate.size !== metadata.size) {
+        return unavailable();
+      }
+      path = candidate.local_path;
+    }
+    if (!path) {
+      return unavailable();
+    }
+    const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+    const file = await openFile(path, fsConstants.O_RDONLY | noFollow);
+    let data: Buffer;
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile()) throw new Error("attachment path is not a regular file");
+      if (stat.size > limit) throw new Error(`attachment exceeds byte limit ${limit}`);
+      data = await file.readFile();
+    } finally {
+      await file.close();
+    }
+    return decodeAttachmentPayload({
+      attachment: {
+        filename: metadata.filename,
+        content_type: metadata.content_type,
+        // Preserve the authenticated/stored declaration so the strict decoder
+        // detects a file that drifted after metadata was recorded.
+        size: metadata.size,
+        content_base64: data.toString("base64"),
+      },
+    }, index, limit);
   }
 
   async listLabelSummaries(opts?: ListLabelSummaryOptions): Promise<LabelSummary[]> {

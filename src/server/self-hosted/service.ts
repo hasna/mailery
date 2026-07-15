@@ -36,6 +36,7 @@ import type { RateLimiter } from "./auth/rate-limit.js";
 import type { AuthMailerConfig } from "./auth/mailer.js";
 import type { SelfHostedKeyStore } from "./keys.js";
 import { canonicalSender } from "../../lib/email-address.js";
+import { normalizeAttachmentByteLimit } from "../../lib/attachment-download.js";
 
 interface ReadyResult {
   ok: boolean;
@@ -843,13 +844,42 @@ export async function handleSelfHostedRequest(
       if (method !== "GET") return json(405, { error: "method not allowed" });
       const auth = await authenticate(deps, req, url, read);
       if (!auth.ok) return auth.response;
-      const resolved = await resolveMessageIdOrError(auth.store, decodeURIComponent(attachmentMatch[1]!));
-      if (!resolved.ok) return resolved.response;
+      // Attachment bytes are the deliberate-download boundary. Unlike ordinary
+      // message reads, this route never resolves prefixes: callers must present
+      // the exact tenant-scoped message id before any attachment lookup.
+      const messageId = decodeURIComponent(attachmentMatch[1]!);
+      const message = await auth.store.getMessage(messageId);
+      if (!message || message.id !== messageId) {
+        return json(404, { error: "message not found", code: "message_not_found" });
+      }
+      let maxBytes: number;
+      try {
+        const rawLimit = url.searchParams.get("max_bytes");
+        maxBytes = normalizeAttachmentByteLimit(rawLimit === null ? undefined : Number(rawLimit));
+      } catch (error) {
+        return json(400, { error: error instanceof Error ? error.message : "invalid attachment byte limit", code: "invalid_attachment_limit" });
+      }
       const attachment = await auth.store.getMessageAttachment(
-        resolved.id,
+        messageId,
         Number(attachmentMatch[2]),
+        maxBytes,
       );
-      return attachment ? json(200, { attachment }) : json(404, { error: "attachment not found" });
+      if (!attachment) return json(404, { error: "attachment not found", code: "attachment_not_found" });
+      if (attachment.state === "content_unavailable") {
+        return json(409, {
+          error: "attachment content is not stored",
+          code: "attachment_content_unavailable",
+          attachment: attachment.attachment,
+        });
+      }
+      if (attachment.state === "invalid") {
+        const tooLarge = /byte limit/i.test(attachment.reason);
+        return json(tooLarge ? 413 : 422, {
+          error: attachment.reason,
+          code: tooLarge ? "attachment_too_large" : "invalid_attachment_payload",
+        });
+      }
+      return json(200, { attachment: attachment.attachment });
     }
 
     // /v1/messages/{id}/raw — mail-view: reconstructed raw MIME for a message.

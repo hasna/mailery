@@ -269,6 +269,37 @@ describe("Emails self-hosted inbound messages", () => {
     ));
     expect(attachment?.status).toBe(200);
     expect((await attachment!.json()).attachment.content_base64).toBe(content);
+    const abbreviated = await handleSelfHostedRequest(d, new Request(
+      `http://svc/v1/messages/${encodeURIComponent(message.id.slice(0, 8))}/attachments/0`,
+      { headers: { "x-api-key": writeToken() } },
+    ));
+    expect(abbreviated?.status).toBe(404);
+    expect((await abbreviated!.json()).code).toBe("message_not_found");
+  });
+
+  test("distinguishes absent content/index and rejects oversized or malformed stored bytes", async () => {
+    const d = deps();
+    const created = await handleSelfHostedRequest(d, post({
+      ...INBOUND,
+      source_id: "attachment-negative-source",
+      attachments: [
+        { filename: "metadata.txt", content_type: "text/plain", size: 5 },
+        { filename: "valid.txt", content_type: "text/plain", size: 5, content_base64: "aGVsbG8=" },
+        { filename: "invalid.txt", content_type: "text/plain", size: 5, content_base64: "not base64" },
+      ],
+    }));
+    const message = (await created!.json()).message;
+    const get = (index: number, suffix = "") => handleSelfHostedRequest(d, new Request(
+      `http://svc/v1/messages/${encodeURIComponent(message.id)}/attachments/${index}${suffix}`,
+      { headers: { "x-api-key": writeToken() } },
+    ));
+
+    const unavailable = await get(0);
+    expect(unavailable?.status).toBe(409);
+    expect((await unavailable!.json()).code).toBe("attachment_content_unavailable");
+    expect((await get(99))?.status).toBe(404);
+    expect((await get(1, "?max_bytes=4"))?.status).toBe(413);
+    expect((await get(2))?.status).toBe(422);
   });
 
   test("outbound ledger-only writes are rejected", async () => {

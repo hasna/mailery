@@ -40,4 +40,32 @@ describe("generated self-hosted SDK identity contract", () => {
     expect(typeof client.updateMembership).toBe("function");
     expect(typeof client.createTenantKey).toBe("function");
   });
+
+  it("serializes the bounded attachment byte limit on the typed SDK operation", async () => {
+    let request: Request | null = null;
+    const client = new EmailsSelfHostClient({
+      baseUrl: "https://emails.example.test",
+      apiKey: "api-key-placeholder",
+      fetch: okFetch((value) => { request = value; }),
+    });
+
+    await client.getMessageAttachment("message/one", 2, { max_bytes: 4096 });
+    expect(request?.url).toBe("https://emails.example.test/v1/messages/message%2Fone/attachments/2?max_bytes=4096");
+    expect(request?.headers.get("x-api-key")).toBe("api-key-placeholder");
+  });
+
+  it("forces redirect rejection so custom authentication is never forwarded", async () => {
+    let redirect: RequestRedirect | undefined;
+    const client = new EmailsSelfHostClient({
+      baseUrl: "https://emails.example.test",
+      apiKey: "api-key-placeholder",
+      fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        redirect = init?.redirect;
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as typeof fetch,
+    });
+
+    await client.getHealth({ redirect: "follow" });
+    expect(redirect).toBe("error");
+  });
 });

@@ -2037,6 +2037,67 @@ const INBOUND_ROUTING_AND_QUARANTINE = defineMigration(
   `,
 );
 
+/**
+ * 0017 — immutable provenance for every successfully routed S3 message.
+ *
+ * Repair must never trust an operator-selected bucket or infer raw-message
+ * identity from attachment metadata. The worker records the canonical bucket,
+ * exact object key, and raw RFC822 SHA-256 against the exact tenant/message row.
+ * Rows cannot be updated; legacy rows acquire provenance only by replay through
+ * the canonical configured ingest bucket.
+ */
+const INBOUND_MESSAGE_SOURCE_PROVENANCE = defineMigration(
+  "0017_inbound_message_source_provenance",
+  `
+  -- The provenance row must bind tenant and message as one identity. Separate
+  -- foreign keys would permit tenant A to name a message owned by tenant B.
+  CREATE UNIQUE INDEX IF NOT EXISTS messages_tenant_id_id_uidx
+    ON messages (tenant_id, id);
+
+  CREATE TABLE IF NOT EXISTS inbound_message_sources (
+    tenant_id       uuid NOT NULL,
+    message_id      text NOT NULL,
+    bucket          text NOT NULL,
+    object_key      text NOT NULL,
+    raw_sha256      text NOT NULL CHECK (raw_sha256 ~ '^[0-9a-f]{64}$'),
+    established_via text NOT NULL CHECK (established_via IN ('normal_ingest', 'canonical_replay')),
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, message_id),
+    UNIQUE (tenant_id, bucket, object_key),
+    FOREIGN KEY (tenant_id, message_id)
+      REFERENCES messages (tenant_id, id) ON DELETE CASCADE
+  );
+
+  CREATE OR REPLACE FUNCTION emails_reject_inbound_source_update()
+  RETURNS trigger LANGUAGE plpgsql AS $$
+  BEGIN
+    IF TG_OP = 'UPDATE' THEN
+      RAISE EXCEPTION 'inbound message source provenance is immutable';
+    END IF;
+    -- A direct delete while the owning message exists would erase provenance.
+    -- The FK's ON DELETE CASCADE remains allowed after the message is removed.
+    IF EXISTS (
+      SELECT 1 FROM messages m
+      WHERE m.tenant_id = OLD.tenant_id AND m.id = OLD.message_id
+    ) THEN
+      RAISE EXCEPTION 'inbound message source provenance cannot be deleted independently';
+    END IF;
+    RETURN OLD;
+  END;
+  $$;
+  DROP TRIGGER IF EXISTS inbound_message_sources_immutable ON inbound_message_sources;
+  CREATE TRIGGER inbound_message_sources_immutable
+    BEFORE UPDATE OR DELETE ON inbound_message_sources
+    FOR EACH ROW EXECUTE FUNCTION emails_reject_inbound_source_update();
+
+  ALTER TABLE inbound_message_sources ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE inbound_message_sources FORCE ROW LEVEL SECURITY;
+  DROP POLICY IF EXISTS inbound_message_sources_tenant_isolation ON inbound_message_sources;
+  CREATE POLICY inbound_message_sources_tenant_isolation ON inbound_message_sources
+    USING (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid);
+  `,
+);
+
 /** All migrations, in order: api-keys table (auth), the core schema, inbound. */
 export function emailsSelfHostedMigrations(): Migration[] {
   const authMigrations = apiKeyMigrations().map((m) => defineMigration(m.id, m.sql));
@@ -2060,5 +2121,6 @@ export function emailsSelfHostedMigrations(): Migration[] {
     MESSAGES_ID_PREFIX_INDEX,
     USER_IDENTITIES_AND_PLATFORM_ADMIN,
     INBOUND_ROUTING_AND_QUARANTINE,
+    INBOUND_MESSAGE_SOURCE_PROVENANCE,
   ];
 }

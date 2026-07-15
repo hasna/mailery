@@ -1,6 +1,6 @@
 {
   "name": "@hasna/emails",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "description": "Local SQLite and self-hosted email management CLI, MCP server, and library",
   "type": "module",
   "repository": {
@@ -31,6 +31,7 @@
     "dashboard/dist",
     "dashboard/index.html",
     "dashboard/open-source.html",
+    "scripts/ensure-private-data-dir.mjs",
     "LICENSE",
     "README.md"
   ],
@@ -51,7 +52,7 @@
     "dev:cli": "bun run src/cli/index.tsx",
     "dev:mcp": "bun run src/mcp/index.ts",
     "dev:serve": "bun run src/server/index.ts",
-    "postinstall": "mkdir -p $HOME/.hasna/emails 2>/dev/null || true"
+    "postinstall": "bun ./scripts/ensure-private-data-dir.mjs"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org",

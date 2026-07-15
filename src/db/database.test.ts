@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getDatabase, closeDatabase, resetDatabase, uuid, now, resolvePartialId, resolvePartialIdOrThrow, listPartialIdMatches, runInTransaction } from "./database.js";
@@ -25,6 +25,53 @@ describe("getDatabase", () => {
     const db1 = getDatabase();
     const db2 = getDatabase();
     expect(db1).toBe(db2);
+  });
+
+  it("creates file-backed databases and SQLite sidecars with private permissions", () => {
+    if (process.platform === "win32") return;
+    const root = mkdtempSync(join(tmpdir(), "emails-db-permissions-"));
+    const path = join(root, "custom", "emails.db");
+    closeDatabase();
+    resetDatabase();
+    process.env["EMAILS_DB_PATH"] = path;
+    try {
+      const db = getDatabase();
+      db.run("CREATE TABLE permission_probe (id INTEGER PRIMARY KEY)");
+      db.run("INSERT INTO permission_probe DEFAULT VALUES");
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      for (const suffix of ["-wal", "-shm"]) {
+        const sidecar = `${path}${suffix}`;
+        expect(existsSync(sidecar)).toBe(true);
+        expect(statSync(sidecar).mode & 0o777).toBe(0o600);
+      }
+      const journal = `${path}-journal`;
+      if (existsSync(journal)) expect(statSync(journal).mode & 0o777).toBe(0o600);
+    } finally {
+      closeDatabase();
+      resetDatabase();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs loose permissions on an existing file-backed database", () => {
+    if (process.platform === "win32") return;
+    const root = mkdtempSync(join(tmpdir(), "emails-db-permissions-repair-"));
+    const path = join(root, "emails.db");
+    closeDatabase();
+    resetDatabase();
+    process.env["EMAILS_DB_PATH"] = path;
+    try {
+      getDatabase();
+      closeDatabase();
+      chmodSync(path, 0o644);
+      resetDatabase();
+      getDatabase();
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    } finally {
+      closeDatabase();
+      resetDatabase();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("creates required tables", () => {

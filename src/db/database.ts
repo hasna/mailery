@@ -1,42 +1,388 @@
 import { Database } from "bun:sqlite";
 // Re-export so all db/lib modules import Database from here instead of bun:sqlite
 export type { Database };
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import {
+  closeSync,
+  constants,
+  copyFileSync,
+  existsSync,
+  fchmodSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  realpathSync,
+  readdirSync,
+  statSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { sqlEmailAddress, sqlEmailDomain } from "./email-address-sql.js";
 
 function isInMemoryDb(path: string): boolean {
-  return path === ":memory:" || path.startsWith("file::memory:");
+  return path === ":memory:";
 }
 
-export function getDataDir(): string {
-  const home = process.env["HOME"] || process.env["USERPROFILE"] || "~";
-  const newDir = join(home, ".hasna", "emails");
-  const oldDir = join(home, ".emails");
+type FileStats = NonNullable<ReturnType<typeof lstatSync>>;
 
-  // Auto-migrate old dir to new location
-  if (existsSync(oldDir) && !existsSync(newDir)) {
-    mkdirSync(newDir, { recursive: true });
-    for (const file of readdirSync(oldDir)) {
-      const oldPath = join(oldDir, file);
-      if (statSync(oldPath).isFile()) {
-        copyFileSync(oldPath, join(newDir, file));
+function isMissingFileError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+function lstatIfExists(path: string): FileStats | null {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (isMissingFileError(error)) return null;
+    throw error;
+  }
+}
+
+function currentUid(): number | null {
+  if (process.platform === "win32" || typeof process.getuid !== "function") return null;
+  return process.getuid();
+}
+
+function assertOwned(stats: FileStats, path: string, kind: string): void {
+  const uid = currentUid();
+  if (uid !== null && stats.uid !== uid) {
+    throw new Error(`Refusing ${kind} at ${path}: it is owned by uid ${stats.uid}, not the current uid ${uid}`);
+  }
+}
+
+function assertSameFile(expected: FileStats, actual: FileStats, path: string): void {
+  if (expected.dev !== actual.dev || expected.ino !== actual.ino) {
+    throw new Error(`Refusing filesystem race at ${path}: the path changed during validation`);
+  }
+}
+
+function directoryChain(path: string): string[] {
+  const chain: string[] = [];
+  let current = resolve(path);
+  while (true) {
+    chain.push(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return chain.reverse();
+}
+
+/**
+ * Resolve the existing portion of a POSIX pathname exactly once, then keep
+ * all missing descendants beneath that canonical directory. This accepts
+ * stable system aliases such as macOS /var -> /private/var without using the
+ * alias again during creation, validation, or SQLite open.
+ */
+function canonicalizeFromExistingAncestor(path: string): string {
+  const resolvedPath = resolve(path);
+  if (process.platform === "win32") return resolvedPath;
+
+  const missingComponents: string[] = [];
+  let existingAncestor = resolvedPath;
+  while (lstatIfExists(existingAncestor) === null) {
+    const parent = dirname(existingAncestor);
+    if (parent === existingAncestor) break;
+    missingComponents.push(basename(existingAncestor));
+    existingAncestor = parent;
+  }
+
+  const canonicalAncestor = realpathSync(existingAncestor);
+  return missingComponents.length === 0
+    ? canonicalAncestor
+    : join(canonicalAncestor, ...missingComponents.reverse());
+}
+
+function canonicalizeDatabasePath(path: string): string {
+  const resolvedPath = resolve(path);
+  if (process.platform === "win32") return resolvedPath;
+
+  // Do not realpath the database artifact itself: it must remain visible to
+  // the O_NOFOLLOW/non-regular-file checks below.
+  return join(canonicalizeFromExistingAncestor(dirname(resolvedPath)), basename(resolvedPath));
+}
+
+function assertStableDirectory(stats: FileStats, path: string, kind: string): void {
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    const fdStats = fstatSync(fd);
+    if (!fdStats.isDirectory()) {
+      throw new Error(`Refusing ${kind} at ${path}: expected a directory`);
+    }
+    assertSameFile(stats, fdStats, path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+      throw new Error(`Refusing ${kind} at ${path}: symbolic links are not allowed`, { cause: error });
+    }
+    throw error;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+/**
+ * Validate every pathname component before SQLite opens a custom path. The
+ * direct parent must belong to this uid and must not be writable by another
+ * uid. Every ancestor must be root-owned or current-user-owned; shared-writable
+ * ancestors are allowed only at a trusted sticky boundary such as /tmp.
+ */
+function ensureSecureDirectoryChain(path: string, directCreateMode: number): void {
+  if (process.platform === "win32") {
+    mkdirSync(path, { recursive: true });
+    return;
+  }
+
+  const uid = currentUid();
+  const chain = directoryChain(path);
+  for (let index = 0; index < chain.length; index += 1) {
+    const component = chain[index]!;
+    const isDirect = index === chain.length - 1;
+    let stats = lstatIfExists(component);
+    let created = false;
+
+    if (!stats) {
+      try {
+        mkdirSync(component, { mode: isDirect ? directCreateMode : 0o700 });
+        created = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
+      stats = lstatSync(component);
+    }
+
+    if (stats.isSymbolicLink()) {
+      throw new Error(`Refusing SQLite directory at ${component}: symbolic links are not allowed`);
+    }
+    if (!stats.isDirectory()) {
+      throw new Error(`Refusing SQLite directory at ${component}: expected a directory`);
+    }
+    assertStableDirectory(stats, component, "SQLite directory");
+
+    if (created) {
+      assertOwned(stats, component, "SQLite directory");
+      let fd: number | null = null;
+      try {
+        fd = openSync(component, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+        fchmodSync(fd, isDirect ? directCreateMode : 0o700);
+        const hardened = fstatSync(fd);
+        assertOwned(hardened, component, "SQLite directory");
+        assertSameFile(stats, hardened, component);
+      } finally {
+        if (fd !== null) closeSync(fd);
+      }
+      stats = lstatSync(component);
+    }
+
+    const mode = Number(stats.mode) & 0o7777;
+    const statsUid = Number(stats.uid);
+    const writableByOthers = (mode & 0o022) !== 0;
+    const sticky = (mode & 0o1000) !== 0;
+    const trustedOwner = uid === null || statsUid === uid || statsUid === 0;
+
+    if (isDirect) {
+      assertOwned(stats, component, "SQLite parent directory");
+      if (writableByOthers) {
+        throw new Error(`Refusing unsafe SQLite parent directory at ${component}: group/world-writable directories are not allowed`);
+      }
+    } else if (writableByOthers && (!sticky || !trustedOwner)) {
+      throw new Error(`Refusing unsafe SQLite ancestor directory at ${component}: shared-writable ancestors must be trusted sticky directories`);
+    }
+
+    // Mode bits are mutable by the owner. A non-root foreign owner can make an
+    // apparently read-only ancestor writable after validation and replace the
+    // next pathname component, so ownership alone makes the ancestor unsafe.
+    if (!isDirect && uid !== null && statsUid !== uid && statsUid !== 0) {
+      throw new Error(`Refusing unsafe SQLite ancestor directory at ${component}: it is owned by foreign uid ${statsUid}`);
+    }
+  }
+}
+
+function ensureSharedOwnedDirectory(path: string): void {
+  ensureSecureDirectoryChain(path, 0o755);
+}
+
+function ensurePrivateOwnedDirectory(path: string): void {
+  if (process.platform === "win32") {
+    mkdirSync(path, { recursive: true });
+    return;
+  }
+
+  if (!lstatIfExists(path)) {
+    try {
+      mkdirSync(path, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
   }
 
-  mkdirSync(newDir, { recursive: true });
+  const pathStats = lstatSync(path);
+  if (pathStats.isSymbolicLink()) {
+    throw new Error(`Refusing app data directory at ${path}: symbolic links are not allowed`);
+  }
+  if (!pathStats.isDirectory()) {
+    throw new Error(`Refusing app data directory at ${path}: expected a directory`);
+  }
+  assertOwned(pathStats, path, "app data directory");
+
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    const fdStats = fstatSync(fd);
+    if (!fdStats.isDirectory()) {
+      throw new Error(`Refusing app data directory at ${path}: expected a directory`);
+    }
+    assertOwned(fdStats, path, "app data directory");
+    assertSameFile(pathStats, fdStats, path);
+    fchmodSync(fd, 0o700);
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+
+  const hardenedStats = lstatSync(path);
+  if (hardenedStats.isSymbolicLink() || !hardenedStats.isDirectory()) {
+    throw new Error(`Refusing app data directory at ${path}: it changed during validation`);
+  }
+  assertOwned(hardenedStats, path, "app data directory");
+  assertSameFile(pathStats, hardenedStats, path);
+  if ((hardenedStats.mode & 0o777) !== 0o700) {
+    throw new Error(`Could not protect app data directory at ${path} with mode 0700`);
+  }
+}
+
+function validateArtifactStats(stats: FileStats, path: string): void {
+  if (stats.isSymbolicLink()) {
+    throw new Error(`Refusing SQLite artifact at ${path}: symbolic links are not allowed`);
+  }
+  if (!stats.isFile()) {
+    throw new Error(`Refusing SQLite artifact at ${path}: expected a regular file`);
+  }
+  assertOwned(stats, path, "SQLite artifact");
+}
+
+function ensurePrivateDatabaseArtifact(path: string, create: boolean): boolean {
+  if (process.platform === "win32") return lstatIfExists(path) !== null;
+
+  const initialStats = lstatIfExists(path);
+  if (!initialStats && !create) return false;
+  if (initialStats) validateArtifactStats(initialStats, path);
+
+  let fd: number | null = null;
+  let fdStats: FileStats;
+  try {
+    fd = openSync(
+      path,
+      constants.O_RDWR
+        | constants.O_NOFOLLOW
+        | constants.O_NONBLOCK
+        | (create ? constants.O_CREAT : 0),
+      0o600,
+    );
+    fdStats = fstatSync(fd);
+    validateArtifactStats(fdStats, path);
+    if (initialStats) assertSameFile(initialStats, fdStats, path);
+    fchmodSync(fd, 0o600);
+    fdStats = fstatSync(fd);
+    validateArtifactStats(fdStats, path);
+    if ((fdStats.mode & 0o777) !== 0o600) {
+      throw new Error(`Could not protect SQLite artifact at ${path} with mode 0600`);
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ELOOP") {
+      throw new Error(`Refusing SQLite artifact at ${path}: symbolic links are not allowed`, { cause: error });
+    }
+    throw error;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+
+  const finalStats = lstatSync(path);
+  validateArtifactStats(finalStats, path);
+  assertSameFile(fdStats!, finalStats, path);
+  if ((finalStats.mode & 0o777) !== 0o600) {
+    throw new Error(`Could not protect SQLite artifact at ${path} with mode 0600`);
+  }
+  return true;
+}
+
+function migrateLegacyDirectory(oldDir: string, newDir: string): void {
+  for (const file of readdirSync(oldDir)) {
+    const oldPath = join(oldDir, file);
+    const oldStats = lstatSync(oldPath);
+    if (oldStats.isSymbolicLink()) {
+      throw new Error(`Refusing legacy data at ${oldPath}: symbolic links are not allowed`);
+    }
+    if (!oldStats.isFile()) continue;
+
+    ensurePrivateDatabaseArtifact(oldPath, false);
+    const newPath = join(newDir, file);
+    const destinationFd = openSync(
+      newPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+      0o600,
+    );
+    closeSync(destinationFd);
+    copyFileSync(oldPath, newPath);
+    ensurePrivateDatabaseArtifact(newPath, false);
+  }
+}
+
+export function getDataDir(): string {
+  const home = process.env["HOME"] || process.env["USERPROFILE"] || homedir();
+
+  if (process.platform === "win32") {
+    const hasnaDir = join(home, ".hasna");
+    const newDir = join(hasnaDir, "emails");
+    const oldDir = join(home, ".emails");
+    // Keep Windows behavior non-breaking; POSIX ownership and mode bits do not
+    // have the same security meaning there.
+    if (existsSync(oldDir) && !existsSync(newDir)) {
+      mkdirSync(newDir, { recursive: true });
+      for (const file of readdirSync(oldDir)) {
+        const oldPath = join(oldDir, file);
+        if (statSync(oldPath).isFile()) {
+          copyFileSync(oldPath, join(newDir, file));
+        }
+      }
+    }
+    mkdirSync(newDir, { recursive: true });
+    return newDir;
+  }
+
+  // HOME may itself traverse a stable system alias. Canonicalize only HOME;
+  // .hasna and emails stay appended and therefore cannot be symlinked.
+  const canonicalHome = canonicalizeFromExistingAncestor(home);
+  const hasnaDir = join(canonicalHome, ".hasna");
+  const newDir = join(hasnaDir, "emails");
+  const oldDir = join(canonicalHome, ".emails");
+
+  ensureSharedOwnedDirectory(hasnaDir);
+  const shouldInspectLegacy = lstatIfExists(newDir) === null;
+  const oldStats = shouldInspectLegacy ? lstatIfExists(oldDir) : null;
+  ensurePrivateOwnedDirectory(newDir);
+  if (oldStats) {
+    ensurePrivateOwnedDirectory(oldDir);
+    migrateLegacyDirectory(oldDir, newDir);
+  }
+
   return newDir;
 }
 
 function getDbPath(): string {
   // 1. Environment variable override (new)
   if (process.env["HASNA_EMAILS_DB_PATH"]) {
-    return process.env["HASNA_EMAILS_DB_PATH"];
+    const path = process.env["HASNA_EMAILS_DB_PATH"];
+    return isInMemoryDb(path) || process.platform === "win32"
+      ? path
+      : canonicalizeDatabasePath(path);
   }
   // 2. Environment variable override (backward compat, used for tests)
   if (process.env["EMAILS_DB_PATH"]) {
-    return process.env["EMAILS_DB_PATH"];
+    const path = process.env["EMAILS_DB_PATH"];
+    return isInMemoryDb(path) || process.platform === "win32"
+      ? path
+      : canonicalizeDatabasePath(path);
   }
   // 3. Default: ~/.hasna/emails/emails.db
   return join(getDataDir(), "emails.db");
@@ -58,8 +404,16 @@ export function isDatabaseOpen(): boolean {
 function ensureDir(filePath: string): void {
   if (isInMemoryDb(filePath)) return;
   const dir = dirname(resolve(filePath));
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+  ensureSecureDirectoryChain(dir, 0o700);
+}
+
+const DATABASE_SIDECAR_SUFFIXES = ["-wal", "-shm", "-journal"] as const;
+
+function ensurePrivateDatabaseArtifacts(filePath: string, createDatabase: boolean): void {
+  if (isInMemoryDb(filePath) || process.platform === "win32") return;
+  ensurePrivateDatabaseArtifact(filePath, createDatabase);
+  for (const suffix of DATABASE_SIDECAR_SUFFIXES) {
+    ensurePrivateDatabaseArtifact(`${filePath}${suffix}`, false);
   }
 }
 
@@ -1942,18 +2296,36 @@ let _db: Database | null = null;
 export function getDatabase(dbPath?: string): Database {
   if (_db) return _db;
 
-  const path = dbPath || getDbPath();
+  const requestedPath = dbPath || getDbPath();
+  // Use the same normalized pathname for validation, private pre-creation,
+  // and SQLite so lexical `..` segments cannot reintroduce an unchecked path.
+  const path = isInMemoryDb(requestedPath)
+    ? requestedPath
+    : process.platform === "win32"
+      ? resolve(requestedPath)
+      // getDbPath already returns the one-time canonical POSIX path. An
+      // explicit argument has not crossed that boundary yet.
+      : dbPath
+        ? canonicalizeDatabasePath(requestedPath)
+        : requestedPath;
   ensureDir(path);
+  ensurePrivateDatabaseArtifacts(path, true);
 
-  _db = new Database(path);
+  const db = new Database(path);
+  try {
+    db.run("PRAGMA journal_mode = WAL");
+    db.run("PRAGMA busy_timeout = 5000");
+    db.run("PRAGMA foreign_keys = ON");
 
-  _db.run("PRAGMA journal_mode = WAL");
-  _db.run("PRAGMA busy_timeout = 5000");
-  _db.run("PRAGMA foreign_keys = ON");
+    runMigrations(db);
+    ensurePrivateDatabaseArtifacts(path, false);
 
-  runMigrations(_db);
-
-  return _db;
+    _db = db;
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 }
 
 function runMigrations(db: Database): void {

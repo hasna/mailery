@@ -4,6 +4,17 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 repo=$(CDPATH= cd -- "$root/../.." && pwd)
 cd "$root"
+dockerfile="$repo/Dockerfile"
+
+if ! grep -Fq 'ARG BUN_IMAGE=oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0' "$dockerfile"; then
+  echo "self-hosted container must pin the Alpine Bun image digest" >&2
+  exit 1
+fi
+
+if grep -Eiq '(^|[[:space:]])(apt-get|\bdpkg\b|\bglibc\b|\bperl\b|\bsqlite\b|OPENSSL_VERSION)' "$dockerfile"; then
+  echo "self-hosted container contract forbids Debian package tooling and legacy runtime dependencies" >&2
+  exit 1
+fi
 
 if find . -type f \
   ! -path './tests/*' \

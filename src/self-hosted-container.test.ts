@@ -10,19 +10,23 @@ const bundlePath = "/opt/emails/certs/aws-rds-global-bundle.pem";
 const bundleSha256 = "e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9de3c7e3";
 
 describe("self-hosted container TLS contract", () => {
-  test("pins a shared Bun base at the Debian OpenSSL security floor", () => {
+  test("pins a pinned Bun base with minimal Alpine stages", () => {
     expect(dockerfile).toContain(
-      "ARG BUN_IMAGE=oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4",
+      "ARG BUN_IMAGE=oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0",
     );
-    expect(dockerfile).toContain("ARG OPENSSL_VERSION=3.5.6-1~deb13u2");
+    expect(dockerfile).not.toContain("ARG OPENSSL_VERSION=");
     expect(dockerfile).toContain("FROM ${BUN_IMAGE} AS base");
     expect(dockerfile).not.toMatch(/^FROM\s+--platform=/m);
     expect(dockerfile).toContain("FROM base AS dependencies");
     expect(dockerfile).toContain("FROM base AS runtime");
-    expect(dockerfile).toContain('"openssl=${OPENSSL_VERSION}"');
-    expect(dockerfile).toContain('"libssl3t64=${OPENSSL_VERSION}"');
-    expect(dockerfile).toContain('"openssl-provider-legacy=${OPENSSL_VERSION}"');
-    expect(dockerfile).toContain("dpkg-query -W openssl libssl3t64 openssl-provider-legacy");
+    expect(dockerfile).not.toMatch(/apt-get/);
+    expect(dockerfile).not.toMatch(/\bdpkg\b/);
+    expect(dockerfile).not.toMatch(/glibc/);
+    expect(dockerfile).not.toMatch(/\bperl\b/);
+    expect(dockerfile).not.toMatch(/\bsqlite\b/);
+    expect(dockerfile).not.toMatch(/"openssl=\$\{OPENSSL_VERSION\}"/);
+    expect(dockerfile).not.toMatch(/"libssl3t64=\$\{OPENSSL_VERSION\}"/);
+    expect(dockerfile).not.toMatch(/"openssl-provider-legacy=\$\{OPENSSL_VERSION\}"/);
     expect(dockerfile).not.toMatch(/^FROM(?:\s+--platform=\S+)?\s+oven\/bun:(?:1|latest)(?:\s|$)/m);
   });
 

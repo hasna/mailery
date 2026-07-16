@@ -2,22 +2,9 @@
 
 # Reproducible Emails self-hosted runtime. No deployment or account defaults are
 # embedded in the image; the operator supplies Postgres, auth, and provider config.
-ARG BUN_IMAGE=oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4
-ARG OPENSSL_VERSION=3.5.6-1~deb13u2
+ARG BUN_IMAGE=oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0
 
 FROM ${BUN_IMAGE} AS base
-ARG OPENSSL_VERSION
-# Apply Debian's fixed OpenSSL source package in one shared base so dependency
-# and runtime stages cannot drift. Exact pins and the assertion fail closed when
-# a mirror is stale or provides an incomplete security update.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-      "openssl=${OPENSSL_VERSION}" \
-      "libssl3t64=${OPENSSL_VERSION}" \
-      "openssl-provider-legacy=${OPENSSL_VERSION}" \
-    && dpkg-query -W openssl libssl3t64 openssl-provider-legacy \
-      | awk -v expected="${OPENSSL_VERSION}" '$2 != expected { exit 1 } END { if (NR != 3) exit 1 }' \
-    && rm -rf /var/lib/apt/lists/*
 
 FROM base AS dependencies
 WORKDIR /app

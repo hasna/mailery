@@ -60,7 +60,7 @@ for required_copy in \
   "COPY --chown=1000:1000 --from=build /app/bun.lock /app/bun.lock" \
   "COPY --chown=1000:1000 --from=build /app/tsconfig.json /app/tsconfig.json" \
   "COPY --chown=1000:1000 --from=build /app/src ./src" \
-  "COPY --from=runtime-files /runtime/home/bun /home/bun" \
+  "COPY --from=runtime-files /runtime/home/bun/.hasna/emails /home/bun/.hasna/emails" \
   "COPY --from=runtime-files /runtime/app/data /app/data"; do
   if ! grep -Fq "$required_copy" "$dockerfile"; then
     echo "missing required scratch runtime copy: $required_copy" >&2

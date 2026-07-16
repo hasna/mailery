@@ -60,7 +60,7 @@ COPY --from=runtime-files /runtime/usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
 COPY --from=runtime-files /runtime/usr/lib/libstdc++.so.6* /usr/lib/
 COPY --from=runtime-files /runtime/opt/emails/certs/aws-rds-global-bundle.pem /opt/emails/certs/aws-rds-global-bundle.pem
 COPY --from=runtime-files /runtime/tmp /tmp
-COPY --from=runtime-files /runtime/home/bun /home/bun
+COPY --from=runtime-files /runtime/home/bun/.hasna/emails /home/bun/.hasna/emails
 COPY --from=runtime-files /runtime/app/data /app/data
 COPY --chown=1000:1000 --from=build /app/node_modules ./node_modules
 COPY --chown=1000:1000 --from=build /app/package.json /app/package.json

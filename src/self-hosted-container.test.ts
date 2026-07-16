@@ -49,7 +49,9 @@ describe("self-hosted container TLS contract", () => {
     expect(dockerfile).toContain("COPY --chown=1000:1000 --from=build /app/bun.lock /app/bun.lock");
     expect(dockerfile).toContain("COPY --chown=1000:1000 --from=build /app/tsconfig.json /app/tsconfig.json");
     expect(dockerfile).toContain("COPY --chown=1000:1000 --from=build /app/src ./src");
-    expect(dockerfile).toContain("COPY --from=runtime-files /runtime/home/bun /home/bun");
+    expect(dockerfile).toContain(
+      "COPY --from=runtime-files /runtime/home/bun/.hasna/emails /home/bun/.hasna/emails",
+    );
     expect(dockerfile).toContain("COPY --from=runtime-files /runtime/app/data /app/data");
   });
 

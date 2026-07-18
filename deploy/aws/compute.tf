@@ -107,7 +107,7 @@ resource "aws_ecs_task_definition" "api" {
     essential              = true
     user                   = "bun"
     readonlyRootFilesystem = true
-    command                = ["bun", "src/server/index.ts"]
+    command                = ["src/server/index.ts"]
     stopTimeout            = 120
     environment            = local.api_environment
     secrets                = [local.database_secret, local.signing_secret]
@@ -124,7 +124,7 @@ resource "aws_ecs_task_definition" "api" {
       protocol      = "tcp"
     }]
     healthCheck = {
-      command     = ["CMD-SHELL", "bun -e \"const r=await fetch('http://127.0.0.1:${local.api_port}/ready');process.exit(r.ok?0:1)\""]
+      command     = ["CMD", "/usr/local/bin/bun", "-e", "const port=Number(process.env.PORT||8080);const r=await fetch('http://127.0.0.1:'+port+'/ready');process.exit(r.ok?0:1)"]
       interval    = 30
       timeout     = 5
       retries     = 3
@@ -163,7 +163,7 @@ resource "aws_ecs_task_definition" "worker" {
     essential              = true
     user                   = "bun"
     readonlyRootFilesystem = true
-    command                = ["bun", "src/server/index.ts", "ingest-worker"]
+    command                = ["src/server/index.ts", "ingest-worker"]
     stopTimeout            = 120
     environment            = local.worker_environment
     secrets                = [local.database_secret]
@@ -206,7 +206,7 @@ resource "aws_ecs_task_definition" "migration" {
     essential              = true
     user                   = "bun"
     readonlyRootFilesystem = true
-    command                = ["bun", "src/cli/index.tsx", "db", "migrate"]
+    command                = ["src/cli/index.tsx", "db", "migrate"]
     environment            = local.common_environment
     secrets                = [local.migration_database_secret]
     linuxParameters        = { initProcessEnabled = true }

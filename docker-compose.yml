@@ -31,7 +31,7 @@ services:
         condition: service_healthy
       emails-migrate:
         condition: service_completed_successfully
-    command: ["bun", "src/server/index.ts"]
+    command: ["src/server/index.ts"]
 
   emails-migrate:
     build:
@@ -43,7 +43,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    command: ["bun", "src/cli/index.tsx", "db", "migrate"]
+    command: ["src/cli/index.tsx", "db", "migrate"]
     restart: "no"
 
   db:

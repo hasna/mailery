@@ -4,6 +4,158 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 repo=$(CDPATH= cd -- "$root/../.." && pwd)
 cd "$root"
+dockerfile="$repo/Dockerfile"
+
+if ! grep -Fq 'ARG BUN_IMAGE=oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0' "$dockerfile"; then
+  echo "self-hosted container must pin the Alpine Bun image digest" >&2
+  exit 1
+fi
+
+if grep -Eiq '(^|[[:space:]])(apt-get|\bdpkg\b|\bglibc\b|\bperl\b|\bsqlite\b|OPENSSL_VERSION)' "$dockerfile"; then
+  echo "self-hosted container contract forbids Debian package tooling and legacy runtime dependencies" >&2
+  exit 1
+fi
+
+if ! grep -Fxq 'FROM scratch' "$dockerfile"; then
+  echo "self-hosted container must end in a scratch runtime" >&2
+  exit 1
+fi
+
+if grep -Eq '^FROM[[:space:]]+base[[:space:]]+AS[[:space:]]+runtime[[:space:]]*$' "$dockerfile"; then
+  echo "self-hosted runtime must not keep a non-scratch intermediate final runtime stage" >&2
+  exit 1
+fi
+
+if grep -Fq 'locale-archive' "$dockerfile"; then
+  echo "self-hosted container may not include locale fallback copy steps" >&2
+  exit 1
+fi
+
+if grep -Fq '|| true' "$dockerfile"; then
+  echo "self-hosted container may not contain permissive fallback copy commands" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'PATH=/usr/local/bin' "$dockerfile"; then
+  echo "self-hosted runtime must include /usr/local/bin on PATH" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'ln -sf bun /runtime/usr/local/bin/bunx' "$dockerfile"; then
+  echo "self-hosted runtime must expose bunx shim" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'ln -sf bun /runtime/usr/local/bin/node' "$dockerfile"; then
+  echo "self-hosted runtime must expose node shim" >&2
+  exit 1
+fi
+
+expected_scratch_copies='COPY --from=runtime-files /runtime/ /
+COPY --chown=1000:1000 --from=build /app/node_modules /app/node_modules
+COPY --chown=1000:1000 --from=build /app/package.json /app/package.json
+COPY --chown=1000:1000 --from=build /app/src /app/src'
+actual_scratch_copies=$(awk '/^FROM scratch$/ { scratch = 1; next } scratch && /^COPY / { print }' "$dockerfile")
+if [ "$actual_scratch_copies" != "$expected_scratch_copies" ]; then
+  echo "scratch runtime COPY instructions must match the exact runtime and build allowlist" >&2
+  exit 1
+fi
+
+for image_metadata_contract in \
+  'ARG VERSION=dev' \
+  'ARG REVISION=unknown' \
+  'org.opencontainers.image.source="https://github.com/hasna/emails"' \
+  'org.opencontainers.image.version="$VERSION"' \
+  'org.opencontainers.image.revision="$REVISION"'; do
+  if ! grep -Fq "$image_metadata_contract" "$dockerfile"; then
+    echo "missing immutable image metadata contract: $image_metadata_contract" >&2
+    exit 1
+  fi
+done
+
+runtime_files_stage=$(awk '/^FROM base AS runtime-files$/ { runtime = 1 } /^FROM scratch$/ { runtime = 0 } runtime { print }' "$dockerfile")
+
+for scanner_inventory_contract in \
+  'cp -a /etc/alpine-release /runtime/etc/alpine-release' \
+  'order[1] = "libgcc"' \
+  'order[2] = "libstdc++"' \
+  'order[3] = "musl"' \
+  'expected["libgcc"] = 1' \
+  'expected["libstdc++"] = 1' \
+  'expected["musl"] = 1' \
+  'if (name in records)' \
+  'if (!(name in records))' \
+  'if (failed) exit 1' \
+  'printf "%s\n\n", records[name]' \
+  '/lib/apk/db/installed > /runtime/lib/apk/db/installed'; do
+  if ! printf '%s\n' "$runtime_files_stage" | grep -Fq "$scanner_inventory_contract"; then
+    echo "scratch runtime must preserve its exact Alpine scanner inventory: $scanner_inventory_contract" >&2
+    exit 1
+  fi
+done
+
+if printf '%s\n' "$runtime_files_stage" | grep -Fq 'cp -a /lib/apk/db/installed /runtime/lib/apk/db/installed'; then
+  echo "scratch runtime scanner inventory must exclude packages absent from the final image" >&2
+  exit 1
+fi
+
+for exact_openssl_revision in \
+  "'libcrypto3=3.5.7-r0'" \
+  "'libssl3=3.5.7-r0'" \
+  "apk info --installed 'libcrypto3=3.5.7-r0'" \
+  "apk info --installed 'libssl3=3.5.7-r0'"; do
+  if ! grep -Fq "$exact_openssl_revision" "$dockerfile"; then
+    echo "patched base must install and verify exact OpenSSL revisions: $exact_openssl_revision" >&2
+    exit 1
+  fi
+done
+
+if grep -Fq 'apk info --exists' "$dockerfile"; then
+  echo "patched base must not use the unsupported apk info --exists flag" >&2
+  exit 1
+fi
+
+if grep -Eq 'lib(crypto|ssl)3>=' "$dockerfile"; then
+  echo "patched base OpenSSL constraints must be exact, not minimum floors" >&2
+  exit 1
+fi
+
+for runtime_identity in \
+  "/runtime/home/bun/.hasna/emails /runtime/etc" \
+  "printf '%s\\n' 'bun:x:1000:1000:Bun:/home/bun:/sbin/nologin' > /runtime/etc/passwd" \
+  "printf '%s\\n' 'bun:x:1000:' > /runtime/etc/group" \
+  "chmod 0644 /runtime/etc/passwd /runtime/etc/group"; do
+  if ! printf '%s\n' "$runtime_files_stage" | grep -Fq "$runtime_identity"; then
+    echo "missing required scratch runtime identity contract: $runtime_identity" >&2
+    exit 1
+  fi
+done
+
+if ! grep -Fq 'chmod 1777 /runtime/tmp' "$dockerfile" || ! grep -Fq 'chmod 0700 /runtime/home/bun/.hasna/emails' "$dockerfile"; then
+  echo "self-hosted runtime must harden tmp and private state permissions" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'VOLUME ["/tmp"]' "$dockerfile"; then
+  echo "ECS /tmp mount must inherit image permissions through a Dockerfile VOLUME" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'chown -R 1000:1000 /runtime/home/bun /runtime/home/bun/.hasna/emails /runtime/app /runtime/app/data' "$dockerfile"; then
+  echo "self-hosted runtime must chown runtime ownership for bun home and app data" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'USER 1000:1000' "$dockerfile"; then
+  echo "self-hosted container must run as numeric user 1000:1000" >&2
+  exit 1
+fi
+
+if grep -Eq '"?command"?[[:space:]]*[:=][[:space:]]*\[[[:space:]]*"bun"' \
+  "$root/compute.tf" "$repo/docker-compose.yml" "$repo/docs/DEPLOYMENT_CUTOVER.md"; then
+  echo "container command overrides must not repeat the Bun image entrypoint" >&2
+  exit 1
+fi
 
 if find . -type f \
   ! -path './tests/*' \
@@ -391,6 +543,11 @@ source_package_line="$(grep -nF 'git -C "$SOURCE_CHECKOUT" show "$RELEASE_COMMIT
 source_archive_line="$(grep -nF 'git -C "$SOURCE_CHECKOUT" archive --format=zip "$RELEASE_COMMIT"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 service_preflight_line="$(grep -nF 'SERVICE_PREFLIGHT_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 image_details_line="$(grep -nF 'IMAGE_DETAILS_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+image_report_gate_line="$(grep -nF '.ArtifactName == $image_reference' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+image_report_digest_line="$(grep -nF '.Metadata.RepoDigests | type == "array" and index($image_reference) != null' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+image_severity_gate_line="$(grep -nF 'select(.Severity == "CRITICAL" or .Severity == "HIGH")' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+image_sbom_gate_line="$(grep -nF '.bomFormat == "CycloneDX"' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
+image_sbom_digest_line="$(grep -nF 'aquasecurity:trivy:RepoDigest' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 image_config_line="$(grep -nF 'IMAGE_CONFIG_JSON=' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 image_metadata_gate_line="$(grep -nF '.config.Labels["org.opencontainers.image.revision"] == $release_commit' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
 queue_identity_line="$(grep -nF 'deadLetterTargetArn == $dlq_arn' "$repo/docs/DEPLOYMENT_CUTOVER.md" | head -1 | cut -d: -f1)"
@@ -405,6 +562,11 @@ for safety_line in \
   "$source_archive_line" \
   "$service_preflight_line" \
   "$image_details_line" \
+  "$image_report_gate_line" \
+  "$image_report_digest_line" \
+  "$image_severity_gate_line" \
+  "$image_sbom_gate_line" \
+  "$image_sbom_digest_line" \
   "$image_config_line" \
   "$image_metadata_gate_line" \
   "$queue_identity_line" \
@@ -417,6 +579,43 @@ for safety_line in \
     echo "0017 reviewed-topology preflight must complete before every executable planning or mutation path" >&2
     exit 1
   }
+done
+
+if ! grep -Fq './scripts/container-runtime-smoke.sh' "$repo/.github/workflows/ci.yml"; then
+  echo "CI must build and exercise the scratch runtime image" >&2
+  exit 1
+fi
+
+for scanner_contract in \
+  'aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25' \
+  'BUN_UPSTREAM_IMAGE: oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0' \
+  'CONTAINER_RUNTIME_PATCHED_BASE_IMAGE: hasna-emails-patched-bun-base:ci' \
+  'format: json' \
+  'format: cyclonedx' \
+  'list-all-pkgs: "true"' \
+  '.Metadata.OS.Family == "alpine"' \
+  'select(.Class == "os-pkgs") | .Packages[]?' \
+  'select(.Class == "os-pkgs") | .Packages[]? | .Name] | unique | sort) == ["libgcc", "libstdc++", "musl"]' \
+  'select(.Class == "lang-pkgs") | .Packages[]?' \
+  'trivy-patched-bun-base-report.json' \
+  'image-ref: ${{ env.CONTAINER_RUNTIME_PATCHED_BASE_IMAGE }}' \
+  'severity: CRITICAL,HIGH' \
+  'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'; do
+  if ! grep -Fq "$scanner_contract" "$repo/.github/workflows/ci.yml"; then
+    echo "missing pinned scanner/SBOM evidence contract: $scanner_contract" >&2
+    exit 1
+  fi
+done
+
+for exact_image_evidence in \
+  'IMAGE_SECURITY_REPORT' \
+  'IMAGE_SECURITY_REPORT_SHA256' \
+  'IMAGE_SBOM' \
+  'IMAGE_SBOM_SHA256'; do
+  if ! grep -Fq "$exact_image_evidence" "$repo/docs/DEPLOYMENT_CUTOVER.md"; then
+    echo "cutover must require exact-image scanner and SBOM evidence: $exact_image_evidence" >&2
+    exit 1
+  fi
 done
 
 if ! grep -Fq 'test "$FINAL_DLQ_VISIBLE" = "0"' "$repo/docs/DEPLOYMENT_CUTOVER.md" || \

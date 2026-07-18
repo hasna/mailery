@@ -168,18 +168,18 @@ run "dormant_by_default" {
   }
 
   assert {
-    condition     = jsonencode(jsondecode(aws_ecs_task_definition.api.container_definitions)[0].command) == jsonencode(["bun", "src/server/index.ts"])
-    error_message = "The API command must use the image-native Emails server entrypoint."
+    condition     = jsonencode(jsondecode(aws_ecs_task_definition.api.container_definitions)[0].command) == jsonencode(["src/server/index.ts"])
+    error_message = "The API command must supply only arguments for the image-native Bun entrypoint."
   }
 
   assert {
-    condition     = jsonencode(jsondecode(aws_ecs_task_definition.worker.container_definitions)[0].command) == jsonencode(["bun", "src/server/index.ts", "ingest-worker"])
-    error_message = "The worker command must use the image-native Emails server entrypoint."
+    condition     = jsonencode(jsondecode(aws_ecs_task_definition.worker.container_definitions)[0].command) == jsonencode(["src/server/index.ts", "ingest-worker"])
+    error_message = "The worker command must supply only arguments for the image-native Bun entrypoint."
   }
 
   assert {
-    condition     = jsonencode(jsondecode(aws_ecs_task_definition.migration.container_definitions)[0].command) == jsonencode(["bun", "src/cli/index.tsx", "db", "migrate"])
-    error_message = "The migration command must use the image-native Emails CLI entrypoint."
+    condition     = jsonencode(jsondecode(aws_ecs_task_definition.migration.container_definitions)[0].command) == jsonencode(["src/cli/index.tsx", "db", "migrate"])
+    error_message = "The migration command must supply only arguments for the image-native Bun entrypoint."
   }
 
   assert {
@@ -241,8 +241,13 @@ run "dormant_by_default" {
   }
 
   assert {
-    condition     = strcontains(jsondecode(aws_ecs_task_definition.api.container_definitions)[0].healthCheck.command[1], "bun -e") && strcontains(jsondecode(aws_ecs_task_definition.api.container_definitions)[0].healthCheck.command[1], "/ready")
-    error_message = "The API health check must use image-native Bun against /ready."
+    condition = (
+      jsondecode(aws_ecs_task_definition.api.container_definitions)[0].healthCheck.command[0] == "CMD" &&
+      jsondecode(aws_ecs_task_definition.api.container_definitions)[0].healthCheck.command[1] == "/usr/local/bin/bun" &&
+      jsondecode(aws_ecs_task_definition.api.container_definitions)[0].healthCheck.command[2] == "-e" &&
+      strcontains(jsondecode(aws_ecs_task_definition.api.container_definitions)[0].healthCheck.command[3], "/ready")
+    )
+    error_message = "The API health check must invoke image-native Bun directly against /ready without a shell."
   }
 
   assert {

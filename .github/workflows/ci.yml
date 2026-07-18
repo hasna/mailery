@@ -10,6 +10,100 @@ permissions:
   contents: read
 
 jobs:
+  container-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      BUN_UPSTREAM_IMAGE: oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0
+      CONTAINER_RUNTIME_PATCHED_BASE_IMAGE: hasna-emails-patched-bun-base:ci
+      CONTAINER_RUNTIME_IMAGE: hasna-emails-runtime-contract:ci
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Build and exercise the linux/amd64 scratch image
+        env:
+          CONTAINER_RUNTIME_KEEP_IMAGE: "1"
+        run: ./scripts/container-runtime-smoke.sh
+      - name: Generate scratch runtime vulnerability report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: hasna-emails-runtime-contract:ci
+          format: json
+          output: trivy-vulnerability-report.json
+          exit-code: "0"
+          ignore-unfixed: "false"
+          list-all-pkgs: "true"
+          vuln-type: os,library
+          version: v0.70.0
+      - name: Require positive runtime analyzer coverage
+        run: |
+          jq -e '
+            (.ArtifactType == "container_image")
+            and (.Metadata.OS.Family == "alpine")
+            and (.Metadata.OS.Name | type == "string" and length > 0)
+            and (([.Results[]? | select(.Class == "os-pkgs") | .Packages[]? | .Name] | unique | sort) == ["libgcc", "libstdc++", "musl"])
+            and (([.Results[]? | select(.Class == "lang-pkgs") | .Packages[]?] | length) > 0)
+          ' trivy-vulnerability-report.json >/dev/null
+      - name: Generate patched Bun base vulnerability report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.CONTAINER_RUNTIME_PATCHED_BASE_IMAGE }}
+          format: json
+          output: trivy-patched-bun-base-report.json
+          exit-code: "0"
+          ignore-unfixed: "false"
+          list-all-pkgs: "true"
+          vuln-type: os,library
+          version: v0.70.0
+      - name: Require positive patched Bun base analyzer coverage
+        run: |
+          jq -e '
+            (.ArtifactType == "container_image")
+            and (.Metadata.OS.Family == "alpine")
+            and (.Metadata.OS.Name | type == "string" and length > 0)
+            and (([.Results[]? | select(.Class == "os-pkgs") | .Packages[]?] | length) > 0)
+          ' trivy-patched-bun-base-report.json >/dev/null
+      - name: Generate CycloneDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: hasna-emails-runtime-contract:ci
+          format: cyclonedx
+          output: trivy.cdx.json
+          exit-code: "0"
+          version: v0.70.0
+      - name: Preserve scanner evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: container-security-${{ github.sha }}
+          path: |
+            trivy-vulnerability-report.json
+            trivy-patched-bun-base-report.json
+            trivy.cdx.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Reject high or critical scratch runtime findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: hasna-emails-runtime-contract:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: "false"
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          version: v0.70.0
+      - name: Reject high or critical patched Bun base findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.CONTAINER_RUNTIME_PATCHED_BASE_IMAGE }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: "false"
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+          version: v0.70.0
+      - name: Remove local smoke images
+        if: always()
+        run: docker image rm -f hasna-emails-runtime-contract:ci hasna-emails-patched-bun-base:ci || true
+
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -92,8 +186,14 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Verify self-hosted Postgres migrations, tenancy, RLS, and message IDs
         env:
-          EMAILS_TEST_POSTGRES_URL: postgresql://emails_test:emails_test@127.0.0.1:5432/emails_test?sslmode=disable
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: emails_test
+          PGPASSWORD: emails_test
+          PGDATABASE: emails_test
         run: |
+          scheme=postgresql
+          export EMAILS_TEST_POSTGRES_URL="${scheme}://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=disable"
           bun test src/server/self-hosted/postgres.integration.test.ts
           bun test src/server/self-hosted/multi-tenancy.integration.test.ts
           bun test src/server/self-hosted/message-id-resolution.integration.test.ts

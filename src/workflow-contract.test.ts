@@ -24,4 +24,32 @@ describe("repository workflow safety", () => {
     expect(ci.match(/bun-version:\s*1\.3\.14/g)).toHaveLength(2);
     expect(ci).not.toContain("bun-version: 1.3.13");
   });
+
+  it("scans the locally patched Bun base without weakening either vulnerability gate", () => {
+    const ci = readFileSync(join(workflowDir, "ci.yml"), "utf8");
+    expect(ci).toContain(
+      "BUN_UPSTREAM_IMAGE: oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0",
+    );
+    expect(ci).toContain(
+      "CONTAINER_RUNTIME_PATCHED_BASE_IMAGE: hasna-emails-patched-bun-base:ci",
+    );
+    expect(ci.match(/image-ref: \$\{\{ env\.CONTAINER_RUNTIME_PATCHED_BASE_IMAGE \}\}/g)).toHaveLength(2);
+    expect(ci).not.toContain("image-ref: ${{ env.BUN_UPSTREAM_IMAGE }}");
+    expect(ci).toContain("trivy-patched-bun-base-report.json");
+    expect(ci).toContain(
+      'and (([.Results[]? | select(.Class == "os-pkgs") | .Packages[]? | .Name] | unique | sort) == ["libgcc", "libstdc++", "musl"])',
+    );
+    expect(ci).toContain(
+      'and (([.Results[]? | select(.Class == "lang-pkgs") | .Packages[]?] | length) > 0)',
+    );
+    expect(
+      ci.match(/and \(\(\[\.Results\[\]\? \| select\(\.Class == "os-pkgs"\) \| \.Packages\[\]\?\] \| length\) > 0\)/g),
+    ).toHaveLength(1);
+    expect(ci.match(/severity: CRITICAL,HIGH/g)).toHaveLength(2);
+    expect(ci.match(/ignore-unfixed: "false"/g)).toHaveLength(4);
+    expect(ci).not.toMatch(/ignorefile|skip-files|skip-dirs|trivyignores|vex/i);
+    expect(ci).toContain(
+      "docker image rm -f hasna-emails-runtime-contract:ci hasna-emails-patched-bun-base:ci || true",
+    );
+  });
 });

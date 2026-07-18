@@ -19,7 +19,7 @@ export interface MessageListItem { "id": string; "direction": string; "from_addr
 
 export interface Message { "id": string; "direction": string; "from_addr": string; "to_addrs": Array<string>; "cc_addrs"?: Array<string>; "subject"?: string | null; "body_text"?: string | null; "body_html"?: string | null; "status": string; "provider_message_id"?: string | null; "message_id"?: string | null; "in_reply_to"?: string | null; "received_at"?: string | null; "is_read"?: boolean; "is_starred"?: boolean; "labels"?: Array<string>; "headers"?: Record<string, unknown>; "attachments"?: Array<Record<string, unknown>>; "source_id"?: string | null; "send_state"?: string; "send_started_at"?: string | null; "created_at": string; "updated_at": string }
 
-export interface SendIntentMessage { "id": string; "send_state": "pending" | "blocked" | "cancelled" | "sending" | "sent" | "uncertain" }
+export interface SendIntentMessage { "id": string; "send_state": "none" | "pending" | "blocked" | "cancelled" | "sending" | "sent" | "uncertain" }
 
 export interface SendIntentLookup { "found": boolean; "tombstoned": boolean; "reconciliation_required": boolean; "message": SendIntentMessage | null }
 
@@ -46,7 +46,7 @@ export interface EmailsSelfHostClientOptions {
   headers?: Record<string, string>;
 }
 
-export type SendIntentRecoveryState = "blocked" | "cancelled" | "pending" | "sending" | "sent" | "uncertain";
+export type SendIntentRecoveryState = "blocked" | "cancelled" | "none" | "pending" | "sending" | "sent" | "uncertain";
 
 export interface SendIntentMessageProjection {
   id: string;
@@ -55,7 +55,7 @@ export interface SendIntentMessageProjection {
 
 const SEND_INTENT_MESSAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SEND_INTENT_RECOVERY_STATES = new Set<SendIntentRecoveryState>([
-  "blocked", "cancelled", "pending", "sending", "sent", "uncertain",
+  "blocked", "cancelled", "none", "pending", "sending", "sent", "uncertain",
 ]);
 
 function parseSendIntentMessage(body: unknown): SendIntentMessageProjection | undefined {

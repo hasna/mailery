@@ -151,7 +151,7 @@ describe("self-hosted OpenAPI identity and authorization contract", () => {
         id: { type: "string" },
         send_state: {
           type: "string",
-          enum: ["pending", "blocked", "cancelled", "sending", "sent", "uncertain"],
+          enum: ["none", "pending", "blocked", "cancelled", "sending", "sent", "uncertain"],
         },
       },
     });

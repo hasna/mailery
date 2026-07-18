@@ -93,7 +93,7 @@ describe("generated self-hosted SDK identity contract", () => {
   it("generates the bounded recovery-visible send-state union", () => {
     const generated = readFileSync(new URL("./selfhost.ts", import.meta.url), "utf8");
     expect(generated).toContain(
-      `export interface SendIntentMessage { "id": string; "send_state": "pending" | "blocked" | "cancelled" | "sending" | "sent" | "uncertain" }`,
+      `export interface SendIntentMessage { "id": string; "send_state": "none" | "pending" | "blocked" | "cancelled" | "sending" | "sent" | "uncertain" }`,
     );
   });
 
@@ -184,6 +184,32 @@ describe("generated self-hosted SDK identity contract", () => {
       expect((error as ApiError).sendIntentMessage).toEqual({
         id: exactMessageId,
         send_state: "pending",
+      });
+    }
+  });
+
+  it("preserves legacy none-state keyed intents for reconciliation", async () => {
+    const exactMessageId = "12345678-1234-4234-8234-123456789abc";
+    const client = new EmailsSelfHostClient({
+      baseUrl: "https://emails.example.test",
+      apiKey: "api-key-placeholder",
+      fetch: (async () => new Response(JSON.stringify({
+        error: "durable send-intent ledger rows cannot be deleted",
+        retry_safe: false,
+        message: { id: exactMessageId, send_state: "none" },
+      }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      })) as typeof fetch,
+    });
+    try {
+      await client.deleteMessage(exactMessageId);
+      throw new Error("expected ApiError");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).sendIntentMessage).toEqual({
+        id: exactMessageId,
+        send_state: "none",
       });
     }
   });

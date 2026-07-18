@@ -1388,7 +1388,7 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           id: { type: "string" },
           send_state: {
             type: "string",
-            enum: ["pending", "blocked", "cancelled", "sending", "sent", "uncertain"],
+            enum: ["none", "pending", "blocked", "cancelled", "sending", "sent", "uncertain"],
           },
         },
         required: ["id", "send_state"],

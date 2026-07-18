@@ -165,6 +165,21 @@ describe("self-hosted container TLS contract", () => {
     expect(readinessLoop).not.toContain('--network "container:$container"');
   });
 
+  test("mounts a private writable SQLite directory for the read-only local runtime", () => {
+    const serviceRunStart = runtimeSmoke.indexOf("docker run --detach");
+    const serviceRun = runtimeSmoke.slice(
+      serviceRunStart,
+      runtimeSmoke.indexOf('"$image" >/dev/null', serviceRunStart),
+    );
+
+    expect(serviceRun).toContain("--read-only");
+    expect(serviceRun).toContain(
+      "--tmpfs /app/data:rw,noexec,nosuid,nodev,mode=0700,uid=1000,gid=1000",
+    );
+    expect(serviceRun).toContain("--env EMAILS_DB_PATH=/app/data/emails.db");
+    expect(runtimeSmoke).not.toContain("/tmp/emails.db");
+  });
+
   test("allows the readiness probe to outlive the image cold-start health cadence", () => {
     const healthConfig = dockerfile.match(
       /HEALTHCHECK --interval=(\d+)s --timeout=(\d+)s --start-period=(\d+)s/,

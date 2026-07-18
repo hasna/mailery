@@ -56,8 +56,9 @@ docker run --rm --platform linux/amd64 --read-only "$image" src/server/index.ts 
   | grep -F 'ingest-worker' >/dev/null
 
 docker run --detach --platform linux/amd64 --read-only --name "$container" \
+  --tmpfs /app/data:rw,noexec,nosuid,nodev,mode=0700,uid=1000,gid=1000 \
   --env EMAILS_MODE=local \
-  --env EMAILS_DB_PATH=/tmp/emails.db \
+  --env EMAILS_DB_PATH=/app/data/emails.db \
   --env EMAILS_ALLOW_REMOTE=1 \
   --env AWS_EC2_METADATA_DISABLED=true \
   "$image" >/dev/null

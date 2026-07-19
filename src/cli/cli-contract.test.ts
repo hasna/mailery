@@ -122,8 +122,8 @@ describe("CLI JSON contracts (self-hosted /v1)", () => {
       target: "claude",
       action: "install",
       command: "claude",
-      args: ["mcp", "add", "--transport", "stdio", "--scope", "user", "emails", "--", "emails-mcp"],
-      shell: "claude mcp add --transport stdio --scope user emails -- emails-mcp",
+      args: ["mcp", "add", "--transport", "stdio", "--scope", "user", "emails", "--", "emails-mcp", "--stdio"],
+      shell: "claude mcp add --transport stdio --scope user emails -- emails-mcp --stdio",
     });
   });
 

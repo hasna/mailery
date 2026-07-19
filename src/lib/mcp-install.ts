@@ -1,5 +1,6 @@
 export const EMAILS_MCP_SERVER_NAME = "emails";
 export const EMAILS_MCP_COMMAND = "emails-mcp";
+const EMAILS_MCP_STDIO_ARG = "--stdio";
 
 export interface McpInstallCommand {
   command: string;
@@ -8,7 +9,7 @@ export interface McpInstallCommand {
 }
 
 export function getClaudeMcpInstallCommand(): McpInstallCommand {
-  const args = ["mcp", "add", "--transport", "stdio", "--scope", "user", EMAILS_MCP_SERVER_NAME, "--", EMAILS_MCP_COMMAND];
+  const args = ["mcp", "add", "--transport", "stdio", "--scope", "user", EMAILS_MCP_SERVER_NAME, "--", EMAILS_MCP_COMMAND, EMAILS_MCP_STDIO_ARG];
   return {
     command: "claude",
     args,
@@ -28,10 +29,10 @@ export function getClaudeMcpRemoveCommand(): McpInstallCommand {
 export function getCodexMcpConfig(): string {
   return `[mcp_servers.${EMAILS_MCP_SERVER_NAME}]
 command = "${EMAILS_MCP_COMMAND}"
-args = []
+args = ["${EMAILS_MCP_STDIO_ARG}"]
 `;
 }
 
 export function getGeminiMcpConfig(): { mcpServers: Record<string, { command: string; args: string[] }> } {
-  return { mcpServers: { [EMAILS_MCP_SERVER_NAME]: { command: EMAILS_MCP_COMMAND, args: [] } } };
+  return { mcpServers: { [EMAILS_MCP_SERVER_NAME]: { command: EMAILS_MCP_COMMAND, args: [EMAILS_MCP_STDIO_ARG] } } };
 }

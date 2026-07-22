@@ -198,3 +198,4 @@ jobs:
           bun test src/server/self-hosted/multi-tenancy.integration.test.ts
           bun test src/server/self-hosted/message-id-resolution.integration.test.ts
           bun test src/server/self-hosted/rls.integration.test.ts
+          bun test src/server/self-hosted/attachment-inventory.integration.test.ts

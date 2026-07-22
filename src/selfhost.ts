@@ -29,6 +29,10 @@ export interface SendMessageError { "error": string; "retry_safe": boolean; "tom
 
 export interface AttachmentContent { "filename": string; "content_type": string; "size": number; "content_base64": string }
 
+export interface AttachmentInventoryItem { "message_id": string; "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null; "direction"?: "inbound" | "outbound" | null; "received_at"?: string | null }
+
+export interface AttachmentMeta { "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null }
+
 export interface Thread { "thread_key": string; "subject"?: string | null; "message_count": number; "unread_count": number; "last_message_at"?: string | null; "first_message_at"?: string | null; "participants"?: Array<string> }
 
 export interface Mailbox { "id": string; "address": string; "display_name"?: string | null; "status"?: string; "total": number; "unread": number }
@@ -281,6 +285,24 @@ export class EmailsSelfHostClient {
     /** Update a tenant-scoped aliases row */
     async updateResourceAliases(id: string, body: { "domain"?: string | null; "local_part"?: string | null; "target_address"?: string | null; "protected"?: boolean }, init?: RequestInit): Promise<{ "id"?: string; "domain"?: string | null; "local_part"?: string | null; "target_address"?: string | null; "protected"?: boolean; "created_at"?: string; "updated_at"?: string }> {
       return this.request("PATCH", `/v1/aliases/${encodeURIComponent(String(id))}`, {
+        body,
+        query: undefined,
+        init,
+      });
+    }
+
+    /** Read-only, tenant-scoped, keyset-paginated attachment-METADATA inventory across all messages. Exact-once and resumable via the opaque cursor; never returns content_base64. Scope emails:read. */
+    async listAttachments(query?: { "limit"?: number; "cursor"?: string; "direction"?: "inbound" | "outbound"; "since"?: string }, init?: RequestInit): Promise<{ "items": Array<AttachmentInventoryItem>; "next_cursor": string | null }> {
+      return this.request("GET", `/v1/attachments`, {
+        body: undefined,
+        query,
+        init,
+      });
+    }
+
+    /** Return attachment metadata for an explicit, bounded list of message IDs, keyed by message_id, so a large exact-once scan can checkpoint per batch. Read-only (scope emails:read); at most 200 ids per request. */
+    async batchAttachments(body: { "message_ids": Array<string> }, init?: RequestInit): Promise<{ "by_message_id": Record<string, Array<AttachmentMeta>>; "unknown_ids": Array<string>; "max_batch_size": number }> {
+      return this.request("POST", `/v1/attachments/batch`, {
         body,
         query: undefined,
         init,

@@ -237,6 +237,53 @@ export interface MessageListPage {
   next_cursor: string | null;
 }
 
+/**
+ * One machine-readable attachment-metadata row in the inventory. NEVER carries
+ * content_base64 (payload bytes come from GET /v1/messages/{id}/attachments/{index}).
+ * `attachment_index` is the 0-based position in the message's attachments array
+ * — the stable id accepted by the attachment-content endpoint.
+ */
+export interface AttachmentInventoryItem {
+  message_id: string;
+  attachment_index: number;
+  filename: string | null;
+  content_type: string | null;
+  size_bytes: number | null;
+  sha256: string | null;
+  direction: string | null;
+  received_at: string | null;
+}
+
+/** Per-message attachment metadata for the batch-by-ids mode (message_id is the key). */
+export interface AttachmentMeta {
+  attachment_index: number;
+  filename: string | null;
+  content_type: string | null;
+  size_bytes: number | null;
+  sha256: string | null;
+}
+
+/** One keyset page of the attachment inventory. */
+export interface AttachmentInventoryPage {
+  items: AttachmentInventoryItem[];
+  /** Opaque cursor for the next page, or null when this page is the last. */
+  next_cursor: string | null;
+}
+
+export interface ListAttachmentsOptions {
+  limit?: number;
+  cursor?: string;
+  direction?: "inbound" | "outbound";
+  since?: string;
+}
+
+/**
+ * Bounded batch size for POST /v1/attachments/batch. The MP-00034 scan carries
+ * an explicit 3,334-ID list; at 200 IDs/batch that checkpoints in 17 batches,
+ * each a single `id = ANY($2)` probe. Oversized batches are rejected (400).
+ */
+export const MAX_ATTACHMENT_BATCH_IDS = 200;
+
 /** Fields a caller may supply when writing a message (outbound or inbound). */
 export interface MessageInput {
   from_addr: string;
@@ -418,6 +465,37 @@ export function decodeMessagesCursor(raw: string): { ts: string; id: string } | 
     if (typeof parsed.ts !== "string" || typeof parsed.id !== "string" || parsed.id === "") return null;
     if (!CURSOR_TS_RE.test(parsed.ts) || !Number.isFinite(Date.parse(parsed.ts))) return null;
     return { ts: parsed.ts, id: parsed.id };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Attachment-inventory keyset cursor. Extends the message cursor with the
+ * attachment ordinal so the total order is (sort_ts DESC, message_id DESC,
+ * attachment_index ASC) — one attachment row is the finest resumable unit, so
+ * an interrupted scan resumes at the exact next attachment, never re-emitting or
+ * skipping one. `idx` is the 0-based array position (the same index accepted by
+ * GET /v1/messages/{id}/attachments/{index}).
+ */
+export function encodeAttachmentsCursor(ts: string, id: string, idx: number): string {
+  return Buffer.from(JSON.stringify({ ts, id, idx }), "utf8").toString("base64url");
+}
+
+export function decodeAttachmentsCursor(
+  raw: string,
+): { ts: string; id: string; idx: number } | null {
+  if (raw.length === 0 || raw.length > 512) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as {
+      ts?: unknown;
+      id?: unknown;
+      idx?: unknown;
+    };
+    if (typeof parsed.ts !== "string" || typeof parsed.id !== "string" || parsed.id === "") return null;
+    if (!CURSOR_TS_RE.test(parsed.ts) || !Number.isFinite(Date.parse(parsed.ts))) return null;
+    if (typeof parsed.idx !== "number" || !Number.isInteger(parsed.idx) || parsed.idx < 0) return null;
+    return { ts: parsed.ts, id: parsed.id, idx: parsed.idx };
   } catch {
     return null;
   }
@@ -748,6 +826,53 @@ function mapMessageListRow(row: Record<string, unknown>): MessageListRecord {
   const snippet = rawSnippet.replace(/\s+/g, " ").trim().slice(0, MESSAGE_SNIPPET_CHARS);
   const count = Number(row["attachment_count"]);
   return { ...safe, snippet: snippet || null, attachment_count: Number.isFinite(count) ? count : 0 };
+}
+
+/** Normalize a `size` field (number or numeric string) to a non-negative integer, else null. */
+function toSizeBytes(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
+}
+
+/** Read one attachment-metadata field as a string, else null (never throws on malformed elements). */
+function attField(item: unknown, key: string): string | null {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const value = (item as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : value == null ? null : String(value);
+}
+
+/** Project one attachment array element into batch metadata (content_base64 excluded). */
+function attachmentMetaOf(item: unknown, index: number): AttachmentMeta {
+  const size = item && typeof item === "object" && !Array.isArray(item)
+    ? (item as Record<string, unknown>)["size"]
+    : undefined;
+  return {
+    attachment_index: index,
+    filename: attField(item, "filename"),
+    content_type: attField(item, "content_type"),
+    size_bytes: toSizeBytes(size),
+    sha256: attField(item, "sha256"),
+  };
+}
+
+/** Map one lateral inventory row (SQL already unnested + projected) into an item. */
+function mapAttachmentInventoryRow(row: Record<string, unknown>): AttachmentInventoryItem {
+  const idx = Number(row["attachment_index"]);
+  return {
+    message_id: String(row["message_id"]),
+    attachment_index: Number.isFinite(idx) ? idx : 0,
+    filename: typeof row["filename"] === "string" ? (row["filename"] as string) : null,
+    content_type: typeof row["content_type"] === "string" ? (row["content_type"] as string) : null,
+    // `size_raw` is the JSONB `size` as text (SQL `->>`); toSizeBytes floors and
+    // guards it — tolerating fractions, numeric strings, and out-of-bigint-range
+    // values uniformly, and IDENTICALLY to the batch path's attachmentMetaOf, so
+    // the two endpoints never disagree and a poison size cannot 500 the scan.
+    size_bytes: toSizeBytes(row["size_raw"]),
+    sha256: typeof row["sha256"] === "string" ? (row["sha256"] as string) : null,
+    direction: typeof row["direction"] === "string" ? (row["direction"] as string) : null,
+    received_at: toIso(row["received_at"]),
+  };
 }
 
 // ---- shared, tenant-agnostic query helpers (module scope) -------------------
@@ -1625,7 +1750,25 @@ export class TenantScopedStore {
       // Stays a scan by design: all text-search operators are non-LEAKPROOF,
       // so under FORCE RLS (0013) no trigram/FTS index can serve this — see
       // the measured note in migration 0019.
-      where.push(`lower(concat_ws(' ', COALESCE(from_addr, ''), COALESCE(to_addrs::text, ''), COALESCE(subject, ''), COALESCE(body_text, ''))) LIKE $${params.length}`);
+      //
+      // Attachment metadata (filename + content_type) is part of the match
+      // surface: a message whose ONLY occurrence of the term is an attachment
+      // name (e.g. "invoice-Q3.pdf") must still be found. Before this, search
+      // covered only from/to/subject/body_text, so attachment-only signals were
+      // silently missed and the result set under-reported attachment-bearing
+      // mail (MP-00034). content_base64 is deliberately excluded — matching
+      // decoded payload bytes would be both meaningless and a false-positive
+      // firehose. The correlated jsonb scan runs per surviving row inside the
+      // already-tenant-scoped (tenant_id = $1) query, so it adds no leak surface.
+      where.push(
+        `(lower(concat_ws(' ', COALESCE(from_addr, ''), COALESCE(to_addrs::text, ''), COALESCE(subject, ''), COALESCE(body_text, ''))) LIKE $${params.length}
+          OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(
+              CASE WHEN jsonb_typeof(messages.attachments) = 'array' THEN messages.attachments ELSE '[]'::jsonb END
+            ) AS att
+            WHERE lower(concat_ws(' ', COALESCE(att ->> 'filename', ''), COALESCE(att ->> 'content_type', ''))) LIKE $${params.length}
+          ))`,
+      );
     }
     if (opts.since?.trim()) {
       params.push(opts.since.trim());
@@ -1680,6 +1823,118 @@ export class TenantScopedStore {
         ? encodeMessagesCursor(last["cursor_ts"], last["id"])
         : null;
     return { items: rows.map(mapMessageListRow), next_cursor: nextCursor };
+  }
+
+  /**
+   * Read-only, tenant-scoped attachment-metadata INVENTORY (MP-00034). Expands
+   * every message's `attachments` JSONB array into one row per attachment via a
+   * lateral `jsonb_array_elements … WITH ORDINALITY`, keyset-paginated over the
+   * stable total order (sort_ts DESC, message_id DESC, attachment_index ASC).
+   *
+   * Correct-by-construction: it reads the SAME `attachments` column the per-ID
+   * detail read maps, so it can never drift below the per-message truth. It is
+   * exact-once and resumable — the cursor pins the last emitted (ts, id, idx),
+   * and the disjoint keyset predicate re-enters at the very next attachment, so
+   * no attachment is duplicated or skipped across pages.
+   *
+   * Exact-once holds across concurrent whole-row INSERTs/DELETEs (they land
+   * ahead of the scan — already passed — or behind it — picked up later — the
+   * same guarantee as the #47 message keyset). It assumes each message's
+   * attachments array is stable in LENGTH/ORDER during a scan, because
+   * `attachment_index` is positional: mutating an array mid-scan (inserting or
+   * removing an element) would shift indices. The only write path that touches a
+   * stored attachments array — `replaceAttachmentPayloadsAtomically` — is a
+   * same-shape compare-and-swap that preserves length and order, so it does not
+   * break this; the batch-by-ids endpoint is the fixed-ID exact-once path when a
+   * caller needs a snapshot immune to reordering. content_base64 is never projected.
+   */
+  async listAttachments(opts: ListAttachmentsOptions = {}): Promise<AttachmentInventoryPage> {
+    const where: string[] = ["m.tenant_id = $1"];
+    const params: unknown[] = [this.tenantId];
+    if (opts.direction === "inbound") where.push("lower(COALESCE(m.direction, '')) <> 'outbound'");
+    if (opts.direction === "outbound") where.push("lower(COALESCE(m.direction, '')) = 'outbound'");
+    if (opts.since?.trim()) {
+      params.push(opts.since.trim());
+      where.push(`m.sort_ts >= $${params.length}::timestamptz`);
+    }
+    const cursor = opts.cursor ? decodeAttachmentsCursor(opts.cursor) : null;
+    if (cursor) {
+      params.push(cursor.ts);
+      const tsIndex = params.length;
+      params.push(cursor.id);
+      const idIndex = params.length;
+      params.push(cursor.idx);
+      const idxIndex = params.length;
+      // "Strictly after" the cursor in (sort_ts DESC, id DESC, attachment_index
+      // ASC). The leading `<=` bound lets the ts index position the scan; the
+      // three-way disjunction is the exact tie-break (mixed sort directions rule
+      // out a single row-comparison operator).
+      where.push(`m.sort_ts <= $${tsIndex}::timestamptz`);
+      where.push(
+        `(m.sort_ts < $${tsIndex}::timestamptz
+          OR (m.sort_ts = $${tsIndex}::timestamptz AND m.id < $${idIndex})
+          OR (m.sort_ts = $${tsIndex}::timestamptz AND m.id = $${idIndex} AND (att.ord - 1) > $${idxIndex}))`,
+      );
+    }
+    const limit = clampLimit(opts.limit);
+    params.push(limit);
+    const limitIndex = params.length;
+    const rows = await this.client.many<Record<string, unknown>>(
+      `SELECT
+         m.id AS message_id,
+         (att.ord - 1)::int AS attachment_index,
+         att.value ->> 'filename' AS filename,
+         att.value ->> 'content_type' AS content_type,
+         att.value ->> 'size' AS size_raw,
+         att.value ->> 'sha256' AS sha256,
+         m.direction AS direction,
+         m.received_at AS received_at,
+         to_char(m.sort_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_ts
+       FROM messages m
+       CROSS JOIN LATERAL jsonb_array_elements(
+         CASE WHEN jsonb_typeof(m.attachments) = 'array' THEN m.attachments ELSE '[]'::jsonb END
+       ) WITH ORDINALITY AS att(value, ord)
+       WHERE ${where.join(" AND ")}
+       ORDER BY m.sort_ts DESC, m.id DESC, (att.ord - 1) ASC
+       LIMIT $${limitIndex}`,
+      params,
+    );
+    const items = rows.map((row) => mapAttachmentInventoryRow(row));
+    const last = rows.length === limit ? rows[rows.length - 1] : undefined;
+    const nextCursor =
+      last && typeof last["cursor_ts"] === "string" && typeof last["message_id"] === "string"
+        ? encodeAttachmentsCursor(
+            last["cursor_ts"] as string,
+            last["message_id"] as string,
+            Number(last["attachment_index"]),
+          )
+        : null;
+    return { items, next_cursor: nextCursor };
+  }
+
+  /**
+   * Batch attachment-metadata read for an explicit, bounded list of message IDs
+   * (MP-00034 checkpointing). Tenant-scoped: only rows in this tenant surface;
+   * every requested id that does not resolve here (nonexistent OR belonging to
+   * another tenant) is reported in `unknown_ids` — a foreign id NEVER leaks even
+   * its existence. Content bytes are excluded; the shape mirrors the per-ID truth.
+   */
+  async listAttachmentsForMessageIds(
+    ids: readonly string[],
+  ): Promise<{ by_message_id: Record<string, AttachmentMeta[]>; unknown_ids: string[] }> {
+    const unique = [...new Set(ids.map((id) => String(id)))];
+    if (unique.length === 0) return { by_message_id: {}, unknown_ids: [] };
+    const rows = await this.client.many<{ id: string; attachments: unknown }>(
+      `SELECT id, attachments FROM messages WHERE tenant_id = $1 AND id = ANY($2)`,
+      [this.tenantId, unique],
+    );
+    const byId: Record<string, AttachmentMeta[]> = {};
+    for (const row of rows) {
+      byId[row.id] = toArray(row.attachments).map((item, index) => attachmentMetaOf(item, index));
+    }
+    const found = new Set(rows.map((r) => r.id));
+    const unknown = unique.filter((id) => !found.has(id));
+    return { by_message_id: byId, unknown_ids: unknown };
   }
 
   /**

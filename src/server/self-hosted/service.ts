@@ -19,6 +19,8 @@ import {
   CrossTenantReferenceError,
   InboundDomainRouteConflictError,
   decodeMessagesCursor,
+  decodeAttachmentsCursor,
+  MAX_ATTACHMENT_BATCH_IDS,
   MESSAGE_FOLDERS,
   type MessageFolder,
   type TenantScopedStore,
@@ -1140,6 +1142,72 @@ export async function handleSelfHostedRequest(
       if (!auth.ok) return auth.response;
       const { mailboxes, counts } = await auth.store.listMailboxes();
       return json(200, { mailboxes, counts });
+    }
+
+    // /v1/attachments/batch — checkpointable batch attachment-metadata read for
+    // an explicit, bounded list of message IDs (MP-00034). POST carries the id
+    // list in the body (a scan of thousands of ids will not fit a query string),
+    // but it is a READ: only emails:read is required and nothing is mutated.
+    // Matched BEFORE the generic resource matcher so "batch" is not read as an id.
+    if (path === "/v1/attachments/batch") {
+      if (method !== "POST") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, read);
+      if (!auth.ok) return auth.response;
+      const body = await readJsonBody(req);
+      const raw = body.message_ids;
+      if (!Array.isArray(raw)) {
+        return json(400, { error: "message_ids must be an array of message ids", code: "invalid_message_ids" });
+      }
+      if (raw.length === 0) {
+        return json(400, { error: "message_ids must not be empty", code: "empty_message_ids" });
+      }
+      if (raw.length > MAX_ATTACHMENT_BATCH_IDS) {
+        return json(400, {
+          error: `message_ids may contain at most ${MAX_ATTACHMENT_BATCH_IDS} ids per batch`,
+          code: "batch_too_large",
+          max_batch_size: MAX_ATTACHMENT_BATCH_IDS,
+        });
+      }
+      const ids: string[] = [];
+      for (const value of raw) {
+        if (typeof value !== "string" || !value.trim()) {
+          return json(400, { error: "every message id must be a non-empty string", code: "invalid_message_ids" });
+        }
+        ids.push(value);
+      }
+      const result = await auth.store.listAttachmentsForMessageIds(ids);
+      return json(200, {
+        by_message_id: result.by_message_id,
+        unknown_ids: result.unknown_ids,
+        max_batch_size: MAX_ATTACHMENT_BATCH_IDS,
+      });
+    }
+
+    // /v1/attachments — read-only, tenant-scoped, keyset-paginated attachment
+    // METADATA inventory across ALL messages (MP-00034). Unlike GET /v1/messages
+    // (which exposes only attachment_count), this streams the full per-attachment
+    // metadata the per-ID detail read carries — filename, content_type,
+    // size_bytes, sha256 — keyed to (message_id, attachment_index), exact-once
+    // and resumable via an opaque cursor. Never returns content_base64.
+    if (path === "/v1/attachments") {
+      if (method !== "GET") return json(405, { error: "method not allowed" });
+      const auth = await authenticate(deps, req, url, read);
+      if (!auth.ok) return auth.response;
+      const cursor = url.searchParams.get("cursor")?.trim() || undefined;
+      if (cursor && decodeAttachmentsCursor(cursor) === null) {
+        return json(400, { error: "cursor is not a valid pagination cursor", code: "invalid_cursor" });
+      }
+      const directionValue = url.searchParams.get("direction")?.trim().toLowerCase();
+      const direction = directionValue === "inbound" || directionValue === "outbound" ? directionValue : undefined;
+      const since = queryIsoDate(url, "since");
+      if (since.error) return json(400, { error: since.error });
+      const page = await auth.store.listAttachments({
+        limit: queryInt(url, "limit"),
+        cursor,
+        direction,
+        since: since.value,
+      });
+      return json(200, { items: page.items, next_cursor: page.next_cursor });
     }
 
     // ---- scoped send keys: mint + verify ----------------------------------

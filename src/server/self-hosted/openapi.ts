@@ -314,6 +314,42 @@ const attachmentContentResponseSchema = {
   required: ["attachment"],
 } as const;
 
+const attachmentInventoryItemSchema = {
+  type: "object",
+  additionalProperties: false,
+  description:
+    "One machine-readable attachment-metadata row. Never carries content_base64; payload bytes come from GET /v1/messages/{id}/attachments/{index}.",
+  properties: {
+    message_id: { type: "string" },
+    attachment_index: {
+      type: "integer",
+      minimum: 0,
+      description: "0-based position in the message's attachments array; the stable id accepted by GET /v1/messages/{id}/attachments/{index}.",
+    },
+    filename: { type: "string", nullable: true },
+    content_type: { type: "string", nullable: true },
+    size_bytes: { type: "integer", nullable: true, minimum: 0 },
+    sha256: { type: "string", nullable: true, description: "Content checksum when stored." },
+    direction: { type: "string", nullable: true, enum: ["inbound", "outbound", null] },
+    received_at: { type: "string", format: "date-time", nullable: true },
+  },
+  required: ["message_id", "attachment_index", "filename", "content_type", "size_bytes", "sha256"],
+} as const;
+
+const attachmentMetaSchema = {
+  type: "object",
+  additionalProperties: false,
+  description: "Per-message attachment metadata (batch mode). content_base64 is excluded.",
+  properties: {
+    attachment_index: { type: "integer", minimum: 0 },
+    filename: { type: "string", nullable: true },
+    content_type: { type: "string", nullable: true },
+    size_bytes: { type: "integer", nullable: true, minimum: 0 },
+    sha256: { type: "string", nullable: true },
+  },
+  required: ["attachment_index", "filename", "content_type", "size_bytes", "sha256"],
+} as const;
+
 const listParams = [
   { name: "limit", in: "query", required: false, schema: { type: "integer" } },
   { name: "offset", in: "query", required: false, schema: { type: "integer" } },
@@ -1038,8 +1074,8 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
           { name: "to", in: "query", required: false, schema: { type: "string" } },
           { name: "from", in: "query", required: false, schema: { type: "string" } },
           { name: "subject", in: "query", required: false, schema: { type: "string" } },
-          { name: "q", in: "query", required: false, schema: { type: "string" }, description: "Full-text substring search over from/to/subject/body (alias of search)." },
-          { name: "search", in: "query", required: false, schema: { type: "string" } },
+          { name: "q", in: "query", required: false, schema: { type: "string" }, description: "Substring search over from/to/subject/body AND attachment filename/content_type (alias of search)." },
+          { name: "search", in: "query", required: false, schema: { type: "string" }, description: "Substring search over from/to/subject/body AND attachment filename/content_type." },
           { name: "since", in: "query", required: false, schema: { type: "string", format: "date-time" } },
         ],
         responses: { "200": { content: { "application/json": { schema: { type: "object", properties: { messages: { type: "array", items: { $ref: "#/components/schemas/MessageListItem" } }, next_cursor: { type: "string", nullable: true, description: "Cursor for the next page; null when this page is the last." } } } } } } },
@@ -1279,6 +1315,79 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
         },
       },
     },
+    "/v1/attachments": {
+      get: {
+        operationId: "listAttachments",
+        summary:
+          "Read-only, tenant-scoped, keyset-paginated attachment-METADATA inventory across all messages. Exact-once and resumable via the opaque cursor; never returns content_base64. Scope emails:read.",
+        parameters: [
+          { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 500 }, description: "Page size (default 100, clamped to 500)." },
+          { name: "cursor", in: "query", required: false, schema: { type: "string" }, description: "Opaque keyset cursor from a previous page's next_cursor. Order is (sort_ts DESC, message_id DESC, attachment_index ASC); one attachment row is the finest resumable unit." },
+          { name: "direction", in: "query", required: false, schema: { type: "string", enum: ["inbound", "outbound"] } },
+          { name: "since", in: "query", required: false, schema: { type: "string", format: "date-time" }, description: "Only attachments on messages received/created at or after this instant." },
+        ],
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    items: { type: "array", items: { $ref: "#/components/schemas/AttachmentInventoryItem" } },
+                    next_cursor: { type: "string", nullable: true, description: "Cursor for the next page; null when this page is the last." },
+                  },
+                  required: ["items", "next_cursor"],
+                },
+              },
+            },
+          },
+          "400": { description: "Malformed cursor or invalid since filter" },
+        },
+      },
+    },
+    "/v1/attachments/batch": {
+      post: {
+        operationId: "batchAttachments",
+        summary:
+          "Return attachment metadata for an explicit, bounded list of message IDs, keyed by message_id, so a large exact-once scan can checkpoint per batch. Read-only (scope emails:read); at most 200 ids per request.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  message_ids: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 200, description: "1..200 message ids." },
+                },
+                required: ["message_ids"],
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    by_message_id: {
+                      type: "object",
+                      additionalProperties: { type: "array", items: { $ref: "#/components/schemas/AttachmentMeta" } },
+                      description: "Attachment metadata keyed by message_id (only ids resolvable in this tenant).",
+                    },
+                    unknown_ids: { type: "array", items: { type: "string" }, description: "Requested ids not found in this tenant (nonexistent or foreign)." },
+                    max_batch_size: { type: "integer" },
+                  },
+                  required: ["by_message_id", "unknown_ids", "max_batch_size"],
+                },
+              },
+            },
+          },
+          "400": { description: "message_ids missing, empty, malformed, or over the 200-id batch limit" },
+        },
+      },
+    },
     "/v1/messages/{id}/raw": {
       get: {
         operationId: "getMessageRaw",
@@ -1413,6 +1522,8 @@ export const emailsSelfHostedOpenApi: EmailsOpenApiDocument = {
       SendIntentCancellation: sendIntentCancellationSchema as never,
       SendMessageError: sendMessageErrorSchema as never,
       AttachmentContent: attachmentContentSchema as never,
+      AttachmentInventoryItem: attachmentInventoryItemSchema as never,
+      AttachmentMeta: attachmentMetaSchema as never,
       Thread: threadSchema as never,
       Mailbox: mailboxSchema as never,
     },

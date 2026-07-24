@@ -26,6 +26,7 @@ import { parseSesNotification } from "../../lib/inbound-realtime.js";
 import { parseInboundMime } from "../../lib/inbound-mime.js";
 import { createHash } from "node:crypto";
 import { getSelfHostedPool, closeSelfHostedPool } from "./env.js";
+import { assertServingRoleCannotBypassRls } from "./rls-guard.js";
 import {
   EmailsSelfHostedStore,
   type InboundRouteResolution,
@@ -339,6 +340,13 @@ export async function runIngestWorker(options: WorkerOptions = {}): Promise<void
   const configuredBucket = defaultBucket!;
 
   const { client } = getSelfHostedPool();
+  // Fail closed: the inbound worker writes to a FORCE-RLS table. If it ever ran
+  // as a role that can bypass RLS, a missing/mismatched tenant context would NOT
+  // fail loudly — it would silently write cross-tenant. Refuse to start unless
+  // the serving role is subject to RLS (design §6 Layer 2 / H1). This is the same
+  // invariant serve.ts asserts; the headless worker had no such guard, which let
+  // an RLS-incompatible writer keep running through the 0016 cutover.
+  await assertServingRoleCannotBypassRls(client);
   const store = new EmailsSelfHostedStore(client);
 
   const [{ SQSClient, ReceiveMessageCommand, DeleteMessageCommand }, { S3Client, GetObjectCommand }] =
@@ -459,6 +467,10 @@ export async function runIngestS3Backfill(options: BackfillOptions = {}): Promis
   const configuredBucket = bucket!;
 
   const { client } = getSelfHostedPool();
+  // Same fail-closed RLS boot guard as runIngestWorker: the backfill writes to
+  // the FORCE-RLS `messages` table, so refuse to start under a role that can
+  // bypass RLS (design §6 Layer 2 / H1).
+  await assertServingRoleCannotBypassRls(client);
   const store = new EmailsSelfHostedStore(client);
   const [{ S3Client, GetObjectCommand, ListObjectsV2Command }] = await Promise.all([import("@aws-sdk/client-s3")]);
   const s3 = new S3Client({ region });

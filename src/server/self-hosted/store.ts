@@ -250,6 +250,15 @@ export interface AttachmentInventoryItem {
   content_type: string | null;
   size_bytes: number | null;
   sha256: string | null;
+  /**
+   * Whether stored payload bytes exist for this row — i.e. whether
+   * GET /v1/messages/{id}/attachments/{index} can return content or will answer
+   * 409 attachment_content_unavailable. Metadata alone is NOT proof of content:
+   * the legacy import backfilled filename/content_type/size for messages whose
+   * bytes were never carried over. Without this discriminator a cataloging
+   * client has to attempt a download per row to learn the difference (#36).
+   */
+  content_available: boolean;
   direction: string | null;
   received_at: string | null;
 }
@@ -261,6 +270,8 @@ export interface AttachmentMeta {
   content_type: string | null;
   size_bytes: number | null;
   sha256: string | null;
+  /** See AttachmentInventoryItem.content_available — same meaning, same source. */
+  content_available: boolean;
 }
 
 /** One keyset page of the attachment inventory. */
@@ -779,8 +790,13 @@ function toIso(value: unknown): string | null {
 function mapMessageRow(row: Record<string, unknown>): MessageRecord {
   const attachments = toArray(row["attachments"]).map((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return item;
-    const { content_base64: _content, ...metadata } = item as Record<string, unknown>;
-    return metadata;
+    const { content_base64: content, ...metadata } = item as Record<string, unknown>;
+    // `content_available` is DERIVED here, never echoed from the stored JSON: it
+    // is exactly the predicate getMessageAttachment uses to decide between
+    // serving bytes and answering 409 attachment_content_unavailable. Metadata
+    // is not proof of content (legacy imports carry metadata only), so a reader
+    // must be able to tell the two apart without attempting a download (#36).
+    return { ...metadata, content_available: typeof content === "string" };
   });
   return {
     ...(row as unknown as MessageRecord),
@@ -844,15 +860,18 @@ function attField(item: unknown, key: string): string | null {
 
 /** Project one attachment array element into batch metadata (content_base64 excluded). */
 function attachmentMetaOf(item: unknown, index: number): AttachmentMeta {
-  const size = item && typeof item === "object" && !Array.isArray(item)
-    ? (item as Record<string, unknown>)["size"]
+  const record = item && typeof item === "object" && !Array.isArray(item)
+    ? (item as Record<string, unknown>)
     : undefined;
   return {
     attachment_index: index,
     filename: attField(item, "filename"),
     content_type: attField(item, "content_type"),
-    size_bytes: toSizeBytes(size),
+    size_bytes: toSizeBytes(record?.["size"]),
     sha256: attField(item, "sha256"),
+    // Same derivation as the per-ID read and the inventory scan: presence of a
+    // STRING content_base64 is the only thing that makes a payload fetchable.
+    content_available: typeof record?.["content_base64"] === "string",
   };
 }
 
@@ -870,6 +889,10 @@ function mapAttachmentInventoryRow(row: Record<string, unknown>): AttachmentInve
     // the two endpoints never disagree and a poison size cannot 500 the scan.
     size_bytes: toSizeBytes(row["size_raw"]),
     sha256: typeof row["sha256"] === "string" ? (row["sha256"] as string) : null,
+    // SQL already applied the `jsonb_typeof(... ) = 'string'` predicate, which is
+    // the exact runtime check getMessageAttachment makes; `=== true` keeps a
+    // driver that hands back "t"/null from silently reading as available.
+    content_available: row["content_available"] === true,
     direction: typeof row["direction"] === "string" ? (row["direction"] as string) : null,
     received_at: toIso(row["received_at"]),
   };
@@ -1887,6 +1910,16 @@ export class TenantScopedStore {
          att.value ->> 'content_type' AS content_type,
          att.value ->> 'size' AS size_raw,
          att.value ->> 'sha256' AS sha256,
+         -- Deliberately jsonb_typeof, not the cheaper existence test
+         -- (att.value ? 'content_base64'): this must be the SAME predicate the
+         -- JS paths apply (typeof === "string"), or the inventory and the per-ID
+         -- read would disagree about a stored non-string payload — the exact
+         -- class of surface drift that shipped the 1.2.6 attachment_count bug.
+         -- Measured cost of the extract on a worst case of 200 rows x 1 MB of
+         -- base64: 149ms -> 280ms (existence-only would be 211ms). Live data is
+         -- ~98% metadata-only rows, where the key is absent and nothing is
+         -- copied, so the real scan pays almost none of that.
+         (jsonb_typeof(att.value -> 'content_base64') = 'string') AS content_available,
          m.direction AS direction,
          m.received_at AS received_at,
          to_char(m.sort_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_ts

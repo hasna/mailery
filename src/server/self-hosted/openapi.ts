@@ -195,7 +195,12 @@ const messageSchema = {
     is_starred: { type: "boolean" },
     labels: { type: "array", items: { type: "string" } },
     headers: { type: "object", additionalProperties: true },
-    attachments: { type: "array", items: { type: "object", additionalProperties: true } },
+    attachments: {
+      type: "array",
+      description:
+        "Per-attachment metadata (filename, content_type, size) plus content_available — true when GET /v1/messages/{id}/attachments/{index} can return bytes, false for metadata-only rows such as legacy imports. content_base64 is never included here.",
+      items: { type: "object", additionalProperties: true },
+    },
     source_id: { type: "string", nullable: true, description: "Stable upstream id used for idempotent upsert" },
     send_state: { type: "string", description: "none | pending | sending | sent | uncertain | blocked | cancelled" },
     send_started_at: { type: "string", format: "date-time", nullable: true },
@@ -330,10 +335,15 @@ const attachmentInventoryItemSchema = {
     content_type: { type: "string", nullable: true },
     size_bytes: { type: "integer", nullable: true, minimum: 0 },
     sha256: { type: "string", nullable: true, description: "Content checksum when stored." },
+    content_available: {
+      type: "boolean",
+      description:
+        "True when payload bytes are stored and GET /v1/messages/{id}/attachments/{index} can return them; false for metadata-only rows (e.g. legacy imports), which answer 409 attachment_content_unavailable.",
+    },
     direction: { type: "string", nullable: true, enum: ["inbound", "outbound", null] },
     received_at: { type: "string", format: "date-time", nullable: true },
   },
-  required: ["message_id", "attachment_index", "filename", "content_type", "size_bytes", "sha256"],
+  required: ["message_id", "attachment_index", "filename", "content_type", "size_bytes", "sha256", "content_available"],
 } as const;
 
 const attachmentMetaSchema = {
@@ -346,8 +356,13 @@ const attachmentMetaSchema = {
     content_type: { type: "string", nullable: true },
     size_bytes: { type: "integer", nullable: true, minimum: 0 },
     sha256: { type: "string", nullable: true },
+    content_available: {
+      type: "boolean",
+      description:
+        "True when payload bytes are stored and GET /v1/messages/{id}/attachments/{index} can return them; false for metadata-only rows.",
+    },
   },
-  required: ["attachment_index", "filename", "content_type", "size_bytes", "sha256"],
+  required: ["attachment_index", "filename", "content_type", "size_bytes", "sha256", "content_available"],
 } as const;
 
 const listParams = [

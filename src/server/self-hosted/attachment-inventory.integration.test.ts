@@ -168,6 +168,48 @@ describe.skipIf(!pgClient)("MP-00034 attachment inventory route", () => {
     expect(mine.length).toBe(detail.body.message.attachments.length);
   });
 
+  // #36: an inventory row proves METADATA exists, not bytes. On the live serve
+  // the overwhelming majority of rows are legacy imports whose payloads were
+  // never carried over, and GET /v1/messages/{id}/attachments/{n} answers 409
+  // for them. A cataloging client that cannot tell the two apart either has to
+  // attempt a download per row or silently records metadata-only rows as
+  // complete. Inventory, batch and the per-ID detail must all agree, and must
+  // agree with what the content route actually does.
+  it("marks metadata-only rows unavailable across inventory, batch and detail — and the content route agrees", async () => {
+    const deps = makeDeps();
+    const t = await makeTenant("inv-availability");
+    const id = await importMsg(deps, t.token, {
+      receivedAt: "2026-02-02T00:00:00.000Z",
+      attachments: [
+        // Metadata only — exactly the shape the legacy import produced.
+        { filename: "legacy.pdf", content_type: "application/pdf", size: 2048, sha256: "c".repeat(64) } as never,
+        att("stored.pdf", "application/pdf", "CCCC", "d".repeat(64)),
+      ],
+    });
+
+    const inv = await call(deps, "GET", `/v1/attachments?limit=500`, { token: t.token });
+    const mine = inv.body.items.filter((i: any) => i.message_id === id);
+    expect(mine.map((i: any) => [i.filename, i.content_available]))
+      .toEqual([["legacy.pdf", false], ["stored.pdf", true]]);
+
+    const batch = await call(deps, "POST", `/v1/attachments/batch`, { token: t.token, body: { message_ids: [id] } });
+    expect(batch.body.by_message_id[id].map((i: any) => [i.filename, i.content_available]))
+      .toEqual([["legacy.pdf", false], ["stored.pdf", true]]);
+
+    const detail = await call(deps, "GET", `/v1/messages/${id}`, { token: t.token });
+    expect(detail.body.message.attachments.map((a: any) => [a.filename, a.content_available]))
+      .toEqual([["legacy.pdf", false], ["stored.pdf", true]]);
+    for (const a of detail.body.message.attachments) expect("content_base64" in a).toBe(false);
+
+    // The flag is a PREDICTION of the content route; prove it holds.
+    const unavailable = await call(deps, "GET", `/v1/messages/${encodeURIComponent(id)}/attachments/0`, { token: t.token });
+    expect(unavailable.status).toBe(409);
+    expect(unavailable.body.code).toBe("attachment_content_unavailable");
+    const available = await call(deps, "GET", `/v1/messages/${encodeURIComponent(id)}/attachments/1`, { token: t.token });
+    expect(available.status).toBe(200);
+    expect(available.body.attachment.content_base64).toBe(Buffer.from("CCCC").toString("base64"));
+  });
+
   it("paginates exact-once across attachments — no dup/skip, correct order", async () => {
     const deps = makeDeps();
     const t = await makeTenant("inv-keyset");
@@ -359,7 +401,7 @@ describe.skipIf(!pgClient)("MP-00034 attachment batch-by-ids route", () => {
     expect(res.status).toBe(200);
     expect(res.body.max_batch_size).toBe(MAX_ATTACHMENT_BATCH_IDS);
     expect(res.body.by_message_id[id1].length).toBe(2);
-    expect(res.body.by_message_id[id1][0]).toEqual({ attachment_index: 0, filename: "r.pdf", content_type: "application/pdf", size_bytes: 1, sha256: "r.pdf".padEnd(64, "0").slice(0, 64) });
+    expect(res.body.by_message_id[id1][0]).toEqual({ attachment_index: 0, filename: "r.pdf", content_type: "application/pdf", size_bytes: 1, sha256: "r.pdf".padEnd(64, "0").slice(0, 64), content_available: true });
     expect("content_base64" in res.body.by_message_id[id1][0]).toBe(false);
     expect(res.body.by_message_id[id2]).toEqual([]);
     expect(res.body.unknown_ids).toEqual([bogus]);

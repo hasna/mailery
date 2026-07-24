@@ -88,6 +88,30 @@ describe("attachment action helpers", () => {
     ]);
   });
 
+  // #36: metadata is not proof of stored bytes. The serve reports per-entry
+  // availability; the merge must carry that verdict verbatim, and must keep
+  // "not reported" (undefined) distinct from "reported unavailable" (false) so
+  // an older serve is never rendered as if its payloads were gone.
+  it("carries the serve's per-attachment content availability, keeping unknown distinct from unavailable", () => {
+    const attachments = mergeAttachmentDetails(
+      [
+        { filename: "legacy.pdf", content_type: "application/pdf", size: 2048, content_available: false },
+        { filename: "current.pdf", content_type: "application/pdf", size: 4096, content_available: true },
+        { filename: "unreported.pdf", content_type: "application/pdf", size: 1024 },
+      ],
+      [],
+    );
+
+    expect(attachments.map((item) => [item.filename, item.index, item.content_available])).toEqual([
+      ["legacy.pdf", 0, false],
+      ["current.pdf", 1, true],
+      ["unreported.pdf", 2, undefined],
+    ]);
+    // "Not reported" must not materialize as a key at all: a JSON consumer has
+    // to be able to tell "the serve said nothing" from "the serve said false".
+    expect(Object.hasOwn(attachments[2]!, "content_available")).toBe(false);
+  });
+
   it("rejects terminal and bidi controls before attachment metadata is displayed", () => {
     expect(() => mergeAttachmentDetails([
       { filename: "invoice\u001b[31m.pdf", content_type: "application/pdf", size: 10 },

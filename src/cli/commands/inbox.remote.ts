@@ -79,6 +79,11 @@ function seamMessageDetail(msg: TuiMessage, body: MessageBody | null): SeamMailD
     filename: att.filename,
     content_type: att.content_type,
     size: att.size,
+    // Preserve the serve's stored-byte verdict (absent when not reported) so the
+    // renderer can stop advertising a download that cannot succeed (#36).
+    ...(typeof att.content_available === "boolean"
+      ? { content_available: att.content_available }
+      : {}),
   }));
   const attachmentPaths = (body?.attachments ?? [])
     .filter((att) => att.location)
@@ -984,15 +989,23 @@ function formatMailboxStatus(status: MailboxStatusSummary): string {
   return lines.join("\n");
 }
 
-interface AttMeta { filename: string; content_type: string; size: number }
+interface AttMeta { filename: string; content_type: string; size: number; content_available?: boolean }
 interface AttPath { filename: string; local_path?: string; s3_url?: string }
+
+/**
+ * Wording for an attachment the store has no bytes for. "(not downloaded)" and
+ * "fetch with --index n" both read as "these bytes are one command away", which
+ * is false for metadata-only records (legacy imports): the fetch answers "no
+ * stored content". Say so up front instead of only at the failed download (#36).
+ */
+const METADATA_ONLY_LABEL = "(metadata only; payload not stored — not downloadable)";
 
 function formatAttachmentDetailList(emailId: string, attachments: AttachmentDetail[]): string {
   const lines = [chalk.bold(`\nAttachments for ${emailId.slice(0, 8)}:`)];
   for (const attachment of attachments) {
     const location = attachment.location
       ? attachment.location_type === "local" ? chalk.cyan(attachment.location) : chalk.blue(attachment.location)
-      : chalk.dim("(not downloaded)");
+      : chalk.dim(attachment.content_available === false ? METADATA_ONLY_LABEL : "(not downloaded)");
     lines.push(`  ${attachment.filename.padEnd(40)} ${chalk.dim(`${formatAttachmentSize(attachment.size)} · ${attachment.content_type}`)}  ${location}`);
     if (attachment.file_url) lines.push(`  ${chalk.dim("link:")} ${attachment.file_url}`);
   }
@@ -1029,21 +1042,26 @@ function formatEmailDetail(
     // The index comes from mergeAttachmentDetails (the metadata position), NEVER
     // from this loop: a nameless metadata entry is dropped from the display, so a
     // rendered position would advertise an index that downloads a DIFFERENT file.
-    const hasIndexes = atts.some((a) => a.index !== undefined);
+    // Only entries the serve confirms are NOT metadata-only get advertised as
+    // fetchable; an unreported (undefined) verdict keeps the previous wording.
+    const hasFetchableIndexes = atts.some((a) => a.index !== undefined && a.content_available !== false);
     lines.push(chalk.yellow(`  📎 Attachments (${atts.length}):`));
     for (const a of atts) {
       const missingLocation = opts.mode === "self_hosted"
-        ? a.index !== undefined
+        ? a.content_available === false
           // Metadata is not proof of stored content: imports that carry only
-          // metadata answer this fetch with a clear "no stored content" error.
-          ? `  (no local copy; fetch with --index ${a.index})`
-          : "  (no local copy and no download index)"
+          // metadata answer the fetch with a "no stored content" error, so this
+          // row must not be presented as one command away from its bytes.
+          ? `  ${METADATA_ONLY_LABEL}`
+          : a.index !== undefined
+            ? `  (no local copy; fetch with --index ${a.index})`
+            : "  (no local copy and no download index)"
         : "  (run: emails inbox sync to download)";
       const loc = a.location ? `  ${a.location_type === "local" ? chalk.cyan(a.location) : chalk.blue(a.location)}` : chalk.dim(missingLocation);
       lines.push(`     ${a.filename.padEnd(44)} ${chalk.dim(`${formatAttachmentSize(a.size)} · ${a.content_type}`)}${loc}`);
       if (a.file_url) lines.push(`     ${chalk.dim("link:")} ${a.file_url}`);
     }
-    if (opts.mode === "self_hosted" && hasIndexes) {
+    if (opts.mode === "self_hosted" && hasFetchableIndexes) {
       lines.push(chalk.dim(
         `     download: emails inbox attachment ${email.id} --index <n> --download --output-dir <dir>`,
       ));

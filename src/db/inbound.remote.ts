@@ -116,6 +116,12 @@ function v1Attachments(row: Record<string, unknown>): AttachmentMeta[] {
       filename: cstr(o["filename"]) || `attachment-${index + 1}`,
       content_type: cstr(o["content_type"]) || "application/octet-stream",
       size: cnum(o["size"]),
+      // Detail rows from a current serve state whether payload bytes exist.
+      // Only a boolean is a statement; an older serve omits the field and the
+      // consumer must keep treating availability as unknown (#36).
+      ...(typeof o["content_available"] === "boolean"
+        ? { content_available: o["content_available"] as boolean }
+        : {}),
     };
   });
   if (metadata.length > 0) return metadata;

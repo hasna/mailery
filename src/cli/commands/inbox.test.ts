@@ -355,22 +355,70 @@ describe("inbox read", () => {
   // the operator the opposite: that wording is what makes real, present
   // attachments (tax filings, invoices) look unreachable.
   it("tells the operator how to fetch self-hosted attachments instead of calling them undownloadable", async () => {
-    const email = seedEmail({
+    const id = crypto.randomUUID();
+    await stub.seed({ messages: [msgRow({
+      id,
       subject: "With attachment",
       attachments: [
-        { filename: "cover.png", content_type: "image/png", size: 128 },
-        { filename: "invoice.pdf", content_type: "application/pdf", size: 2048 },
+        { filename: "cover.png", content_type: "image/png", size: 3, content_base64: "b25l" },
+        { filename: "invoice.pdf", content_type: "application/pdf", size: 3, content_base64: "dHdv" },
       ],
-    });
+    })] });
 
-    const { out } = await runInboxCommand(["inbox", "read", email.id, "--keep-unread"]);
+    const { out } = await runInboxCommand(["inbox", "read", id, "--keep-unread"]);
     expect(out).not.toContain("no local download in self_hosted mode");
     expect(out).not.toContain("emails inbox sync to download");
     // Every metadata entry is addressable by its authenticated download index.
     expect(out).toContain("--index 0");
     expect(out).toContain("--index 1");
     // ...and the full, copy-pasteable command is spelled out once.
-    expect(out).toContain(`emails inbox attachment ${email.id} --index <n> --download --output-dir <dir>`);
+    expect(out).toContain(`emails inbox attachment ${id} --index <n> --download --output-dir <dir>`);
+  });
+
+  // #36: the flip side of the test above. A historical record can expose
+  // attachment metadata for bytes the store never received; the fetch it
+  // advertises then always fails with "no stored content". Telling an operator
+  // (or an agent cataloging mail) to run a command that cannot work is the same
+  // class of lie as calling present bytes undownloadable — just inverted.
+  it("does not advertise a download for a historical attachment whose payload was never stored", async () => {
+    const id = crypto.randomUUID();
+    await stub.seed({ messages: [msgRow({
+      id,
+      subject: "Historical import",
+      // No content_base64: exactly how the legacy import landed — metadata only.
+      attachments: [
+        { filename: "D300.pdf", content_type: "application/pdf", size: 2048 },
+        { filename: "D394.pdf", content_type: "application/pdf", size: 4096 },
+      ],
+    })] });
+
+    const { out } = await runInboxCommand(["inbox", "read", id, "--keep-unread"]);
+    expect(out).toContain("D300.pdf");
+    expect(out).toContain("D394.pdf");
+    expect(out).toContain("metadata only; payload not stored");
+    expect(out).not.toContain("--index 0");
+    expect(out).not.toContain("--index 1");
+    expect(out).not.toContain("--download --output-dir");
+  });
+
+  it("keeps advertising the fetchable attachments of a partially recovered message", async () => {
+    const id = crypto.randomUUID();
+    await stub.seed({ messages: [msgRow({
+      id,
+      subject: "Partially recovered",
+      attachments: [
+        { filename: "D300.pdf", content_type: "application/pdf", size: 2048 },
+        { filename: "D394.pdf", content_type: "application/pdf", size: 3, content_base64: "dHdv" },
+      ],
+    })] });
+
+    const { out } = await runInboxCommand(["inbox", "read", id, "--keep-unread"]);
+    const line = (needle: string) => out.split("\n").find((l) => l.includes(needle)) ?? "";
+    expect(line("D300.pdf")).toContain("metadata only; payload not stored");
+    expect(line("D300.pdf")).not.toContain("--index");
+    expect(line("D394.pdf")).toContain("--index 1");
+    // One fetchable entry is enough to keep the copy-pasteable command useful.
+    expect(out).toContain(`emails inbox attachment ${id} --index <n> --download --output-dir <dir>`);
   });
 
   // The advertised index MUST be the position in the authenticated metadata
@@ -379,15 +427,17 @@ describe("inbox read", () => {
   // `--index 0` for an attachment whose real index is 1 — and download a
   // different file. On a tax filing that is worse than showing nothing.
   it("advertises the authenticated download index, not the display position", async () => {
-    const email = seedEmail({
+    const id = crypto.randomUUID();
+    await stub.seed({ messages: [msgRow({
+      id,
       subject: "Skewed indexes",
       attachments: [
-        { filename: "", content_type: "image/png", size: 128 },
-        { filename: "D394.pdf", content_type: "application/pdf", size: 2048 },
+        { filename: "", content_type: "image/png", size: 3, content_base64: "b25l" },
+        { filename: "D394.pdf", content_type: "application/pdf", size: 3, content_base64: "dHdv" },
       ],
-    });
+    })] });
 
-    const { out } = await runInboxCommand(["inbox", "read", email.id, "--keep-unread"]);
+    const { out } = await runInboxCommand(["inbox", "read", id, "--keep-unread"]);
     // The nameless part stays addressable under a placeholder name, so it keeps
     // index 0 and D394.pdf keeps the index that actually downloads it.
     const line = (needle: string) => out.split("\n").find((l) => l.includes(needle)) ?? "";
@@ -690,12 +740,65 @@ describe("inbox attachment", () => {
 
     const { data, out } = await runInboxCommand(["inbox", "attachment", email.id.slice(0, 8), "--filename", "invoice.pdf"]);
     // `index` is the authenticated download index, so a JSON consumer can go
-    // straight from this listing to `--index <n> --download`.
+    // straight from this listing to `--index <n> --download` — and
+    // `content_available` says whether that download can succeed at all. These
+    // seeded rows carry metadata only (no stored bytes), like a legacy import.
     expect(data).toEqual([
-      { filename: "invoice.pdf", content_type: "application/pdf", size: 2048, openable: false, index: 0 },
+      {
+        filename: "invoice.pdf",
+        content_type: "application/pdf",
+        size: 2048,
+        openable: false,
+        index: 0,
+        content_available: false,
+      },
     ]);
     expect(out).toContain("2 KB");
-    expect(out).toContain("not downloaded");
+    expect(out).toContain("metadata only; payload not stored");
+    expect(out).not.toContain("(not downloaded)");
+  });
+
+  // #36: the same listing for a message whose bytes ARE stored must stay
+  // downloadable-looking, and the deliberate download of a metadata-only index
+  // must fail with the provenance-specific state — never a bare "not found",
+  // and never a partial file on disk.
+  it("separates fetchable attachments from metadata-only ones and fails the metadata-only download cleanly", async () => {
+    const id = crypto.randomUUID();
+    const dir = mkdtempSync(join(tmpdir(), "emails-cli-attachment-"));
+    try {
+      await stub.seed({ messages: [msgRow({
+        id,
+        attachments: [
+          { filename: "legacy.pdf", content_type: "application/pdf", size: 2048 },
+          { filename: "current.txt", content_type: "text/plain", size: 5, content_base64: "aGVsbG8=" },
+        ],
+      })] });
+
+      const { data, out } = await runInboxCommand(["inbox", "attachment", id]);
+      expect((data as Array<{ filename: string; content_available?: boolean }>)
+        .map((item) => [item.filename, item.content_available]))
+        .toEqual([["legacy.pdf", false], ["current.txt", true]]);
+      const line = (needle: string) => out.split("\n").find((l) => l.includes(needle)) ?? "";
+      expect(line("legacy.pdf")).toContain("metadata only; payload not stored");
+      expect(line("current.txt")).toContain("(not downloaded)");
+
+      const failed = await runInboxSubprocessExpectingExit([
+        "inbox", "attachment", id, "--download", "--index", "0", "--output-dir", dir,
+      ]);
+      expect(failed.exitCode).toBe(1);
+      expect(failed.stderr).toContain("metadata but no stored content");
+      expect(failed.stderr).not.toContain("not found");
+      expect(readdirSync(dir)).toEqual([]);
+
+      // The fetchable sibling still downloads: the guard is per attachment, not
+      // per message.
+      const { data: saved } = await runInboxCommand([
+        "inbox", "attachment", id, "--download", "--index", "1", "--output-dir", dir,
+      ]);
+      expect((saved as Array<{ bytes: number }>)[0]!.bytes).toBe(5);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("reports the authenticated index of a later attachment, not its filter position", async () => {

@@ -7,6 +7,12 @@ export interface AttachmentMeta {
   filename: string;
   content_type: string;
   size: number;
+  /**
+   * Whether the backing store holds payload bytes. `undefined` = the source did
+   * not report it (local rows, or a self-hosted serve older than the
+   * content_available contract) and must not be read as "unavailable".
+   */
+  content_available?: boolean;
 }
 
 export interface AttachmentPath {
@@ -19,6 +25,12 @@ export interface AttachmentPath {
   local_path?: string;
   /** S3 URL if uploaded, e.g. s3://bucket/emails/<email_id>/filename */
   s3_url?: string;
+  /**
+   * Whether the backing store holds payload bytes for this attachment.
+   * `undefined` means "not reported" (local mode, or a self-hosted serve older
+   * than the content_available contract) and MUST NOT be read as unavailable.
+   */
+  content_available?: boolean;
 }
 
 export interface InboundEmail {

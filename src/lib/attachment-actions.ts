@@ -5,6 +5,12 @@ export interface AttachmentMetaLike {
   filename: string;
   content_type?: string;
   size?: number;
+  /**
+   * Whether the backing store holds payload bytes for this entry. `undefined`
+   * means the source did not report availability (local mode, or a self-hosted
+   * serve older than the content_available contract) — treat as unknown.
+   */
+  content_available?: boolean;
 }
 
 export interface AttachmentPathLike {
@@ -30,6 +36,12 @@ export interface AttachmentDetail {
    * position and download index diverge.
    */
   index?: number;
+  /**
+   * Whether a deliberate `--download` of this entry can return bytes.
+   * `false` = metadata-only (the download answers "no stored content").
+   * `undefined` = unknown; render exactly as before, never as unavailable.
+   */
+  content_available?: boolean;
 }
 
 export function formatAttachmentSize(size: number): string {
@@ -55,6 +67,11 @@ export function mergeAttachmentDetails(
       size: Number.isFinite(attachment.size) ? Number(attachment.size) : 0,
       openable: false,
       index,
+      // Carried only when the source actually stated it, so "unknown" stays
+      // distinguishable from "unavailable" downstream.
+      ...(typeof attachment.content_available === "boolean"
+        ? { content_available: attachment.content_available }
+        : {}),
     });
   });
 

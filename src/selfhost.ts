@@ -29,9 +29,9 @@ export interface SendMessageError { "error": string; "retry_safe": boolean; "tom
 
 export interface AttachmentContent { "filename": string; "content_type": string; "size": number; "content_base64": string }
 
-export interface AttachmentInventoryItem { "message_id": string; "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null; "direction"?: "inbound" | "outbound" | null; "received_at"?: string | null }
+export interface AttachmentInventoryItem { "message_id": string; "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null; "content_available": boolean; "direction"?: "inbound" | "outbound" | null; "received_at"?: string | null }
 
-export interface AttachmentMeta { "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null }
+export interface AttachmentMeta { "attachment_index": number; "filename": string | null; "content_type": string | null; "size_bytes": number | null; "sha256": string | null; "content_available": boolean }
 
 export interface Thread { "thread_key": string; "subject"?: string | null; "message_count": number; "unread_count": number; "last_message_at"?: string | null; "first_message_at"?: string | null; "participants"?: Array<string> }
 

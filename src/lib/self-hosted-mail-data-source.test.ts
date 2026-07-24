@@ -745,6 +745,39 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(await ds.getAttachmentContent("metadata", 9, { maxBytes: 1024 })).toEqual({ state: "not_found", index: 9 });
   });
 
+  // #36: a historical record can expose attachment metadata while the payload
+  // was never carried over. The serve reports that per entry; the mapper must
+  // pass the verdict through to the body and the path list — and must NOT
+  // invent one when the serve stays silent (older serve => unknown, not gone).
+  it("surfaces the serve's metadata-only verdict on historical attachments without inventing one", async () => {
+    const { ds } = make([
+      v1("historical", {
+        attachments: [
+          { filename: "D300.pdf", content_type: "application/pdf", size: 2048, content_available: false },
+          { filename: "D394.pdf", content_type: "application/pdf", size: 4096, content_available: true },
+        ],
+      }),
+      v1("olderserve", {
+        attachments: [{ filename: "unknown.pdf", content_type: "application/pdf", size: 10 }],
+      }),
+    ]);
+
+    const historical = await ds.getMessage("historical");
+    const body = await ds.getMessageBody(historical!);
+    expect(body?.attachments).toEqual([
+      { filename: "D300.pdf", content_type: "application/pdf", size: 2048, content_available: false },
+      { filename: "D394.pdf", content_type: "application/pdf", size: 4096, content_available: true },
+    ]);
+    expect(await ds.getAttachmentPaths("historical")).toEqual([
+      { filename: "D300.pdf", content_type: "application/pdf", size: 2048, content_available: false },
+      { filename: "D394.pdf", content_type: "application/pdf", size: 4096, content_available: true },
+    ]);
+
+    const legacyServe = await ds.getAttachmentPaths("olderserve");
+    expect(legacyServe).toEqual([{ filename: "unknown.pdf", content_type: "application/pdf", size: 10 }]);
+    expect(Object.hasOwn(legacyServe[0]!, "content_available")).toBe(false);
+  });
+
   it("refuses redirects before reading a response body or allowing fetch to forward the bearer header", async () => {
     let observedRedirect: RequestInit["redirect"];
     let bodyReads = 0;

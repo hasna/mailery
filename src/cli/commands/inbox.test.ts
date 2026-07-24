@@ -349,15 +349,28 @@ describe("inbox read", () => {
     expect(getInboundEmail(email.id)?.is_read).toBe(false);
   });
 
-  it("shows self-hosted attachments as metadata-only (no local download)", async () => {
+  // Self-hosted attachments have no local path (the bytes live in the API, not on
+  // this machine) but they ARE downloadable through
+  // `inbox attachment <id> --index <n> --download`. The detail view must not tell
+  // the operator the opposite: that wording is what makes real, present
+  // attachments (tax filings, invoices) look unreachable.
+  it("tells the operator how to fetch self-hosted attachments instead of calling them undownloadable", async () => {
     const email = seedEmail({
       subject: "With attachment",
-      attachments: [{ filename: "invoice.pdf", content_type: "application/pdf", size: 2048 }],
+      attachments: [
+        { filename: "cover.png", content_type: "image/png", size: 128 },
+        { filename: "invoice.pdf", content_type: "application/pdf", size: 2048 },
+      ],
     });
 
     const { out } = await runInboxCommand(["inbox", "read", email.id, "--keep-unread"]);
-    expect(out).toContain("metadata only; no local download in self_hosted mode");
+    expect(out).not.toContain("no local download in self_hosted mode");
     expect(out).not.toContain("emails inbox sync to download");
+    // Every metadata entry is addressable by its authenticated download index.
+    expect(out).toContain("--index 0");
+    expect(out).toContain("--index 1");
+    // ...and the full, copy-pasteable command is spelled out once.
+    expect(out).toContain(`emails inbox attachment ${email.id} --index <n> --download --output-dir <dir>`);
   });
 });
 

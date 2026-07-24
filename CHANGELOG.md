@@ -14,6 +14,8 @@ All notable changes to `@hasna/mailery` (formerly `@hasna/emails`) are documente
 - rebuild the product as local-first and operator-owned AWS self-hosting, with no Hasna SaaS control plane.
 - add durable idempotent self-hosted sends, authenticated attachment retrieval, mailbox mutations, signed replay-safe webhooks, and additive Mailery-to-Emails compatibility bridges.
 - harden deployment with separate migration/runtime database roles, readiness health checks, immutable container/action pins, and explicit local/self-hosted mode validation.
+- fix: `inbox read` no longer claims self-hosted attachments cannot be downloaded. Each metadata entry now shows its authenticated download index and the exact `inbox attachment … --download` command; the bytes were always retrievable from the API.
+- test: lock the list/detail attachment contract in the self-hosted seam — lean list rows carry only `attachment_count`, and a client that keeps counting the removed `attachments` array (as published `1.2.6` does) now fails the suite instead of silently reporting `0`.
 
 ## [0.6.117] - 2026-07-09
 - chore: rename package back to `@hasna/emails` and free the `mailery`/`mailery-mcp`/`mailery-serve` bins for the separate cloud CLI (`@hasnatools/mailery`). Remaining bins: `emails`, `emails-mcp`, `emails-serve`. The Mailery product/brand name, `mailery.co`, and cloud API-key app id are unchanged.

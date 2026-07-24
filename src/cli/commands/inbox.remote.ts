@@ -1021,14 +1021,30 @@ function formatEmailDetail(
     `  ID:      ${chalk.dim(email.id)}`,
   ];
   if (atts.length > 0) {
+    // A self_hosted attachment has no local path — the bytes live in the API,
+    // not on this machine — but it IS fetchable with
+    // `inbox attachment <id> --index <n> --download`. Saying "no local download"
+    // reads as "these bytes are gone", which is false and has cost real time on
+    // real filings; point at the exact command instead.
+    // mergeAttachmentDetails keeps the metadata array first and in order, so for
+    // the first `email.attachments.length` rows the display position IS the
+    // authenticated download index. Path-only extras (local mode) have none.
+    const indexedCount = email.attachments?.length ?? 0;
     lines.push(chalk.yellow(`  📎 Attachments (${atts.length}):`));
-    for (const a of atts) {
+    atts.forEach((a, index) => {
       const missingLocation = opts.mode === "self_hosted"
-        ? "  (metadata only; no local download in self_hosted mode)"
+        ? index < indexedCount
+          ? `  (no local copy; fetch with --index ${index})`
+          : "  (no local copy and no download index)"
         : "  (run: emails inbox sync to download)";
       const loc = a.location ? `  ${a.location_type === "local" ? chalk.cyan(a.location) : chalk.blue(a.location)}` : chalk.dim(missingLocation);
       lines.push(`     ${a.filename.padEnd(44)} ${chalk.dim(`${formatAttachmentSize(a.size)} · ${a.content_type}`)}${loc}`);
       if (a.file_url) lines.push(`     ${chalk.dim("link:")} ${a.file_url}`);
+    });
+    if (opts.mode === "self_hosted" && indexedCount > 0) {
+      lines.push(chalk.dim(
+        `     download: emails inbox attachment ${email.id} --index <n> --download --output-dir <dir>`,
+      ));
     }
   }
   lines.push("", readableMessageText(email.text_body, email.html_body) || chalk.dim("(no body)"), "");

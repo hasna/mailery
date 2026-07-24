@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   attachmentRepairResultSucceeded,
+  deriveKeyPathRecipients,
   finalizeInboundProvenanceAudit,
   finalizeAttachmentRepairCanary,
   ingestS3Object,
@@ -40,6 +41,12 @@ const rawEmail = [
   `body text`,
   ``,
 ].join("\r\n");
+
+// A raw S3 ObjectCreated event (what the shared inbound plane delivers) — it has
+// the object key but NO envelope recipients, unlike an SES "Received" notification.
+function s3Event(key: string): string {
+  return JSON.stringify({ Records: [{ s3: { bucket: { name: BUCKET }, object: { key } } }] });
+}
 
 function makeDeps(overrides: Partial<IngestDeps> & {
   existing?: string | null;
@@ -165,6 +172,63 @@ describe("processInboundNotification", () => {
       direction: "inbound",
       status: "received",
     });
+  });
+
+  it("recovers a recipient-less S3 event by routing on the object key path domain", async () => {
+    const { deps, upserts, quarantines } = makeDeps();
+    const r = await processInboundNotification(deps, s3Event("inbound/adweb.com/msgkey-1"), BUCKET);
+
+    expect(r.status).toBe("ingested");
+    expect(quarantines).toEqual([]);
+    expect(upserts).toHaveLength(1);
+    // Recipient/tenant came from the trusted key-path domain — NOT the MIME To
+    // header (which is `andrei@hasna.com` in the raw fixture and must be ignored).
+    expect(upserts[0]!.to_addrs).toEqual(["catchall@adweb.com"]);
+  });
+
+  it("quarantines a recipient-less S3 event when the key-path domain has no route", async () => {
+    const { deps, upserts } = makeDeps({
+      store: {
+        resolveInboundRecipients: async (recipients: string[]) => {
+          const matched = recipients.filter((rcpt) => rcpt.endsWith("@adweb.com"));
+          return {
+            groups: matched.map((rcpt) => ({ tenantId: "tenant-a", recipients: [rcpt] })),
+            unresolved: matched.length ? [] : recipients,
+          };
+        },
+        quarantineInbound: async () => {},
+        forTenant: () => ({
+          findMessageIdByKey: async () => null,
+          getInboundSourceProvenance: async () => null,
+          recordInboundSourceProvenance: async () => "recorded" as const,
+          createInboundMessageWithProvenance: async () => { throw new Error("must not create for an unrouted domain"); },
+        }),
+      } as unknown as IngestDeps["store"],
+    });
+
+    const r = await processInboundNotification(deps, s3Event("inbound/no-route.com/msgkey-2"), BUCKET);
+    expect(r.status).toBe("quarantined");
+    expect(r.reason).toBe("no_tenant_route");
+    expect(upserts).toEqual([]);
+  });
+
+  it("quarantines when the object key has no domain-shaped segment to derive from", async () => {
+    const { deps, upserts, quarantines } = makeDeps();
+    const r = await processInboundNotification(deps, s3Event("inbound/msgkey-no-domain"), BUCKET);
+    expect(r.status).toBe("quarantined");
+    expect(r.reason).toBe("no_tenant_route");
+    expect(upserts).toEqual([]);
+    expect(quarantines).toHaveLength(1);
+  });
+
+  it("derives a catch-all recipient only from a domain-shaped key segment", () => {
+    expect(deriveKeyPathRecipients("inbound/adweb.com/abc123")).toEqual(["catchall@adweb.com"]);
+    expect(deriveKeyPathRecipients("adweb.com/abc123")).toEqual(["catchall@adweb.com"]);
+    expect(deriveKeyPathRecipients("inbound/Adweb.COM/abc123")).toEqual(["catchall@adweb.com"]);
+    // no domain-shaped segment before the object name → nothing derived (quarantines)
+    expect(deriveKeyPathRecipients("inbound/msgkey")).toEqual([]);
+    expect(deriveKeyPathRecipients("single-segment")).toEqual([]);
+    expect(deriveKeyPathRecipients("")).toEqual([]);
   });
 
   it("persists a new message and its immutable provenance through one atomic store operation", async () => {

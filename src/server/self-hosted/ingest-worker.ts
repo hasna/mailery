@@ -78,6 +78,28 @@ export interface IngestResult {
   error?: string;
 }
 
+/**
+ * Best-effort recipient recovery for notifications that arrive WITHOUT envelope
+ * recipients — e.g. a raw S3 `ObjectCreated` event rather than an SES "Received"
+ * notification (the latter carries `receipt.recipients`, the former does not).
+ *
+ * The SES receipt rule stores each inbound object at `<prefix><domain>/<id>`
+ * (e.g. `inbound/adweb.com/abc123`), so the recipient domain is the path segment
+ * immediately before the final object name. That segment is written by SES
+ * infrastructure, NOT by the sender, so it is a safe basis for tenant routing —
+ * unlike the MIME To/Cc headers, which are sender-controlled and are therefore
+ * never used for tenant selection. The derived catch-all address is still
+ * re-validated against `inbound_domain_routes` by `resolveInboundRecipients`, so
+ * an unroutable or malformed key simply quarantines exactly as before.
+ */
+export function deriveKeyPathRecipients(objectKey: string): string[] {
+  const parts = objectKey.split("/").filter(Boolean);
+  if (parts.length < 2) return [];
+  const domain = parts[parts.length - 2]!.trim().toLowerCase();
+  if (!domain || domain.includes("@") || /\s/.test(domain) || !domain.includes(".")) return [];
+  return [`catchall@${domain}`];
+}
+
 export async function ingestS3Object(
   deps: IngestDeps,
   bucket: string,
@@ -87,13 +109,29 @@ export async function ingestS3Object(
   if (!bucket) return { status: "error", key, reason: "no_bucket", error: "worker has no configured inbound bucket" };
   try {
     const envelopeRecipients = note.recipients ?? [];
-    const route = await deps.store.resolveInboundRecipients(envelopeRecipients);
+    let route = await deps.store.resolveInboundRecipients(envelopeRecipients);
+    let routedRecipients = envelopeRecipients;
+    // Fallback when the notification carried no usable envelope recipients (a raw
+    // S3 ObjectCreated event has none). The trusted recipient domain is still
+    // encoded in the SES-written object key path, so derive a catch-all for that
+    // domain and re-resolve. Adopt it ONLY when it actually resolves a tenant
+    // route; otherwise fall through to the unchanged quarantine path below.
+    if (route.groups.length === 0) {
+      const derived = deriveKeyPathRecipients(key);
+      if (derived.length > 0) {
+        const derivedRoute = await deps.store.resolveInboundRecipients(derived);
+        if (derivedRoute.groups.length > 0) {
+          route = derivedRoute;
+          routedRecipients = derived;
+        }
+      }
+    }
     if (route.unresolved.length > 0 || route.groups.length === 0) {
       await deps.store.quarantineInbound({
         sourceId: key,
         bucket,
         objectKey: key,
-        envelopeRecipients,
+        envelopeRecipients: routedRecipients,
         reason: route.groups.length === 0 ? "no_tenant_route" : "partial_tenant_route",
         detail: route.unresolved.length > 0
           ? `${route.unresolved.length} unresolved envelope recipient(s)`

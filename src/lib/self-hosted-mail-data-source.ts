@@ -85,7 +85,13 @@ interface V1Message {
   is_starred?: boolean;
   labels?: string[] | null;
   headers?: Record<string, unknown> | null;
-  attachments?: Array<{ filename?: string; content_type?: string; size?: number }> | null;
+  attachments?: Array<{
+    filename?: string;
+    content_type?: string;
+    size?: number;
+    /** Serves >= the content_available contract report stored-byte presence. */
+    content_available?: boolean;
+  }> | null;
   /** List rows carry only the count; full metadata comes from the detail read. */
   attachment_count?: number;
   created_at?: string | null;
@@ -187,6 +193,12 @@ function v1AttachmentMetadata(m: V1Message): AttachmentPath[] {
     filename: String(attachment?.filename || `attachment-${index + 1}`),
     content_type: String(attachment?.content_type || "application/octet-stream"),
     size: Number(attachment?.size ?? 0) || 0,
+    // Only a BOOLEAN from the serve is a statement about stored bytes. An older
+    // serve omits the field entirely; leaving it undefined keeps that "unknown"
+    // and stops the renderer from declaring a fetchable payload unavailable.
+    ...(typeof attachment?.content_available === "boolean"
+      ? { content_available: attachment.content_available }
+      : {}),
   }));
 }
 

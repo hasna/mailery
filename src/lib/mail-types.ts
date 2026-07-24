@@ -95,6 +95,12 @@ export interface AttachmentInfo {
   content_type: string;
   size: number;
   location?: string; // local path or s3:// url, if downloaded
+  /**
+   * Whether the backing store holds payload bytes. `undefined` = not reported
+   * (local mode, or a self-hosted serve predating the content_available
+   * contract) and must never be rendered as "unavailable".
+   */
+  content_available?: boolean;
 }
 
 /** Attachment path metadata as persisted with a message (from src/db/inbound.ts). */

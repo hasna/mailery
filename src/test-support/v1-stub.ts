@@ -243,6 +243,26 @@ function leanListRow(row) {
   return lean;
 }
 
+// A /v1 DETAIL row as the self-hosted serve actually returns it: the stored
+// attachment bytes are stripped and replaced by the derived content_available
+// flag (store.mapMessageRow). Returning the raw stored row here would let a
+// client that cannot tell metadata-only records from fetchable ones pass every
+// test and still advertise undownloadable bytes against the real serve — the
+// same fake-vs-serve gap that shipped the 1.2.6 attachment_count bug.
+function detailRow(row) {
+  const out = {};
+  for (const key of Object.keys(row)) out[key] = row[key];
+  if (!Array.isArray(row.attachments)) return out;
+  out.attachments = row.attachments.map(function (att) {
+    if (!att || typeof att !== "object" || Array.isArray(att)) return att;
+    const meta = {};
+    for (const key of Object.keys(att)) { if (key !== "content_base64") meta[key] = att[key]; }
+    meta.content_available = typeof att.content_base64 === "string";
+    return meta;
+  });
+  return out;
+}
+
 function messageCounts() {
   const messages = rowsFor("messages");
   const inboxRows = messages.filter(function (r) {
@@ -523,7 +543,7 @@ const server = Bun.serve({
         rec = pref[0];
       }
       if (!rec) return json({ error: "message not found" }, 404);
-      return json({ message: rec });
+      return json({ message: detailRow(rec) });
     }
 
     // Scoped send keys: bespoke mint/verify (matched before the generic matcher so

@@ -225,7 +225,9 @@ describe("Emails self-hosted inbound messages", () => {
     expect(msg.is_starred).toBe(true);
     expect(msg.labels).toEqual(["social", "facebook"]);
     expect(msg.headers).toEqual({ "x-spam-score": "0.1" });
-    expect(msg.attachments).toEqual([{ filename: "a.png", size: 12 }]);
+    // The stored metadata comes back verbatim, plus the derived availability
+    // verdict: this import carried no content_base64, so its payload is absent.
+    expect(msg.attachments).toEqual([{ filename: "a.png", size: 12, content_available: false }]);
     expect(msg.source_id).toBe("local-row-1");
   });
 
@@ -293,6 +295,10 @@ describe("Emails self-hosted inbound messages", () => {
     }));
     const message = (await created!.json()).message;
     expect(message.attachments[0].content_base64).toBeUndefined();
+    // Stripping the bytes must not also strip the ANSWER to "are there bytes?".
+    // Without this the read is indistinguishable from a metadata-only legacy
+    // record and every caller has to probe the download route to find out (#36).
+    expect(message.attachments[0].content_available).toBe(true);
     const attachment = await handleSelfHostedRequest(d, new Request(
       `http://svc/v1/messages/${encodeURIComponent(message.id)}/attachments/0`,
       { headers: { "x-api-key": writeToken() } },
@@ -319,6 +325,11 @@ describe("Emails self-hosted inbound messages", () => {
       ],
     }));
     const message = (await created!.json()).message;
+    // The detail read predicts each of those outcomes without a fetch: index 0
+    // is metadata-only, 1 and 2 have stored bytes (2's are malformed, which is a
+    // payload-validity problem, not an availability one).
+    expect(message.attachments.map((a: { content_available: boolean }) => a.content_available))
+      .toEqual([false, true, true]);
     const get = (index: number, suffix = "") => handleSelfHostedRequest(d, new Request(
       `http://svc/v1/messages/${encodeURIComponent(message.id)}/attachments/${index}${suffix}`,
       { headers: { "x-api-key": writeToken() } },

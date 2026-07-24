@@ -1910,6 +1910,15 @@ export class TenantScopedStore {
          att.value ->> 'content_type' AS content_type,
          att.value ->> 'size' AS size_raw,
          att.value ->> 'sha256' AS sha256,
+         -- Deliberately jsonb_typeof, not the cheaper existence test
+         -- (att.value ? 'content_base64'): this must be the SAME predicate the
+         -- JS paths apply (typeof === "string"), or the inventory and the per-ID
+         -- read would disagree about a stored non-string payload — the exact
+         -- class of surface drift that shipped the 1.2.6 attachment_count bug.
+         -- Measured cost of the extract on a worst case of 200 rows x 1 MB of
+         -- base64: 149ms -> 280ms (existence-only would be 211ms). Live data is
+         -- ~98% metadata-only rows, where the key is absent and nothing is
+         -- copied, so the real scan pays almost none of that.
          (jsonb_typeof(att.value -> 'content_base64') = 'string') AS content_available,
          m.direction AS direction,
          m.received_at AS received_at,

@@ -372,6 +372,28 @@ describe("inbox read", () => {
     // ...and the full, copy-pasteable command is spelled out once.
     expect(out).toContain(`emails inbox attachment ${email.id} --index <n> --download --output-dir <dir>`);
   });
+
+  // The advertised index MUST be the position in the authenticated metadata
+  // array, not the position in the rendered list. A nameless entry is dropped
+  // from the display, so a renderer that counts its own rows would advertise
+  // `--index 0` for an attachment whose real index is 1 — and download a
+  // different file. On a tax filing that is worse than showing nothing.
+  it("advertises the authenticated download index, not the display position", async () => {
+    const email = seedEmail({
+      subject: "Skewed indexes",
+      attachments: [
+        { filename: "", content_type: "image/png", size: 128 },
+        { filename: "D394.pdf", content_type: "application/pdf", size: 2048 },
+      ],
+    });
+
+    const { out } = await runInboxCommand(["inbox", "read", email.id, "--keep-unread"]);
+    // The nameless part stays addressable under a placeholder name, so it keeps
+    // index 0 and D394.pdf keeps the index that actually downloads it.
+    const line = (needle: string) => out.split("\n").find((l) => l.includes(needle)) ?? "";
+    expect(line("attachment-1")).toContain("--index 0");
+    expect(line("D394.pdf")).toContain("--index 1");
+  });
 });
 
 // ─── inbox mark-read / star / archive / label ────────────────────────────────
@@ -667,11 +689,26 @@ describe("inbox attachment", () => {
     });
 
     const { data, out } = await runInboxCommand(["inbox", "attachment", email.id.slice(0, 8), "--filename", "invoice.pdf"]);
+    // `index` is the authenticated download index, so a JSON consumer can go
+    // straight from this listing to `--index <n> --download`.
     expect(data).toEqual([
-      { filename: "invoice.pdf", content_type: "application/pdf", size: 2048, openable: false },
+      { filename: "invoice.pdf", content_type: "application/pdf", size: 2048, openable: false, index: 0 },
     ]);
     expect(out).toContain("2 KB");
     expect(out).toContain("not downloaded");
+  });
+
+  it("reports the authenticated index of a later attachment, not its filter position", async () => {
+    const email = seedEmail({
+      subject: "Filtered index",
+      attachments: [
+        { filename: "invoice.pdf", content_type: "application/pdf", size: 2048 },
+        { filename: "notes.txt", content_type: "text/plain", size: 12 },
+      ],
+    });
+
+    const { data } = await runInboxCommand(["inbox", "attachment", email.id.slice(0, 8), "--filename", "notes.txt"]);
+    expect((data as Array<{ index?: number }>)[0]!.index).toBe(1);
   });
 
   it("downloads a validated attachment to a collision-proof mode-0600 file", async () => {

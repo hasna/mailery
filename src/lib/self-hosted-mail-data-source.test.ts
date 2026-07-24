@@ -317,6 +317,24 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(body!.attachments[0]!.size).toBe(189834);
   });
 
+  // An unnamed inline MIME part arrives as filename:"". Left empty it is dropped
+  // by the display merge, which shifts every later download index — the read view
+  // would then point at the wrong file.
+  it("keeps nameless attachment parts addressable instead of dropping their index", async () => {
+    const { ds } = make([
+      v1("mixed", {
+        attachments: [
+          { filename: "", content_type: "image/png", size: 10 },
+          { filename: "D394.pdf", content_type: "application/pdf", size: 28580 },
+        ],
+      }),
+    ]);
+
+    const [msg] = await ds.listMailbox("inbox");
+    const body = await ds.getMessageBody(msg!);
+    expect(body!.attachments.map((a) => a.filename)).toEqual(["attachment-1", "D394.pdf"]);
+  });
+
   it("honors small inbox limits with one bounded server-side page", async () => {
     const rows = Array.from({ length: 1000 }, (_, index) => v1(String(index), {
       received_at: `2026-06-18T08:${String(index % 60).padStart(2, "0")}:00.000Z`,

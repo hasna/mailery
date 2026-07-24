@@ -179,9 +179,13 @@ function v1ToTuiMessage(m: V1Message): TuiMessage {
 
 function v1AttachmentMetadata(m: V1Message): AttachmentPath[] {
   const metadata = Array.isArray(m.attachments) ? m.attachments : [];
+  // `||`, not `??`: inbound MIME parts routinely carry filename="" (unnamed
+  // inline parts), and an empty name is dropped by every display merge, which
+  // silently shifts the download indexes of everything after it. Placeholder
+  // names keep each entry addressable — same rule as db/inbound.remote.ts.
   return metadata.map((attachment, index) => ({
-    filename: String(attachment?.filename ?? `attachment-${index + 1}`),
-    content_type: String(attachment?.content_type ?? "application/octet-stream"),
+    filename: String(attachment?.filename || `attachment-${index + 1}`),
+    content_type: String(attachment?.content_type || "application/octet-stream"),
     size: Number(attachment?.size ?? 0) || 0,
   }));
 }

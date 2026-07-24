@@ -1026,22 +1026,24 @@ function formatEmailDetail(
     // `inbox attachment <id> --index <n> --download`. Saying "no local download"
     // reads as "these bytes are gone", which is false and has cost real time on
     // real filings; point at the exact command instead.
-    // mergeAttachmentDetails keeps the metadata array first and in order, so for
-    // the first `email.attachments.length` rows the display position IS the
-    // authenticated download index. Path-only extras (local mode) have none.
-    const indexedCount = email.attachments?.length ?? 0;
+    // The index comes from mergeAttachmentDetails (the metadata position), NEVER
+    // from this loop: a nameless metadata entry is dropped from the display, so a
+    // rendered position would advertise an index that downloads a DIFFERENT file.
+    const hasIndexes = atts.some((a) => a.index !== undefined);
     lines.push(chalk.yellow(`  📎 Attachments (${atts.length}):`));
-    atts.forEach((a, index) => {
+    for (const a of atts) {
       const missingLocation = opts.mode === "self_hosted"
-        ? index < indexedCount
-          ? `  (no local copy; fetch with --index ${index})`
+        ? a.index !== undefined
+          // Metadata is not proof of stored content: imports that carry only
+          // metadata answer this fetch with a clear "no stored content" error.
+          ? `  (no local copy; fetch with --index ${a.index})`
           : "  (no local copy and no download index)"
         : "  (run: emails inbox sync to download)";
       const loc = a.location ? `  ${a.location_type === "local" ? chalk.cyan(a.location) : chalk.blue(a.location)}` : chalk.dim(missingLocation);
       lines.push(`     ${a.filename.padEnd(44)} ${chalk.dim(`${formatAttachmentSize(a.size)} · ${a.content_type}`)}${loc}`);
       if (a.file_url) lines.push(`     ${chalk.dim("link:")} ${a.file_url}`);
-    });
-    if (opts.mode === "self_hosted" && indexedCount > 0) {
+    }
+    if (opts.mode === "self_hosted" && hasIndexes) {
       lines.push(chalk.dim(
         `     download: emails inbox attachment ${email.id} --index <n> --download --output-dir <dir>`,
       ));

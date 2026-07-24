@@ -110,11 +110,21 @@ function fakeServe(
       const offset = Number(u.searchParams.get("offset") ?? "0");
       const page = ordered.slice(offset, offset + limit);
       if (!options.leanList) return page;
+      // A lean list row is EXACTLY what the self-hosted serve returns since the
+      // keyset-cursor rework: bodies, headers and the attachments array are gone
+      // and the only attachment signal is the `attachment_count` integer.
       return page.map((row) => {
-        const { body_text: bodyText, body_html: _bodyHtml, ...summary } = row;
+        const {
+          body_text: bodyText,
+          body_html: _bodyHtml,
+          headers: _headers,
+          attachments,
+          ...summary
+        } = row;
         return {
           ...summary,
           snippet: typeof bodyText === "string" ? bodyText.replace(/\s+/g, " ").trim().slice(0, 500) : null,
+          attachment_count: Array.isArray(attachments) ? attachments.length : 0,
         };
       });
     };
@@ -247,6 +257,82 @@ describe("SelfHostedMailDataSource — /v1 resource mapping", () => {
     expect(top.date).toBe("2026-06-15T08:00:00.000Z");
     expect(top.is_read).toBe(false);
     expect(top.kind).toBe("inbound");
+  });
+
+  // Regression guard for the list/detail attachment contract. The serve stopped
+  // shipping the `attachments` array on list rows and now reports only
+  // `attachment_count`; a client that keeps counting the (now absent) array
+  // silently reports 0 attachments for mail that demonstrably has them.
+  it("counts list attachments from attachment_count when the serve ships lean rows", async () => {
+    const { ds } = make([
+      v1("kpmg", {
+        subject: "Declaratii TVA 06.2026",
+        attachments: [
+          { filename: "D300.pdf", content_type: "application/pdf", size: 189834 },
+          { filename: "D394.pdf", content_type: "application/pdf", size: 28580 },
+          { filename: "purchase-ledger.xls", content_type: "application/vnd.ms-excel", size: 38400 },
+        ],
+      }),
+      v1("plain"),
+    ], { leanList: true });
+
+    const msgs = await ds.listMailbox("inbox");
+    const byId = new Map(msgs.map((m) => [m.id, m]));
+    expect(byId.get("kpmg")!.attachments).toBe(3);
+    expect(byId.get("plain")!.attachments).toBe(0);
+  });
+
+  // Older serves (and the local seam) still send the metadata array; the count
+  // must keep working there too, so the client spans both contract versions.
+  it("falls back to the attachments array when a serve still ships it on list rows", async () => {
+    const { ds } = make([
+      v1("legacy", {
+        attachments: [
+          { filename: "a.pdf", content_type: "application/pdf", size: 10 },
+          { filename: "b.pdf", content_type: "application/pdf", size: 20 },
+        ],
+      }),
+    ]);
+
+    const msgs = await ds.listMailbox("inbox");
+    expect(msgs[0]!.attachments).toBe(2);
+  });
+
+  // The count is a summary signal only: the filenames/sizes still come from the
+  // per-message read, which is the one place the download indexes are defined.
+  it("keeps full attachment metadata available on the detail read behind a lean list", async () => {
+    const { ds } = make([
+      v1("kpmg", {
+        attachments: [
+          { filename: "D300.pdf", content_type: "application/pdf", size: 189834 },
+          { filename: "D394.pdf", content_type: "application/pdf", size: 28580 },
+        ],
+      }),
+    ], { leanList: true });
+
+    const [summary] = await ds.listMailbox("inbox");
+    expect(summary!.attachments).toBe(2);
+    const body = await ds.getMessageBody(summary!);
+    expect(body!.attachments.map((a) => a.filename)).toEqual(["D300.pdf", "D394.pdf"]);
+    expect(body!.attachments[0]!.size).toBe(189834);
+  });
+
+  // An unnamed inline MIME part arrives as filename:"". Left empty it is dropped
+  // by the display merge, which shifts every later download index — the read view
+  // would then point at the wrong file.
+  it("keeps nameless attachment parts addressable instead of dropping their index", async () => {
+    const { ds } = make([
+      v1("mixed", {
+        attachments: [
+          { filename: "", content_type: "image/png", size: 10 },
+          { filename: "D394.pdf", content_type: "application/pdf", size: 28580 },
+        ],
+      }),
+    ]);
+
+    const [msg] = await ds.listMailbox("inbox");
+    const body = await ds.getMessageBody(msg!);
+    expect(body!.attachments.map((a) => a.filename)).toEqual(["attachment-1", "D394.pdf"]);
   });
 
   it("honors small inbox limits with one bounded server-side page", async () => {

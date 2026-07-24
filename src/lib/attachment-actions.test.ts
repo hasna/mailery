@@ -54,6 +54,40 @@ describe("attachment action helpers", () => {
     ]);
   });
 
+  // Download indexes are positions in the AUTHENTICATED metadata array, never in
+  // this presentation merge. A nameless entry is skipped for display, so display
+  // position and download index diverge — every consumer that shows an index must
+  // read it from the detail, not from its own loop counter.
+  it("carries the authenticated metadata index through the merge, gaps included", () => {
+    const attachments = mergeAttachmentDetails(
+      [
+        { filename: "", content_type: "image/png", size: 10 },
+        { filename: "D394.pdf", content_type: "application/pdf", size: 2048 },
+      ],
+      [],
+    );
+
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]!.filename).toBe("D394.pdf");
+    // Display position 0, real download index 1.
+    expect(attachments[0]!.index).toBe(1);
+  });
+
+  it("leaves path-only extras without a download index", () => {
+    const attachments = mergeAttachmentDetails(
+      [{ filename: "invoice.pdf", content_type: "application/pdf", size: 2048 }],
+      [
+        { filename: "invoice.pdf", local_path: "/tmp/invoice.pdf" },
+        { filename: "orphan.csv", local_path: "/tmp/orphan.csv" },
+      ],
+    );
+
+    expect(attachments.map((item) => [item.filename, item.index])).toEqual([
+      ["invoice.pdf", 0],
+      ["orphan.csv", undefined],
+    ]);
+  });
+
   it("rejects terminal and bidi controls before attachment metadata is displayed", () => {
     expect(() => mergeAttachmentDetails([
       { filename: "invoice\u001b[31m.pdf", content_type: "application/pdf", size: 10 },

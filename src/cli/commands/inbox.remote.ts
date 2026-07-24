@@ -1021,14 +1021,32 @@ function formatEmailDetail(
     `  ID:      ${chalk.dim(email.id)}`,
   ];
   if (atts.length > 0) {
+    // A self_hosted attachment has no local path — the bytes live in the API,
+    // not on this machine — but it IS fetchable with
+    // `inbox attachment <id> --index <n> --download`. Saying "no local download"
+    // reads as "these bytes are gone", which is false and has cost real time on
+    // real filings; point at the exact command instead.
+    // The index comes from mergeAttachmentDetails (the metadata position), NEVER
+    // from this loop: a nameless metadata entry is dropped from the display, so a
+    // rendered position would advertise an index that downloads a DIFFERENT file.
+    const hasIndexes = atts.some((a) => a.index !== undefined);
     lines.push(chalk.yellow(`  📎 Attachments (${atts.length}):`));
     for (const a of atts) {
       const missingLocation = opts.mode === "self_hosted"
-        ? "  (metadata only; no local download in self_hosted mode)"
+        ? a.index !== undefined
+          // Metadata is not proof of stored content: imports that carry only
+          // metadata answer this fetch with a clear "no stored content" error.
+          ? `  (no local copy; fetch with --index ${a.index})`
+          : "  (no local copy and no download index)"
         : "  (run: emails inbox sync to download)";
       const loc = a.location ? `  ${a.location_type === "local" ? chalk.cyan(a.location) : chalk.blue(a.location)}` : chalk.dim(missingLocation);
       lines.push(`     ${a.filename.padEnd(44)} ${chalk.dim(`${formatAttachmentSize(a.size)} · ${a.content_type}`)}${loc}`);
       if (a.file_url) lines.push(`     ${chalk.dim("link:")} ${a.file_url}`);
+    }
+    if (opts.mode === "self_hosted" && hasIndexes) {
+      lines.push(chalk.dim(
+        `     download: emails inbox attachment ${email.id} --index <n> --download --output-dir <dir>`,
+      ));
     }
   }
   lines.push("", readableMessageText(email.text_body, email.html_body) || chalk.dim("(no body)"), "");

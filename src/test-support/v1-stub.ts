@@ -222,7 +222,25 @@ function listMessages(params) {
   }
   const limit = Number(params.get("limit") || "500");
   const offset = Number(params.get("offset") || "0");
-  return ordered.slice(offset, offset + limit);
+  return ordered.slice(offset, offset + limit).map(leanListRow);
+}
+
+// A /v1 list row as the self-hosted serve actually returns it: bodies, headers
+// and the attachments array are NOT on list rows — only a snippet and an
+// attachment_count integer. Modelling the full row here let a client that counts
+// the (absent) attachments array pass every test and still report
+// "0 attachments" against the real serve.
+function leanListRow(row) {
+  const lean = {};
+  for (const key of Object.keys(row)) {
+    if (key === "body_text" || key === "body_html" || key === "headers" || key === "attachments") continue;
+    lean[key] = row[key];
+  }
+  const body = typeof row.body_text === "string" ? row.body_text : "";
+  const snippet = body.replace(/\s+/g, " ").trim().slice(0, 500);
+  lean.snippet = snippet || null;
+  lean.attachment_count = Array.isArray(row.attachments) ? row.attachments.length : 0;
+  return lean;
 }
 
 function messageCounts() {

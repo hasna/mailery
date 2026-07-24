@@ -310,12 +310,22 @@ function repliesToEmail(emailId: string): Record<string, unknown>[] {
     .sort((a, b) => v1MsgDate(a).localeCompare(v1MsgDate(b)));
 }
 
+// repliesToEmail matches on LIST rows, which carry no body (the serve moved
+// bodies to the per-message read). Anything that needs body text must re-read the
+// selected rows by id — after slicing, so a page of replies costs a page of
+// reads, not one per candidate.
+function hydrateBody(row: Record<string, unknown>): Record<string, unknown> {
+  const id = cstr(row["id"]);
+  if (!id) return row;
+  return messagesStore().get(id) ?? row;
+}
+
 export function listReplies(emailId: string, opts?: ListRepliesOptions): InboundEmail[] {
   const limit = safeOptionalLimit(opts?.limit);
   const offset = safeOffset(opts?.offset);
   let rows = repliesToEmail(emailId);
   if (limit !== null) rows = rows.slice(offset, offset + limit);
-  return rows.map(apiToInboundEmail);
+  return rows.map(hydrateBody).map(apiToInboundEmail);
 }
 
 export function listReplySummaries(emailId: string, opts?: ListRepliesOptions): InboundEmailSummary[] {
@@ -331,7 +341,7 @@ export function listReplyPromptParts(emailId: string, opts?: ListRepliesOptions)
   const offset = safeOffset(opts?.offset);
   let rows = repliesToEmail(emailId);
   if (limit !== null) rows = rows.slice(offset, offset + limit);
-  return rows.map((row) => ({
+  return rows.map(hydrateBody).map((row) => ({
     from_address: cstr(row["from_addr"]),
     subject: cstr(row["subject"]),
     text_body: cstrOrNull(row["body_text"]),

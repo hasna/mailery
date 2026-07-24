@@ -22,6 +22,14 @@ export interface AttachmentDetail {
   location_type?: "local" | "s3";
   file_url?: string;
   openable: boolean;
+  /**
+   * Position in the AUTHENTICATED metadata array — the only value accepted as a
+   * download index. Undefined for path-only extras, which have no metadata entry
+   * and therefore cannot be downloaded by index. Never infer this from a
+   * renderer's own loop counter: nameless entries are skipped below, so display
+   * position and download index diverge.
+   */
+  index?: number;
 }
 
 export function formatAttachmentSize(size: number): string {
@@ -36,16 +44,19 @@ export function mergeAttachmentDetails(
   paths: readonly AttachmentPathLike[] = [],
 ): AttachmentDetail[] {
   const details: AttachmentDetail[] = [];
-  for (const attachment of meta) {
-    if (!attachment.filename) continue;
+  // `index` is the metadata position, NOT the position in `details`: a nameless
+  // entry is skipped for display but still occupies its download index.
+  meta.forEach((attachment, index) => {
+    if (!attachment.filename) return;
     validateAttachmentFilename(attachment.filename);
     details.push({
       filename: attachment.filename,
       content_type: attachment.content_type ?? "application/octet-stream",
       size: Number.isFinite(attachment.size) ? Number(attachment.size) : 0,
       openable: false,
+      index,
     });
-  }
+  });
 
   // Attachment names are not unique. Match each path to one metadata entry so
   // two same-named attachments keep distinct indexes instead of collapsing in

@@ -1,0 +1,29 @@
+name: Publish @hasna/mailery to npm
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  publish:
+    if: github.repository == 'hasna/mailery' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Install pinned trusted-publishing npm
+        run: npm install -g npm@11.19.1
+      - run: bun install --frozen-lockfile
+      - name: Check the public source and package
+        run: bun run publish:check
+      - name: Publish with provenance
+        run: npm publish ./packages/cli --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.HASNA_NPM_BOOTSTRAP_TOKEN }}

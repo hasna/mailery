@@ -1,0 +1,53 @@
+{
+  "name": "@hasna/mailery-sdk-internal",
+  "version": "0.1.0",
+  "description": "Private internal workspace SDK bundled into the public @hasna/mailery package.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "author": "Andrei Hasna <andrei@hasna.com>",
+  "homepage": "https://mailery.co",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hasna/mailery.git",
+    "directory": "packages/sdk"
+  },
+  "keywords": [
+    "mailery",
+    "email",
+    "agents",
+    "api-client",
+    "sdk",
+    "zero-dependency"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "bun": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test",
+    "prepublishOnly": "bun run build && bash ../../scripts/prepublish-allowlist.sh . --allow-src"
+  },
+  "engines": {
+    "bun": ">=1.0.0",
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "dependencies": {},
+  "private": true
+}

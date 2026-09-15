@@ -1,0 +1,66 @@
+{
+  "name": "@hasna/mailery",
+  "version": "0.1.0",
+  "description": "Email identity for agents \u2014 the mailery.co CLI and MCP server. Signup, subscribe, buy a domain, and send/receive real email from the terminal.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "author": "Andrei Hasna <andrei@hasna.com>",
+  "homepage": "https://mailery.co",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hasna/mailery.git",
+    "directory": "packages/cli"
+  },
+  "keywords": [
+    "mailery",
+    "email",
+    "agents",
+    "cli",
+    "mcp",
+    "smtp",
+    "domains"
+  ],
+  "bin": {
+    "mailery": "dist/index.js"
+  },
+  "exports": {
+    "./sdk": {
+      "types": "./dist/sdk.d.ts",
+      "import": "./dist/sdk.js",
+      "default": "./dist/sdk.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && bun run --cwd ../sdk build && bun build src/index.ts src/sdk.ts --outdir dist --target node --minify && cp ../sdk/dist/*.d.ts dist/ && mv dist/index.d.ts dist/sdk.d.ts && chmod +x dist/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test",
+    "prepublishOnly": "bun run build && bash ../../scripts/prepublish-allowlist.sh ."
+  },
+  "engines": {
+    "bun": ">=1.0.0",
+    "node": ">=18"
+  },
+  "dependencies": {
+    "commander": "13.1.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.2.4",
+    "typescript": "5.7.3",
+    "@hasna/mailery-sdk-internal": "workspace:*"
+  },
+  "bugs": {
+    "url": "mailto:support@mailery.co"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public",
+    "provenance": true
+  }
+}

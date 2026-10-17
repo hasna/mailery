@@ -94,3 +94,5 @@ All failures throw a `MaileryError` (`status`, `code`, `retryable`, `details`).
 Subclasses: `MaileryAuthRequiredError` (missing credential, no request made),
 `MaileryTimeoutError` (`waitForEntitlement` deadline), and
 `NotYetAvailableError` (route not shipped yet).
+
+Checkout retries retain the original purchase intent. Supply and persist an explicit `idempotencyKey` in SDK `createCheckout({...})`, or `--idempotency-key` on CLI `subscribe`, for a deliberate purchase. Never change it on timeout or an uncertain outcome. Without a key, the accepted 0.1.0 call remains supported through the server's permanent tenant/actor/request legacy fence; identical requests replay their first attempt. A deliberate identical repeat purchase needs an explicit fresh key. Use `mailery subscribe pro --resume` or `getBillingStatus()` to observe entitlement without opening Checkout.

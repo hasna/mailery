@@ -30,3 +30,7 @@ Only `.github/workflows/publish-npm.yml` publishes. It runs on GitHub-hosted run
 For an initial package publication that needs bootstrap authentication, the optional protected environment secret `HASNA_NPM_BOOTSTRAP_TOKEN` supplies the approved npm organization credential. Remove it after the trusted publisher is established. Never commit credentials or `.npmrc` authentication settings.
 
 A successful build or packed-file test does not establish publication. Verify the exact registry version's provenance and perform clean executable and SDK installs after publishing.
+
+## 0.2.0
+
+Checkout retries can retain a caller-owned purchase key through SDK `createCheckout({ idempotencyKey })` and CLI `subscribe --idempotency-key`. Keep that key after a timeout or uncertain outcome; a new key starts a deliberate new purchase. Use `subscribe --resume` to check entitlement without creating another Checkout session. Existing SDK string calls and calls without a key remain supported.

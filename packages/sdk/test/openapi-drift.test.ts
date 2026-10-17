@@ -152,3 +152,15 @@ test("billing OpenAPI includes inbound usage and account exports include its ret
   expect(usage.properties.status.enum).toEqual(["within_allowance", "near_allowance", "overage", "paused"]);
   expect(spec.components.schemas.AccountExport.properties.inbound_usage_windows.type).toBe("array");
 });
+
+test("Checkout keeps additive 0.1.0 compatibility and documents durable caller binding", async () => {
+  const spec = await Bun.file(SPEC_URL).json();
+  const operation = spec.paths["/api/v1/billing/checkout"].post;
+  expect(operation.parameters).toContainEqual(expect.objectContaining({
+    name: "Idempotency-Key", in: "header", required: false,
+    schema: { type: "string", minLength: 8, maxLength: 200 },
+  }));
+  expect(operation.description).toContain("permanently replays");
+  expect(operation.description).toContain("checkout_outcome_ambiguous");
+  expect(operation.responses["200"].content["application/json"].schema.required).toEqual(["url"]);
+});

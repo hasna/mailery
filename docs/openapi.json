@@ -4556,7 +4556,7 @@
           "Billing"
         ],
         "summary": "Create a Stripe checkout URL",
-        "description": "Creates a Stripe checkout session for a Pro/Scale subscription or a one-time credit pack. Requires an interactive owner/admin session. Rate limited to 10 attempts per tenant/actor per hour. Purchased credits never expire. When MAILERY_REQUIRE_EMAIL_VERIFICATION is enabled (default in production), an unverified email is rejected with 403 email_verification_required.",
+        "description": "Creates a Stripe checkout session for a Pro/Scale subscription or a one-time credit pack. Requires an interactive owner/admin session. Rate limited to 10 attempts per tenant/actor per hour. Purchased credits never expire. When MAILERY_REQUIRE_EMAIL_VERIFICATION is enabled (default in production), an unverified email is rejected with 403 email_verification_required. Idempotency-Key is optional only for compatibility with public client 0.1.0: without it, the same tenant/actor and normalized purchase intent permanently replays its first attempt. There is no lease/TTL rollover. A deliberate identical repeat purchase requires an explicit new key via an upgraded client. Supplied keys bind the normalized kind/plan/credits and actor; a changed request returns 409 before provider I/O. Lost provider results or local persistence failures return checkout_outcome_ambiguous: keep the original key and reconcile it, never automatically start another purchase. Use billing status or CLI subscribe --resume for observation without creation.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -4568,18 +4568,49 @@
         },
         "responses": {
           "200": {
-            "description": "Checkout URL"
+            "description": "Original or replayed Checkout URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "url"
+                  ],
+                  "properties": {
+                    "url": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
           "409": {
-            "$ref": "#/components/responses/SubscriptionExists"
+            "description": "subscription_exists, idempotency_key_conflict, idempotency_request_in_progress or checkout_outcome_ambiguous. An uncertain attempt never starts another provider session."
           },
           "429": {
             "description": "Checkout rate limited; retry after the Retry-After header"
+          },
+          "400": {
+            "description": "Invalid paid plan or Idempotency-Key"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Stable caller-owned purchase intent; reuse across retries. Omitted only for the permanent tenant/actor/request legacy-intent fence.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 200
+            }
+          }
+        ]
       }
     },
     "/api/v1/billing/portal": {

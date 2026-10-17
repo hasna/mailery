@@ -93,3 +93,49 @@ describe("MaileryClient retry safety", () => {
     expect(capturedBody).toEqual({ domain: "example.com", buy: true, quoteToken: "signed_quote", maxPriceCents: 1500, currency: "usd" });
   });
 });
+
+describe("Checkout caller binding", () => {
+  test("same-key transport retry sends the original header and normalized body", async () => {
+    const requests: Array<{ key?: string; body: unknown }> = [];
+    const client = new MaileryClient({
+      baseUrl: "https://mailery.test", sessionToken: "synthetic-session", sleep: async () => {},
+      fetch: async (_url, init) => {
+        requests.push({ key: (init!.headers as Record<string, string>)["idempotency-key"], body: JSON.parse(String(init!.body)) });
+        if (requests.length === 1) throw new Error("synthetic lost HTTP response");
+        return response(200, { url: "https://stripe.test/original" });
+      },
+    });
+    await expect(client.createCheckout({ kind: "subscription", plan: "pro", idempotencyKey: "stable-sdk-purchase" })).resolves.toBe("https://stripe.test/original");
+    expect(requests).toEqual([
+      { key: "stable-sdk-purchase", body: { kind: "subscription", plan: "pro" } },
+      { key: "stable-sdk-purchase", body: { kind: "subscription", plan: "pro" } },
+    ]);
+  });
+
+  test("credit-pack creation propagates an explicit key, while 0.1.0's string call remains headerless", async () => {
+    const requests: Array<{ key?: string; body: unknown }> = [];
+    const client = new MaileryClient({
+      baseUrl: "https://mailery.test", sessionToken: "synthetic-session",
+      fetch: async (_url, init) => {
+        requests.push({ key: (init!.headers as Record<string, string>)["idempotency-key"], body: JSON.parse(String(init!.body)) });
+        return response(200, { url: "https://stripe.test/original" });
+      },
+    });
+    await client.createCheckout({ kind: "credit_pack", credits: 1000, idempotencyKey: "stable-pack-purchase" });
+    await client.createCheckout("pro");
+    expect(requests).toEqual([
+      { key: "stable-pack-purchase", body: { kind: "credit_pack", credits: 1000 } },
+      { key: undefined, body: { kind: "subscription", plan: "pro" } },
+    ]);
+  });
+
+  test("an uncertain Checkout is returned unchanged without another request", async () => {
+    let calls = 0;
+    const client = new MaileryClient({
+      baseUrl: "https://mailery.test", sessionToken: "synthetic-session",
+      fetch: async () => { calls++; return response(409, { error: { code: "checkout_outcome_ambiguous", message: "retain the original purchase key" } }); },
+    });
+    await expect(client.createCheckout({ plan: "pro", idempotencyKey: "uncertain-purchase" })).rejects.toMatchObject({ code: "checkout_outcome_ambiguous" });
+    expect(calls).toBe(1);
+  });
+});

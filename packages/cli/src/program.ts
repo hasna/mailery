@@ -844,20 +844,25 @@ export function buildProgram(deps: CliDeps): Command {
   const subscribe = leaf(program, "subscribe <plan>", "Start a subscription (plan: pro or scale): open Stripe Checkout and wait until the entitlement is active");
   subscribe
     .option("--no-wait", "Print the checkout URL and exit without polling for entitlement")
+    .option("--idempotency-key <key>", "Stable purchase key; reuse it after failure or timeout (a fresh key starts a deliberate new purchase)")
+    .option("--resume", "Only poll entitlement; do not open another Checkout session")
     .option("--timeout <seconds>", "Max seconds to wait for entitlement", "300")
     .option("--interval <seconds>", "Entitlement poll interval in seconds", "3");
   subscribe.action(async (plan: string) => {
     const json = jsonOf(subscribe, deps);
-    const opts = subscribe.opts<{ wait: boolean; timeout: string; interval: string }>();
+    const opts = subscribe.opts<{ wait: boolean; timeout: string; interval: string; idempotencyKey?: string; resume?: boolean }>();
     await run(deps, json, async () => {
       const client = buildClient(deps, { preferSession: true });
-      const url = await client.createCheckout(plan);
-      if (deps.interactive) deps.openBrowser?.(url);
+      if (opts.resume && (!opts.wait || opts.idempotencyKey)) {
+        throw new MaileryError("--resume only polls entitlement; use it without --no-wait or --idempotency-key", { code: "cli_usage_error" });
+      }
+      const url = opts.resume ? undefined : await client.createCheckout({ kind: "subscription", plan, idempotencyKey: opts.idempotencyKey });
+      if (url && deps.interactive) deps.openBrowser?.(url);
       if (!opts.wait) {
-        ok(deps, json, { plan, checkout_url: url, waited: false }, [`Checkout URL: ${url}`, "Complete payment in the browser; re-run without --no-wait to poll for entitlement."]);
+        ok(deps, json, { plan, checkout_url: url, waited: false }, [`Checkout URL: ${url}`, "Complete payment in the browser; run `mailery subscribe "+plan+" --resume` to poll without opening Checkout."]);
         return;
       }
-      if (!json) deps.stderr(`Checkout URL: ${url}\nWaiting for entitlement`);
+      if (!json) deps.stderr(`${url ? `Checkout URL: ${url}\n` : ""}Waiting for entitlement`);
       const timeoutMs = Math.max(1, Number(opts.timeout) || 300) * 1000;
       const intervalMs = Math.max(1, Number(opts.interval) || 3) * 1000;
       const deadline = Date.now() + timeoutMs;
@@ -870,7 +875,7 @@ export function buildProgram(deps: CliDeps): Command {
         }
         if (Date.now() + intervalMs >= deadline) {
           if (!json) deps.stderr(" timed out\n");
-          fail(deps, json, { code: "entitlement_timeout", message: `entitlement not active within ${Math.round(timeoutMs / 1000)}s`, hint: "Complete the Stripe Checkout in the browser, then re-run `mailery subscribe <plan>` to resume polling, or check `mailery billing status`." });
+          fail(deps, json, { code: "entitlement_timeout", message: `entitlement not active within ${Math.round(timeoutMs / 1000)}s`, hint: "Complete the Stripe Checkout in the browser, then run `mailery subscribe <plan> --resume` to resume polling without creating Checkout, or check `mailery billing status`." });
           return;
         }
         if (!json) deps.stderr(".");

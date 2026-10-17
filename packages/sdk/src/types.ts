@@ -245,6 +245,8 @@ export interface CreateCheckoutInput {
   plan?: string;
   /** Credit-pack size for kind:"credit_pack". */
   credits?: number;
+  /** Persist and reuse this key for retries; a fresh key means a deliberate new purchase. */
+  idempotencyKey?: string;
 }
 
 export interface BillingPortalResult {

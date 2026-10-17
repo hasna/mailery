@@ -1,6 +1,6 @@
 {
   "name": "@hasna/mailery-sdk-internal",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Private internal workspace SDK bundled into the public @hasna/mailery package.",
   "license": "Apache-2.0",
   "type": "module",

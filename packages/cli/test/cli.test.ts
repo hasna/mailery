@@ -546,6 +546,25 @@ describe("Checkout retry and resume", () => {
     expect(parseJsonOut(h.out()).data).toMatchObject({ entitled: true, waited: true });
   });
 
+  test("credit-only resume reports entitlement without claiming an active subscription", async () => {
+    const h = harness({
+      env: { MAILERY_SESSION_TOKEN: SESSION },
+      route: (c) => c.path === "/api/v1/billing/overview"
+        ? { body: { balance: 1000, plans: {}, credit_packs: {}, subscriptions: [], ledger: [] } }
+        : { status: 500, body: { error: { code: "unexpected", message: "unexpected mutation" } } },
+    });
+    let browserOpens = 0;
+    h.deps.interactive = true;
+    h.deps.openBrowser = () => { browserOpens += 1; };
+    await runCli(argv("subscribe", "pro", "--resume"), h.deps);
+    expect(h.exitCode()).toBe(0);
+    expect(h.calls.map((c) => [c.method, c.path])).toEqual([["GET", "/api/v1/billing/overview"]]);
+    expect(h.calls[0]!.auth).toBe(`Bearer ${SESSION}`);
+    expect(browserOpens).toBe(0);
+    expect(h.out()).toContain("Entitlement active. Balance: 1000.");
+    expect(h.out()).not.toContain("Subscription active");
+  });
+
   test("poll timeout directs the caller to resume-only observation", async () => {
     const h = harness({
       env: { MAILERY_SESSION_TOKEN: SESSION },

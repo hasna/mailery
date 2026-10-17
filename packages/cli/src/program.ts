@@ -870,7 +870,7 @@ export function buildProgram(deps: CliDeps): Command {
         const overview = await client.getBillingStatus();
         if (isEntitled(overview)) {
           if (!json) deps.stderr(" active\n");
-          ok(deps, json, { plan, checkout_url: url, waited: true, entitled: true, balance: overview.balance, subscriptions: overview.subscriptions }, `Subscription active. Balance: ${overview.balance}.`);
+          ok(deps, json, { plan, checkout_url: url, waited: true, entitled: true, balance: overview.balance, subscriptions: overview.subscriptions }, `Entitlement active. Balance: ${overview.balance}.`);
           return;
         }
         if (Date.now() + intervalMs >= deadline) {

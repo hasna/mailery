@@ -25,7 +25,7 @@ The checks cover source boundaries, types, CLI/MCP/SDK behavior, public API cont
 
 ## Release
 
-Only `.github/workflows/publish-npm.yml` publishes. It runs on GitHub-hosted runners in the protected `npm-publish` environment and uses npm provenance. Configure the npm trusted publisher for `hasna/mailery`, workflow `publish-npm.yml`, environment `npm-publish`. Protect the main branch and require release review in that environment before enabling publication. The workflow refuses any other repository or branch.
+Only `.github/workflows/publish-npm.yml` publishes. It runs on GitHub-hosted runners in the protected `npm-publish` environment and uses npm provenance. Configure the npm trusted publisher for `hasna/mailery`, workflow `publish-npm.yml`, environment `npm-publish`. Protect the main branch and require release review before enabling publication. Before dispatching the workflow into `npm-publish`, the publisher must verify a GO recorded in project-linked Hasna Files from a distinct agent's review of the exact candidate in a fresh context in the publisher's native harness. The GO must bind the commit, tree, package, version, registry, access, distribution tag, workflow revision, and environment. The workflow refuses any other repository or branch.
 
 For an initial package publication that needs bootstrap authentication, the optional protected environment secret `HASNA_NPM_BOOTSTRAP_TOKEN` supplies the approved npm organization credential. Remove it after the trusted publisher is established. Never commit credentials or `.npmrc` authentication settings.
 

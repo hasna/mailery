@@ -9,11 +9,32 @@ const PKG_DIR = fileURLToPath(new URL("..", import.meta.url));
 const ROOT_DIR = join(PKG_DIR, "..", "..");
 const pkg = require(join(PKG_DIR, "package.json")) as {
   name: string;
+  version: string;
   bin?: Record<string, string>;
   exports?: Record<string, string | Record<string, string>>;
   files?: string[];
   publishConfig?: { registry?: string; access?: string; provenance?: boolean };
 };
+
+function expectVersionParity(executable: string, args: string[] = []): void {
+  const version = spawnSync(executable, [...args, "--version"], { encoding: "utf8", timeout: 10_000 });
+  expect(version.status).toBe(0);
+  expect(version.stderr).toBe("");
+  expect(version.stdout.trim()).toBe(pkg.version);
+
+  const initialize = spawnSync(executable, [...args, "mcp"], {
+    encoding: "utf8",
+    timeout: 10_000,
+    input: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "version-check", version: "1.0.0" },
+    } }) + "\n",
+  });
+  expect(initialize.status).toBe(0);
+  expect(initialize.stderr).toBe("");
+  const response = JSON.parse(initialize.stdout.trim());
+  expect(response).toMatchObject({ jsonrpc: "2.0", id: 1, result: { serverInfo: { name: "mailery", version: pkg.version } } });
+  expect(response.error).toBeUndefined();
+}
 
 const FORBIDDEN_PUBLIC_PACKAGE_TOKENS = [
   "registrar",
@@ -32,6 +53,12 @@ const FORBIDDEN_PUBLIC_PACKAGE_TOKENS = [
 ];
 
 describe("@hasna/mailery public package", () => {
+  test("built CLI and MCP report the public package version", () => {
+    const build = spawnSync("bun", ["run", "build"], { cwd: PKG_DIR, encoding: "utf8", timeout: 30_000 });
+    expect(build.status).toBe(0);
+    expectVersionParity("node", [join(PKG_DIR, "dist", "index.js")]);
+  }, 30_000);
+
   test("publishes the mailery binary and SDK subpath, not a mailery-cloud surface", () => {
     expect(pkg.name).toBe("@hasna/mailery");
     expect(pkg.bin?.mailery).toBe("dist/index.js");
@@ -80,6 +107,7 @@ describe("@hasna/mailery/sdk resolves under a real Node process", () => {
     const help = spawnSync(mailery, ["--help"], { encoding: "utf8" });
     expect(`${help.stdout ?? ""}${help.stderr ?? ""}`).toContain("Email identity for agents");
     expect(help.status).toBe(0);
+    expectVersionParity(mailery);
   });
 
   afterAll(() => {

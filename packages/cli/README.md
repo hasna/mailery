@@ -171,7 +171,7 @@ local config files; any historical files are left untouched.
 |---|---|
 | `signup --email --password [--name] [--invite-code]` | Create an account; returns session token (shown once) |
 | `login --email --password` / `logout` | Session lifecycle (tokens in env, not stored) |
-| `verify [--resend] [--poll]` | Check email-verification status from the terminal (email link is a one-time browser step). `--poll` waits for that click (default 10 min, max 30; `--email`, `--timeout`, `--interval`) and prints a fresh session token — the machine-bootstrap loop: `signup` → `verify --poll` → `keys create` → `export MAILERY_SESSION_TOKEN=…`/`export MAILERY_API_KEY=…` |
+| `verify [--resend] [--poll]` | Check email-verification status from the terminal (email link is a one-time browser step). `--poll` waits for that click (default 10 min, max 30; `--email`, `--timeout`, `--interval`) and prints a fresh session token. Then continue with `mailery subscribe pro`. |
 | `whoami` | Current identity, tenant, auth scopes |
 | `account export [--output <path>\|-] [--page-size <n>]` | Write a JSON export of the whole account (profile, mailboxes, labels, domains, key metadata, subscriptions, credits, every message with bodies and attachment metadata) to a file, or to stdout with `-`; session token only, never billing-gated |
 | `account delete --password <pw> --confirm-email <email>` | Permanently delete the account and everything in it (irreversible); refuses unless the typed email matches the session identity, and while a subscription is still active |
@@ -234,6 +234,9 @@ Tools: `send_email`, `list_inbox`, `read_message`, `update_message`,
 `create_mailbox`, `generate_digest`, `list_digests`, `get_billing_status`,
 `create_webhook`, `list_webhooks`, `test_webhook`, `list_suppressions`,
 `submit_feedback`.
+
+Checkout retries retain the original purchase intent. Supply and persist an explicit `idempotencyKey` in SDK `createCheckout({...})`, or `--idempotency-key` on CLI `subscribe`, for a deliberate purchase. Never change it on timeout or an uncertain outcome. Without a key, the accepted 0.1.0 call remains supported through the server's permanent tenant/actor/request legacy fence; identical requests replay their first attempt. A deliberate identical repeat purchase needs an explicit fresh key. Use `mailery subscribe pro --resume` or `getBillingStatus()` to observe entitlement without opening Checkout.
+
 
 ## License
 

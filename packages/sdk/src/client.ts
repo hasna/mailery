@@ -487,12 +487,16 @@ export class MaileryClient {
    * Open a Stripe Checkout session and return its redirect URL. Defaults to the
    * subscription flow for the given paid plan ("pro" or "scale"); an unknown
    * plan is rejected server-side with `invalid_plan` (400) rather than coerced.
+   * Omitted keys use the server's permanent legacy-intent fence. Supply and
+   * retain an explicit key for a deliberate new purchase; never change it on
+   * timeout or an uncertain outcome. Entitlement polling is getBillingStatus.
    */
   async createCheckout(planOrInput: string | CreateCheckoutInput = "pro"): Promise<string> {
     const input: CreateCheckoutInput = typeof planOrInput === "string"
       ? { kind: "subscription", plan: planOrInput }
       : { kind: planOrInput.kind ?? "subscription", plan: planOrInput.plan, credits: planOrInput.credits };
-    const result = await this.request<{ url: string }>(ENDPOINTS.createCheckout, { auth: "session", body: input });
+    const idempotencyKey = typeof planOrInput === "string" ? undefined : planOrInput.idempotencyKey;
+    const result = await this.request<{ url: string }>(ENDPOINTS.createCheckout, { auth: "session", body: input, idempotencyKey });
     return result.url;
   }
 

@@ -518,3 +518,70 @@ describe("subscribe", () => {
     expect(polls).toBe(2);
   });
 });
+
+describe("Checkout retry and resume", () => {
+  test("explicit purchase keys survive separate CLI invocations and stay out of the JSON body", async () => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const h = harness({
+        env: { MAILERY_SESSION_TOKEN: SESSION },
+        route: () => ({ body: { url: "https://stripe.test/original" } }),
+      });
+      await runCli(argv("subscribe", "pro", "--idempotency-key", "stable-cli-purchase", "--no-wait", "--json"), h.deps);
+      const creation = h.calls.find((c) => c.path === "/api/v1/billing/checkout")!;
+      expect(creation.headers["idempotency-key"]).toBe("stable-cli-purchase");
+      expect(creation.body).toEqual({ kind: "subscription", plan: "pro" });
+      expect(h.calls).toHaveLength(1);
+    }
+  });
+
+  test("--resume polls entitlement without any Checkout creation", async () => {
+    const h = harness({
+      env: { MAILERY_SESSION_TOKEN: SESSION },
+      route: (c) => c.path === "/api/v1/billing/overview"
+        ? { body: { balance: 1000, plans: {}, credit_packs: {}, subscriptions: [], ledger: [] } }
+        : { status: 500, body: { error: { code: "unexpected", message: "unexpected mutation" } } },
+    });
+    await runCli(argv("subscribe", "pro", "--resume", "--json"), h.deps);
+    expect(h.calls.map((c) => [c.method, c.path])).toEqual([["GET", "/api/v1/billing/overview"]]);
+    expect(parseJsonOut(h.out()).data).toMatchObject({ entitled: true, waited: true });
+  });
+
+  test("credit-only resume reports entitlement without claiming an active subscription", async () => {
+    const h = harness({
+      env: { MAILERY_SESSION_TOKEN: SESSION },
+      route: (c) => c.path === "/api/v1/billing/overview"
+        ? { body: { balance: 1000, plans: {}, credit_packs: {}, subscriptions: [], ledger: [] } }
+        : { status: 500, body: { error: { code: "unexpected", message: "unexpected mutation" } } },
+    });
+    let browserOpens = 0;
+    h.deps.interactive = true;
+    h.deps.openBrowser = () => { browserOpens += 1; };
+    await runCli(argv("subscribe", "pro", "--resume"), h.deps);
+    expect(h.exitCode()).toBe(0);
+    expect(h.calls.map((c) => [c.method, c.path])).toEqual([["GET", "/api/v1/billing/overview"]]);
+    expect(h.calls[0]!.auth).toBe(`Bearer ${SESSION}`);
+    expect(browserOpens).toBe(0);
+    expect(h.out()).toContain("Entitlement active. Balance: 1000.");
+    expect(h.out()).not.toContain("Subscription active");
+  });
+
+  test("poll timeout directs the caller to resume-only observation", async () => {
+    const h = harness({
+      env: { MAILERY_SESSION_TOKEN: SESSION },
+      route: (c) => c.path === "/api/v1/billing/checkout"
+        ? { body: { url: "https://stripe.test/original" } }
+        : { body: { balance: 0, plans: {}, credit_packs: {}, subscriptions: [], ledger: [] } },
+    });
+    await runCli(argv("subscribe", "pro", "--timeout", "1", "--interval", "3", "--json"), h.deps);
+    expect(parseJsonOut(h.out()).error).toMatchObject({ code: "entitlement_timeout" });
+    expect(parseJsonOut(h.out()).error!.hint).toContain("--resume");
+    expect(h.calls.filter((c) => c.method === "POST")).toHaveLength(1);
+  });
+
+  test("--resume refuses creation options without provider I/O", async () => {
+    const h = harness({ env: { MAILERY_SESSION_TOKEN: SESSION }, route: () => ({}) });
+    await runCli(argv("subscribe", "pro", "--resume", "--idempotency-key", "unused-purchase-key", "--json"), h.deps);
+    expect(h.calls).toHaveLength(0);
+    expect(parseJsonOut(h.out()).error!.code).toBe("cli_usage_error");
+  });
+});

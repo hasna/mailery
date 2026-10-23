@@ -15,6 +15,7 @@ import type {
   AccountExportOptions,
   AdminApiResult,
   AdminBillingAnomaliesOptions,
+  AdminBillingAnomaliesResult,
   AdminAuditPurgeInput,
   AdminAuditPurgePreflight,
   AdminAuditPurgeResult,
@@ -28,6 +29,7 @@ import type {
   CreateApiKeyInput,
   CreateApiKeyResult,
   CreateCheckoutInput,
+  CheckoutCountryPolicy,
   CreateDomainInput,
   CreateMailboxInput,
   DeleteAccountInput,
@@ -372,6 +374,19 @@ export class MaileryClient {
 
   // ─── Auth ────────────────────────────────────────────────────────────────────
 
+  getCurrentTerms(): Promise<import("./types.js").PublishedTerms> {
+    return this.request(ENDPOINTS.getCurrentTerms, { auth: "none" });
+  }
+
+  async getTermsVersion(version: string): Promise<string> {
+    const result = await this.request<{ raw: string }>(ENDPOINTS.getTermsVersion, { auth: "none", params: { version } });
+    return result.raw;
+  }
+
+  acceptTerms(input: import("./types.js").TermsAcceptanceInput): Promise<import("./types.js").TermsAcceptanceReceipt> {
+    return this.request(ENDPOINTS.acceptTerms, { auth: "session", body: input });
+  }
+
   /** Create an account. Returns a session bootstrap and caches the session token on the client. */
   async signup(input: SignupInput): Promise<MaileryAuthResult> {
     const result = await this.request<MaileryAuthResult>(ENDPOINTS.signup, { auth: "none", body: input });
@@ -483,18 +498,24 @@ export class MaileryClient {
 
   // ─── Billing ───────────────────────────────────────────────────────────────
 
+  /** First checkout step: present this list before collecting the country declaration or payment. */
+  getCheckoutCountryPolicy(): Promise<CheckoutCountryPolicy> {
+    return this.request(ENDPOINTS.getCheckoutCountryPolicy, { auth: "none" });
+  }
+
   /**
-   * Open a Stripe Checkout session and return its redirect URL. Defaults to the
-   * subscription flow for the given paid plan ("pro" or "scale"); an unknown
-   * plan is rejected server-side with `invalid_plan` (400) rather than coerced.
-   * Omitted keys use the server's permanent legacy-intent fence. Supply and
-   * retain an explicit key for a deliberate new purchase; never change it on
-   * timeout or an uncertain outcome. Entitlement polling is getBillingStatus.
+   * Open Stripe Checkout after presenting getCheckoutCountryPolicy(). Current
+   * new purchases require country, countryBasis and countryPolicyVersion.
+   * Omitting all declaration fields can replay only an exact pre-country
+   * purchase under its original key (including the historical no-header key).
+   * An absent claim fails admission before any insert or provider call.
+   * Retain the same purchase key on retry or uncertainty. A changed country or
+   * policy conflicts with that key rather than creating another payable session.
    */
   async createCheckout(planOrInput: string | CreateCheckoutInput = "pro"): Promise<string> {
     const input: CreateCheckoutInput = typeof planOrInput === "string"
       ? { kind: "subscription", plan: planOrInput }
-      : { kind: planOrInput.kind ?? "subscription", plan: planOrInput.plan, credits: planOrInput.credits };
+      : { kind: planOrInput.kind ?? "subscription", plan: planOrInput.plan, credits: planOrInput.credits, country: planOrInput.country, countryBasis: planOrInput.countryBasis, countryPolicyVersion: planOrInput.countryPolicyVersion };
     const idempotencyKey = typeof planOrInput === "string" ? undefined : planOrInput.idempotencyKey;
     const result = await this.request<{ url: string }>(ENDPOINTS.createCheckout, { auth: "session", body: input, idempotencyKey });
     return result.url;
@@ -524,7 +545,9 @@ export class MaileryClient {
    * Open a Stripe Checkout session that adds funds to the prepaid wallet.
    * `amountCents` must be at least 1000 ($10.00). `idempotencyKey` is REQUIRED
    * and must be stable across YOUR retries so a retry replays the same session
-   * instead of opening a second payable one.
+   * instead of opening a second payable one. Retain every original declaration
+   * field, including countryPolicyVersion. Omit all declaration fields only
+   * to replay an exact pre-country claim; that cannot create a new claim.
    */
   topUpWallet(input: WalletTopupInput): Promise<WalletTopupResult> {
     const { idempotencyKey, ...body } = input;
@@ -1002,11 +1025,11 @@ export class MaileryClient {
     return this.request(ENDPOINTS.adminAuditPurge, { auth: "admin", body: { applyToken: input.applyToken } });
   }
 
-  adminBillingAnomalies(options: AdminBillingAnomaliesOptions = {}): Promise<AdminApiResult> {
+  adminBillingAnomalies(options: AdminBillingAnomaliesOptions = {}): Promise<AdminBillingAnomaliesResult> {
     return this.request(ENDPOINTS.adminBillingAnomaliesPost, { auth: "admin", body: options });
   }
 
-  adminBillingAnomaliesGet(options: AdminBillingAnomaliesOptions = {}): Promise<AdminApiResult> {
+  adminBillingAnomaliesGet(options: AdminBillingAnomaliesOptions = {}): Promise<AdminBillingAnomaliesResult> {
     return this.request(ENDPOINTS.adminBillingAnomaliesGet, {
       auth: "admin",
       query: {

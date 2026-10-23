@@ -45,11 +45,18 @@ export interface MaileryMeResponse {
   auth: { via: MaileryAuthVia; scopes: string[] };
 }
 
+export interface PublishedTerms { version: string; url: string }
+export interface TermsAcceptanceInput { acceptedTerms: true; termsVersion: string }
+export interface TermsAcceptanceReceipt extends PublishedTerms { acceptedAt: string }
+
 export interface SignupInput {
   email: string;
   password: string;
   name?: string;
   inviteCode?: string;
+  /** Explicit opt-in only. Never derive from account creation or silently fill. */
+  acceptedTerms?: true;
+  termsVersion?: string;
 }
 
 export interface LoginInput {
@@ -190,7 +197,25 @@ export interface MaileryWalletTransaction {
   [key: string]: unknown;
 }
 
-export interface WalletTopupInput {
+/** Read the current policy and present its restrictions before asking for this declaration. */
+export interface CheckoutCountryInput {
+  /** ISO 3166-1 alpha-2 billing or residence country. Required by current servers. */
+  country?: string;
+  countryBasis?: "billing" | "residence";
+  /** Exact version returned by getCheckoutCountryPolicy(), after presenting the list. */
+  /** Exact original version. Never refresh it on a retry. Omit all country
+   * fields only for an exact pre-country replay; absent claims fail closed. */
+  countryPolicyVersion?: string;
+}
+export interface CheckoutCountryPolicy {
+  version: string;
+  restricted_countries: string[];
+  declaration_bases: Array<"billing" | "residence">;
+  disclosure_path: string;
+  pricing_path: string;
+}
+
+export interface WalletTopupInput extends CheckoutCountryInput {
   /** USD cents to add. Minimum 1000 ($10.00). */
   amountCents: number;
   /** Caller-supplied idempotency key sent as Idempotency-Key (required). */
@@ -239,7 +264,7 @@ export interface MaileryUsage {
 
 export type CheckoutKind = "subscription" | "credit_pack";
 
-export interface CreateCheckoutInput {
+export interface CreateCheckoutInput extends CheckoutCountryInput {
   kind?: CheckoutKind;
   /** Paid subscription plan key: "pro" or "scale" (omit to default to "pro"). */
   plan?: string;
@@ -619,11 +644,14 @@ export interface MaileryDomainAvailability {
   available: boolean;
   premium?: boolean;
   purchase_quote?: MaileryDomainPurchaseQuote;
+  /** Status skipped registrar availability for a connected domain; available=false is not a registrar response. */
+  check_status?: "not_requested";
   [key: string]: unknown;
 }
 
 export interface MaileryDomainStatus {
   domain?: string;
+  availability?: MaileryDomainAvailability;
   domain_record?: unknown;
   [key: string]: unknown;
 }
@@ -914,6 +942,11 @@ export interface AdminAuditPurgeResult {
   scope: AdminAuditPurgeScope;
   preflight_count: number;
   apply_token_id: string;
+}
+
+// Older servers may omit coverage. Absence never establishes reconciliation.
+export interface AdminBillingAnomaliesResult extends AdminApiResult {
+  foreignEventReconciliation?: { performed: boolean; checked: number; complete: boolean };
 }
 
 export interface AdminBillingAnomaliesOptions {

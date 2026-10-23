@@ -24,6 +24,9 @@ export interface EndpointSpec {
 export const ENDPOINTS = {
   health: { id: "health", method: "GET", path: "/api/v1", state: "unversioned" },
 
+  getCurrentTerms: { id: "getCurrentTerms", method: "GET", path: "/api/v1/terms/current", state: "stable" },
+  getTermsVersion: { id: "getTermsVersion", method: "GET", path: "/api/v1/terms/versions/{version}", state: "stable" },
+  acceptTerms: { id: "acceptTerms", method: "POST", path: "/api/v1/terms/accept", state: "stable" },
   signup: { id: "signup", method: "POST", path: "/api/v1/auth/signup", state: "stable" },
   login: { id: "login", method: "POST", path: "/api/v1/auth/login", state: "stable" },
   logout: { id: "logout", method: "POST", path: "/api/v1/auth/logout", state: "stable" },
@@ -51,6 +54,7 @@ export const ENDPOINTS = {
   // works even when every key is compromised. Frozen in docs/openapi.json.
   revokeAllKeys: { id: "revokeAllKeys", method: "POST", path: "/api/v1/keys/revoke-all", state: "stable" },
 
+  getCheckoutCountryPolicy: { id: "getCheckoutCountryPolicy", method: "GET", path: "/api/v1/billing/countries", state: "stable" },
   createCheckout: { id: "createCheckout", method: "POST", path: "/api/v1/billing/checkout", state: "stable" },
   billingOverview: { id: "billingOverview", method: "GET", path: "/api/v1/billing/overview", state: "stable" },
   billingPortal: { id: "billingPortal", method: "POST", path: "/api/v1/billing/portal", state: "stable" },

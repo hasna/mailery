@@ -204,7 +204,7 @@ export const MCP_TOOLS: McpToolDef[] = [
   },
   {
     name: "buy_domain",
-    description: "New domain purchases are unavailable at paid opening (domain_sales_disabled). Retained for original-key replay or observation-only reconciliation of an existing purchase. Connect a domain you already own through the CLI or SDK.",
+    description: "New domain purchases are unavailable at paid opening (domain_sales_disabled). Use get_domain_status to check an existing domain. To replay an existing purchase, use the SDK purchaseDomain method with the original idempotency key and unchanged request body. Connect a domain you already own through the CLI or SDK.",
     inputSchema: {
       type: "object",
       required: ["domain", "maxPriceCents", "currency", "idempotencyKey"],

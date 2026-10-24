@@ -31,6 +31,8 @@ test("MCP retains wallet/domain refusal codes", async () => {
   });
   const wallet = await callTool("add_wallet_funds", { amountCents: 1000, idempotencyKey: "original-request" }, client);
   const domain = await callTool("buy_domain", { domain: "owned.example", maxPriceCents: 1500, currency: "usd", idempotencyKey: "original-request" }, client);
+  expect(wallet.isError).toBe(true);
+  expect(domain.isError).toBe(true);
   expect(JSON.stringify(wallet)).toContain("wallet_funding_disabled");
   expect(JSON.stringify(domain)).toContain("domain_sales_disabled");
 });

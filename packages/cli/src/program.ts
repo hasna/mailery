@@ -1,3 +1,4 @@
+import { checkoutCountryCopy } from "./checkout-country-copy.js";
 // mailery — the mailery.co CLI. Every command maps to a
 // server-side operation over the /api/v1 surface via @hasna/mailery-sdk-internal. There
 // is NO local-server mode. Agent-first UX: non-interactive flags for
@@ -541,13 +542,20 @@ export function buildProgram(deps: CliDeps): Command {
     .requiredOption("--email <email>", "Account email")
     .requiredOption("--password <password>", "Account password")
     .option("--name <name>", "Display name")
-    .option("--invite-code <code>", "Invite code (when signup is invite-gated)");
+    .option("--invite-code <code>", "Invite code (when signup is invite-gated)")
+    .option("--accept-terms <version>", "Explicitly accept this exact Terms version after reading `mailery terms`");
   signup.action(async () => {
     const json = jsonOf(signup, deps);
-    const opts = signup.opts<{ email: string; password: string; name?: string; inviteCode?: string }>();
+    const opts = signup.opts<{ email: string; password: string; name?: string; inviteCode?: string; acceptTerms?: string }>();
     await run(deps, json, async () => {
       const client = buildClient(deps, { preferSession: true });
-      const result = await client.signup({ email: opts.email, password: opts.password, name: opts.name, inviteCode: opts.inviteCode });
+      const terms = await client.getCurrentTerms();
+      if (!json) deps.stderr(`Terms: ${new URL(terms.url, resolveBaseUrl(deps.env)).href} (version ${terms.version})\n`);
+      if (!opts.acceptTerms || opts.acceptTerms !== terms.version) {
+        fail(deps, json, { code: "terms_acceptance_required", message: `Read ${new URL(terms.url, resolveBaseUrl(deps.env)).href}. Signup requires explicit --accept-terms ${terms.version}` });
+        return;
+      }
+      const result = await client.signup({ email: opts.email, password: opts.password, name: opts.name, inviteCode: opts.inviteCode, acceptedTerms: true, termsVersion: opts.acceptTerms });
       ok(deps, json, { user: result.user, tenant: result.tenant, token: result.token }, [
         `Signed up as ${result.user.email} (tenant ${result.tenant.slug}).`,
         `Session token (shown once): ${result.token}`,
@@ -557,6 +565,23 @@ export function buildProgram(deps: CliDeps): Command {
         "Next: `mailery keys create --scopes full`, then `mailery mailboxes create <name>@<shared-domain>`.",
         "Custom domains and higher limits: `mailery subscribe pro`.",
       ].filter(Boolean));
+    });
+  });
+
+  const terms = leaf(program, "terms", "Read the exact current Terms link/version, or record the owner's explicit acceptance");
+  terms.option("--accept <version>", "Explicitly accept this version as the tenant owner (never selected by default)");
+  terms.action(async () => {
+    const json = jsonOf(terms, deps);
+    const opts = terms.opts<{ accept?: string }>();
+    await run(deps, json, async () => {
+      const client = buildClient(deps, { preferSession: true });
+      const current = await client.getCurrentTerms();
+      if (!opts.accept) {
+        ok(deps, json, current, [`Terms: ${new URL(current.url, resolveBaseUrl(deps.env)).href}`, `Version: ${current.version}`, `After reading, the tenant owner may run: mailery terms --accept ${current.version}`]);
+        return;
+      }
+      const receipt = await client.acceptTerms({ acceptedTerms: true, termsVersion: opts.accept });
+      ok(deps, json, receipt, `Accepted Terms ${receipt.version} at ${receipt.acceptedAt}.`);
     });
   });
 
@@ -841,8 +866,27 @@ export function buildProgram(deps: CliDeps): Command {
   });
 
   // ── billing ──
+  const countryCopy = checkoutCountryCopy(deps.env);
+  // Read the server's current policy before dispatch. Always emit this disclosure,
+  // including JSON automation (stderr), before any payable-session POST.
+  async function paidCountryDeclaration(client: MaileryClient, opts: { country?: string; countryBasis?: string; countryPolicyVersion?: string; replayLegacy?: boolean }) {
+    if (opts.replayLegacy) {
+      if (opts.country !== undefined || opts.countryBasis !== undefined || opts.countryPolicyVersion !== undefined) throw new MaileryError(countryCopy.legacyConflict, { code: "cli_usage_error" });
+      return {};
+    }
+    const policy = await client.getCheckoutCountryPolicy();
+    deps.stderr(`${countryCopy.restrictions} ${policy.restricted_countries.join(", ")}. ${countryCopy.review} ${client.baseUrl}${policy.disclosure_path}. ${countryCopy.free}\n`);
+    if (!opts.country) throw new MaileryError(countryCopy.required, { code: "checkout_country_required", details: policy });
+    if (opts.countryBasis !== "billing" && opts.countryBasis !== "residence") throw new MaileryError(countryCopy.basisError, { code: "cli_usage_error" });
+    if (!opts.countryPolicyVersion) throw new MaileryError(countryCopy.policyRequired, { code: "checkout_country_policy_required", details: policy });
+    return { country: opts.country.trim().toUpperCase(), countryBasis: opts.countryBasis as "billing" | "residence", countryPolicyVersion: opts.countryPolicyVersion };
+  }
   const subscribe = leaf(program, "subscribe <plan>", "Start a subscription (plan: pro or scale): open Stripe Checkout and wait until the entitlement is active");
   subscribe
+    .option("--country <code>", countryCopy.countryOption)
+    .option("--country-basis <basis>", countryCopy.basisOption)
+    .option("--country-policy-version <version>", countryCopy.policyOption)
+    .option("--replay-legacy", countryCopy.legacyOption)
     .option("--no-wait", "Print the checkout URL and exit without polling for entitlement")
     .option("--idempotency-key <key>", "Stable purchase key; reuse it after failure or timeout (a fresh key starts a deliberate new purchase)")
     .option("--resume", "Only poll entitlement; do not open another Checkout session")
@@ -850,13 +894,13 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--interval <seconds>", "Entitlement poll interval in seconds", "3");
   subscribe.action(async (plan: string) => {
     const json = jsonOf(subscribe, deps);
-    const opts = subscribe.opts<{ wait: boolean; timeout: string; interval: string; idempotencyKey?: string; resume?: boolean }>();
+    const opts = subscribe.opts<{ wait: boolean; timeout: string; interval: string; idempotencyKey?: string; resume?: boolean; country?: string; countryBasis?: string; countryPolicyVersion?: string; replayLegacy?: boolean }>();
     await run(deps, json, async () => {
       const client = buildClient(deps, { preferSession: true });
       if (opts.resume && (!opts.wait || opts.idempotencyKey)) {
         throw new MaileryError("--resume only polls entitlement; use it without --no-wait or --idempotency-key", { code: "cli_usage_error" });
       }
-      const url = opts.resume ? undefined : await client.createCheckout({ kind: "subscription", plan, idempotencyKey: opts.idempotencyKey });
+      const url = opts.resume ? undefined : await client.createCheckout({ kind: "subscription", plan, idempotencyKey: opts.idempotencyKey, ...await paidCountryDeclaration(client, opts) });
       if (url && deps.interactive) deps.openBrowser?.(url);
       if (!opts.wait) {
         ok(deps, json, { plan, checkout_url: url, waited: false }, [`Checkout URL: ${url}`, "Complete payment in the browser; run `mailery subscribe "+plan+" --resume` to poll without opening Checkout."]);
@@ -904,6 +948,11 @@ export function buildProgram(deps: CliDeps): Command {
   // The wallet is the USD balance domain purchases and renewals are charged
   // against. It is reported separately from send credits on purpose: they are
   // different currencies with different economics.
+  const billingCountries = leaf(billing, "countries", countryCopy.command);
+  billingCountries.action(async () => {
+    const json = jsonOf(billingCountries, deps);
+    await run(deps, json, async () => { const client = buildClient(deps); const policy = await client.getCheckoutCountryPolicy(); ok(deps, json, policy, [`${countryCopy.restrictions} ${policy.restricted_countries.join(", ")}`, `${countryCopy.review} ${client.baseUrl}${policy.disclosure_path}`]); });
+  });
   const billingWallet = leaf(billing, "wallet", "Show the prepaid wallet balance domain purchases and renewals are charged against");
   billingWallet.option("--limit <n>", "Wallet transactions to show (1-100, default 20)");
   billingWallet.action(async () => {
@@ -920,11 +969,15 @@ export function buildProgram(deps: CliDeps): Command {
   });
 
   const billingAddFunds = leaf(billing, "add-funds <amount>", "Add funds to the prepaid wallet (amount in dollars, e.g. 25 or 25.00; minimum 10)");
+  billingAddFunds.option("--country <code>", countryCopy.countryOption);
+  billingAddFunds.option("--country-basis <basis>", countryCopy.basisOption);
+  billingAddFunds.option("--country-policy-version <version>", countryCopy.policyOption);
+  billingAddFunds.option("--replay-legacy", countryCopy.legacyOption);
   billingAddFunds.option("--yes", "Confirm the top-up may spend money (required; non-interactive)");
   billingAddFunds.option("--idempotency-key <key>", "Caller-stable key so a retried top-up replays the same checkout instead of opening a second one");
   billingAddFunds.action(async (amount: string) => {
     const json = jsonOf(billingAddFunds, deps);
-    const opts = billingAddFunds.opts<{ yes?: boolean; idempotencyKey?: string }>();
+    const opts = billingAddFunds.opts<{ yes?: boolean; idempotencyKey?: string; country?: string; countryBasis?: string; countryPolicyVersion?: string; replayLegacy?: boolean }>();
     await run(deps, json, async () => {
       const amountCents = parseUsdAmountToCents(amount);
       if (amountCents === undefined) {
@@ -965,7 +1018,7 @@ export function buildProgram(deps: CliDeps): Command {
         return;
       }
       const client = buildClient(deps, { preferSession: true });
-      const result = await client.topUpWallet({ amountCents, idempotencyKey: opts.idempotencyKey });
+      const result = await client.topUpWallet({ amountCents, idempotencyKey: opts.idempotencyKey, ...await paidCountryDeclaration(client, opts) });
       if (deps.interactive && result.url) deps.openBrowser?.(result.url);
       ok(deps, json, result, [
         `Top-up of ${formatUsdCents(amountCents)} started.`,
@@ -1290,7 +1343,10 @@ export function buildProgram(deps: CliDeps): Command {
       const client = buildClient(deps);
       const status = await client.getDomainStatus(domain);
       const record = status.domain_record as MaileryTenantDomain | null | undefined;
-      ok(deps, json, status, record ? [`${record.domain} (${record.id})`, ...domainStateLines(record)] : undefined);
+      ok(deps, json, status, record ? [
+        `${record.domain} (${record.id})`, ...domainStateLines(record),
+        ...(status.availability?.check_status === "not_requested" ? ["Registrar availability: not requested for a connected domain"] : []),
+      ] : undefined);
     });
   });
 

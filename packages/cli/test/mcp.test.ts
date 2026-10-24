@@ -24,16 +24,20 @@ describe("protocol", () => {
     expect(res).toBeNull();
   });
 
-  test("tools/list returns exactly the twenty-one documented tools", async () => {
+  test("tools/list returns exactly the twenty-five documented tools", async () => {
     const res = await handleMcpMessage({ jsonrpc: "2.0", id: 2, method: "tools/list" }, client(() => ({})));
     const names = (res!.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name).sort();
     expect(names).toEqual([
+      "accept_terms",
+      "signup",
+      "get_terms",
       "add_wallet_funds",
       "buy_domain",
       "create_mailbox",
       "create_webhook",
       "generate_digest",
       "get_billing_status",
+      "get_checkout_country_policy",
       "get_domain_status",
       "get_message_events",
       "list_changes",
@@ -51,15 +55,17 @@ describe("protocol", () => {
       "update_message",
     ].sort());
     // Manifest and dispatcher agree.
-    expect(MCP_TOOLS).toHaveLength(21);
+    expect(MCP_TOOLS).toHaveLength(25);
   });
 
   test("every pure-read tool carries readOnlyHint; flag updates are marked non-destructive", () => {
     const readOnly = MCP_TOOLS.filter((t) => t.annotations?.readOnlyHint === true).map((t) => t.name).sort();
     expect(readOnly).toEqual([
       "get_billing_status",
+      "get_checkout_country_policy",
       "get_domain_status",
       "get_message_events",
+      "get_terms",
       "list_changes",
       "list_digests",
       "list_inbox",

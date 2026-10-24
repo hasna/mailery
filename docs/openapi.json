@@ -834,7 +834,9 @@
         "type": "object",
         "required": [
           "email",
-          "password"
+          "password",
+          "acceptedTerms",
+          "termsVersion"
         ],
         "properties": {
           "email": {
@@ -850,6 +852,18 @@
           },
           "inviteCode": {
             "type": "string"
+          },
+          "acceptedTerms": {
+            "type": "boolean",
+            "enum": [
+              true
+            ],
+            "description": "Explicit unselected acceptance of the exact termsVersion. Never inferred."
+          },
+          "termsVersion": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "Exact SHA-256 version returned by GET /api/v1/terms/current"
           }
         }
       },
@@ -2175,6 +2189,7 @@
         }
       },
       "DomainProviderStatus": {
+        "description": "Connected domains skip the availability lookup only when the complete tenant-persisted record has purchase_status=not_requested and no paid-attempt provenance. Any retained marker, even malformed, and purchased or unknown/untracked domains retain the check.",
         "type": "object",
         "required": [
           "domain",
@@ -2183,6 +2198,21 @@
           "records"
         ],
         "properties": {
+          "availability": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DomainAvailability"
+              }
+            ],
+            "properties": {
+              "check_status": {
+                "enum": [
+                  "not_requested"
+                ],
+                "description": "An availability lookup was deliberately not requested. available=false and purchase_supported=false are conservative; no quote is returned."
+              }
+            }
+          },
           "domain": {
             "type": "string"
           },
@@ -2445,8 +2475,59 @@
               "scale"
             ],
             "description": "Paid identity tier to subscribe to (defaults to 'pro'). The 'free' tier has no checkout."
+          },
+          "country": {
+            "type": "string",
+            "pattern": "^[A-Za-z]{2}$",
+            "description": "Customer-declared ISO 3166-1 alpha-2 billing or residence country. Not nationality or IP."
+          },
+          "countryBasis": {
+            "type": "string",
+            "enum": [
+              "billing",
+              "residence"
+            ]
+          },
+          "countryPolicyVersion": {
+            "type": "string",
+            "description": "Exact version read from GET /api/v1/billing/countries after presenting its restrictions to the customer."
           }
-        }
+        },
+        "description": " New purchases require the full country declaration. Omitting all three declaration fields replays only an exact pre-country claim: checkout retains its original actor/kind/plan/credits fingerprint, and wallet retains its original amountCents fingerprint under the authenticated tenant and key. Missing claims fail country admission before insertion or provider I/O. Supplying any declaration never matches a legacy fingerprint. Retain the exact original countryPolicyVersion on retries; never substitute the current version.",
+        "allOf": [
+          {
+            "anyOf": [
+              {
+                "required": [
+                  "country",
+                  "countryBasis",
+                  "countryPolicyVersion"
+                ]
+              },
+              {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "country"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "countryBasis"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "countryPolicyVersion"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "AccountDeleteRequest": {
         "type": "object",
@@ -2603,6 +2684,31 @@
                   "null"
                 ],
                 "format": "uuid"
+              }
+            }
+          },
+          "terms_acceptances": {
+            "type": "array",
+            "description": "Owner-path projection of immutable tenant consent receipts. Does not infer consent for old accounts.",
+            "items": {
+              "type": "object",
+              "required": [
+                "userId",
+                "version",
+                "acceptedAt"
+              ],
+              "properties": {
+                "userId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "version": {
+                  "type": "string"
+                },
+                "acceptedAt": {
+                  "type": "string",
+                  "format": "date-time"
+                }
               }
             }
           }
@@ -3158,8 +3264,59 @@
             "minimum": 1000,
             "maximum": 100000,
             "description": "USD cents to add. Minimum 1000 ($10.00); presets are 1000, 2500, 5000, 10000. `amount_cents` is accepted as an alias."
+          },
+          "country": {
+            "type": "string",
+            "pattern": "^[A-Za-z]{2}$",
+            "description": "Customer-declared ISO 3166-1 alpha-2 billing or residence country. Not nationality or IP."
+          },
+          "countryBasis": {
+            "type": "string",
+            "enum": [
+              "billing",
+              "residence"
+            ]
+          },
+          "countryPolicyVersion": {
+            "type": "string",
+            "description": "Exact version read from GET /api/v1/billing/countries after presenting its restrictions to the customer."
           }
-        }
+        },
+        "description": " New purchases require the full country declaration. Omitting all three declaration fields replays only an exact pre-country claim: checkout retains its original actor/kind/plan/credits fingerprint, and wallet retains its original amountCents fingerprint under the authenticated tenant and key. Missing claims fail country admission before insertion or provider I/O. Supplying any declaration never matches a legacy fingerprint. Retain the exact original countryPolicyVersion on retries; never substitute the current version.",
+        "allOf": [
+          {
+            "anyOf": [
+              {
+                "required": [
+                  "country",
+                  "countryBasis",
+                  "countryPolicyVersion"
+                ]
+              },
+              {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "country"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "countryBasis"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "countryPolicyVersion"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "WalletTopupResult": {
         "type": "object",
@@ -3482,6 +3639,60 @@
           }
         },
         "description": "UTC monthly successfully imported recipient mailbox copies. Free 6000, Pro 20000, Scale 200000; one usage credit per overage copy. Test mail is unmetered. Near allowance starts at 80%; exhausted unfunded or suspended imports pause for bounded retry."
+      },
+      "PublishedTerms": {
+        "type": "object",
+        "required": [
+          "version",
+          "url"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "url": {
+            "type": "string",
+            "description": "Relative URL rendering the immutable legal document with current shared footer chrome. Version hashes archived legal source, not presentation chrome."
+          }
+        }
+      },
+      "CheckoutCountryPolicy": {
+        "type": "object",
+        "required": [
+          "version",
+          "restricted_countries",
+          "declaration_bases",
+          "disclosure_path",
+          "pricing_path"
+        ],
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "restricted_countries": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "declaration_bases": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "billing",
+                "residence"
+              ]
+            }
+          },
+          "disclosure_path": {
+            "type": "string"
+          },
+          "pricing_path": {
+            "type": "string"
+          }
+        }
       }
     },
     "responses": {
@@ -3736,6 +3947,15 @@
           },
           "429": {
             "description": "Signup rate limited"
+          },
+          "428": {
+            "description": "Explicit Terms acceptance missing or invalid"
+          },
+          "409": {
+            "description": "Account already exists or Terms version changed"
+          },
+          "503": {
+            "description": "Terms catalogue or compatibility fence unavailable"
           }
         }
       }
@@ -4556,7 +4776,7 @@
           "Billing"
         ],
         "summary": "Create a Stripe checkout URL",
-        "description": "Creates a Stripe checkout session for a Pro/Scale subscription or a one-time credit pack. Requires an interactive owner/admin session. Rate limited to 10 attempts per tenant/actor per hour. Purchased credits never expire. When MAILERY_REQUIRE_EMAIL_VERIFICATION is enabled (default in production), an unverified email is rejected with 403 email_verification_required. Idempotency-Key is optional only for compatibility with public client 0.1.0: without it, the same tenant/actor and normalized purchase intent permanently replays its first attempt. There is no lease/TTL rollover. A deliberate identical repeat purchase requires an explicit new key via an upgraded client. Supplied keys bind the normalized kind/plan/credits and actor; a changed request returns 409 before provider I/O. Lost provider results or local persistence failures return checkout_outcome_ambiguous: keep the original key and reconcile it, never automatically start another purchase. Use billing status or CLI subscribe --resume for observation without creation.",
+        "description": "Creates a Stripe checkout session for a Pro/Scale subscription or a one-time credit pack. Requires an interactive owner/admin session. Rate limited to 10 attempts per tenant/actor per hour. Purchased credits never expire. When MAILERY_REQUIRE_EMAIL_VERIFICATION is enabled (default in production), an unverified email is rejected with 403 email_verification_required. Idempotency-Key is optional only for compatibility with public client 0.1.0: without it, the same tenant/actor and normalized purchase intent permanently replays its first attempt. There is no lease/TTL rollover. A deliberate identical repeat purchase requires an explicit new key via an upgraded client. Supplied keys bind the normalized kind/plan/credits and actor; a changed request returns 409 before provider I/O. Lost provider results or local persistence failures return checkout_outcome_ambiguous: keep the original key and reconcile it, never automatically start another purchase. Use billing status or CLI subscribe --resume for observation without creation. First read GET /api/v1/billing/countries and present the list before payment. Requires country, countryBasis (billing or residence), and countryPolicyVersion. Listed countries are refused before provider I/O. The declaration is bound to the authenticated actor and purchase fingerprint and copied to Stripe metadata. Stripe billing-address editing is not locked or independently verified.  New purchases require the full country declaration. Omitting all three declaration fields replays only an exact pre-country claim: checkout retains its original actor/kind/plan/credits fingerprint, and wallet retains its original amountCents fingerprint under the authenticated tenant and key. Missing claims fail country admission before insertion or provider I/O. Supplying any declaration never matches a legacy fingerprint. Retain the exact original countryPolicyVersion on retries; never substitute the current version.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -4586,16 +4806,22 @@
             }
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "description": "checkout_country_restricted, owner-session refusal, or email_verification_required"
           },
           "409": {
-            "description": "subscription_exists, idempotency_key_conflict, idempotency_request_in_progress or checkout_outcome_ambiguous. An uncertain attempt never starts another provider session."
+            "description": "subscription_exists, idempotency_key_conflict, idempotency_request_in_progress or checkout_outcome_ambiguous. An uncertain attempt never starts another provider session. checkout_country_policy_changed or idempotency_key_conflict when the declaration or policy differs. Retain the original purchase key."
           },
           "429": {
             "description": "Checkout rate limited; retry after the Retry-After header"
           },
           "400": {
-            "description": "Invalid paid plan or Idempotency-Key"
+            "description": "Invalid paid plan or Idempotency-Key; checkout_country_required, checkout_country_invalid, or checkout_country_basis_required"
+          },
+          "503": {
+            "description": "billing_not_configured: billing, or on a live-mode server the selected plan's catalogue price, is not configured. Nothing is claimed and no checkout is created."
+          },
+          "428": {
+            "description": "A new paid-entry admission requires tenant owner acceptance of the exact current Terms. Idempotent replays and reconciliation retain their original admission."
           }
         },
         "parameters": [
@@ -5734,6 +5960,9 @@
           },
           "409": {
             "description": "system_domain_reserved: the Mailery system domain cannot be a tenant domain; shared_domain_reserved: the shared free-tier sending domain (and any subdomain of it) is platform-owned and cannot be configured as a tenant domain"
+          },
+          "428": {
+            "description": "New custom-domain setup requires current-version tenant-owner acceptance; existing funded domain resumes are unchanged."
           }
         }
       }
@@ -5804,6 +6033,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "428": {
+            "description": "A new paid-entry admission requires tenant owner acceptance of the exact current Terms. Idempotent replays and reconciliation retain their original admission."
           }
         },
         "parameters": [
@@ -5853,6 +6085,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "428": {
+            "description": "A new paid-entry admission requires tenant owner acceptance of the exact current Terms. Idempotent replays and reconciliation retain their original admission."
           }
         },
         "parameters": [
@@ -6473,7 +6708,7 @@
         "description": "Runs the billing reconciliation sweep. Stripe subscription checks use only the server-side Stripe configuration; clients never send Stripe keys.",
         "responses": {
           "200": {
-            "description": "Billing anomalies report"
+            "description": "Billing anomalies report. Includes foreignEventReconciliation {performed, checked, complete}; checked counts reclassified candidate events, not all historical events. If complete is false, ok is false even when eventAnomalies is empty. Historical foreign disputes without retained charge evidence remain visible. No charge fetch or money replay is performed."
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -6512,7 +6747,7 @@
         },
         "responses": {
           "200": {
-            "description": "Billing anomalies report"
+            "description": "Billing anomalies report. Includes foreignEventReconciliation {performed, checked, complete}; checked counts reclassified candidate events, not all historical events. If complete is false, ok is false even when eventAnomalies is empty. Historical foreign disputes without retained charge evidence remain visible. No charge fetch or money replay is performed."
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -7532,7 +7767,7 @@
           "Billing"
         ],
         "summary": "Add funds to the prepaid wallet",
-        "description": "Opens a one-time Stripe Checkout Session that credits the wallet on `checkout.session.completed`. Owner session and a verified email are required, the same 10/hour limit as POST /api/v1/billing/checkout applies, and an Idempotency-Key header is REQUIRED so a retry replays the same session instead of opening a second payable one.",
+        "description": "Opens a one-time Stripe Checkout Session that credits the wallet on `checkout.session.completed`. Owner session and a verified email are required, the same 10/hour limit as POST /api/v1/billing/checkout applies, and an Idempotency-Key header is REQUIRED so a retry replays the same session instead of opening a second payable one. Lost provider results, local persistence failures or unresolved success bookkeeping return checkout_outcome_ambiguous: keep the original key and reconcile that attempt before another purchase. An expired claim lease cannot start another session. First read GET /api/v1/billing/countries and present the list before payment. Requires country, countryBasis (billing or residence), and countryPolicyVersion. Listed countries are refused before provider I/O. The declaration is bound to the authenticated actor and purchase fingerprint and copied to Stripe metadata. Stripe billing-address editing is not locked or independently verified.  New purchases require the full country declaration. Omitting all three declaration fields replays only an exact pre-country claim: checkout retains its original actor/kind/plan/credits fingerprint, and wallet retains its original amountCents fingerprint under the authenticated tenant and key. Missing claims fail country admission before insertion or provider I/O. Supplying any declaration never matches a legacy fingerprint. Retain the exact original countryPolicyVersion on retries; never substitute the current version. Exact pre-country wallet replay projects only the historical terminal status409 request_outcome_ambiguous error to checkout_outcome_ambiguous with same-key reconciliation advice. Stored claim bytes and every unrelated terminal outcome remain unchanged.",
         "parameters": [
           {
             "name": "Idempotency-Key",
@@ -7567,19 +7802,25 @@
             }
           },
           "400": {
-            "description": "Amount below the $10 minimum, above the maximum, or a missing/invalid Idempotency-Key"
+            "description": "Amount below the $10 minimum, above the maximum, or a missing/invalid Idempotency-Key; checkout_country_required, checkout_country_invalid, or checkout_country_basis_required"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
-            "$ref": "#/components/responses/Forbidden"
+            "description": "checkout_country_restricted, owner-session refusal, or email_verification_required"
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
           },
           "503": {
             "description": "Billing is not configured on this server"
+          },
+          "428": {
+            "description": "A new paid-entry admission requires tenant owner acceptance of the exact current Terms. Idempotent replays and reconciliation retain their original admission."
+          },
+          "409": {
+            "description": "checkout_outcome_ambiguous for an unresolved payable attempt, idempotency_request_in_progress, checkout_country_policy_changed or idempotency_key_conflict. Retain the original purchase key and reconcile it before starting another purchase."
           }
         }
       }
@@ -7646,6 +7887,9 @@
           },
           "409": {
             "description": "The domain was not purchased through Mailery, its expiry could not be confirmed, the renewal was refused upstream (nothing charged), or the outcome is ambiguous and awaits reconciliation"
+          },
+          "428": {
+            "description": "A new paid-entry admission requires tenant owner acceptance of the exact current Terms. Idempotent replays and reconciliation retain their original admission."
           }
         }
       }
@@ -7697,6 +7941,167 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/terms/current": {
+      "get": {
+        "operationId": "getCurrentTerms",
+        "tags": [
+          "Auth"
+        ],
+        "security": [],
+        "summary": "Read current published Terms link and immutable version",
+        "responses": {
+          "200": {
+            "description": "Exact current Terms",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishedTerms"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Catalogue or compatibility fence unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/terms/versions/{version}": {
+      "get": {
+        "operationId": "getTermsVersion",
+        "tags": [
+          "Auth"
+        ],
+        "security": [],
+        "summary": "Retrieve an archived Terms document",
+        "parameters": [
+          {
+            "name": "version",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Archived legal wording rendered with shared footer chrome",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown version"
+          }
+        }
+      }
+    },
+    "/api/v1/terms/accept": {
+      "post": {
+        "operationId": "acceptTerms",
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Tenant owner explicitly accepts the exact current Terms version",
+        "description": "Session only. Repeating the same owner/version returns the first server timestamp. No API key or other tenant user may accept.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "acceptedTerms",
+                  "termsVersion"
+                ],
+                "properties": {
+                  "acceptedTerms": {
+                    "type": "boolean",
+                    "enum": [
+                      true
+                    ],
+                    "description": "Explicit unselected acceptance of the exact termsVersion. Never inferred."
+                  },
+                  "termsVersion": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$",
+                    "description": "Exact SHA-256 version returned by GET /api/v1/terms/current"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Immutable server-timed receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/PublishedTerms"
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "acceptedAt"
+                      ],
+                      "properties": {
+                        "acceptedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Version changed. Obtain explicit acceptance again."
+          },
+          "428": {
+            "description": "Explicit acceptance missing or invalid"
+          },
+          "403": {
+            "description": "Active tenant owner session required"
+          },
+          "503": {
+            "description": "Terms compatibility fence mismatch"
+          }
+        }
+      }
+    },
+    "/api/v1/billing/countries": {
+      "get": {
+        "operationId": "getCheckoutCountryPolicy",
+        "tags": [
+          "Billing"
+        ],
+        "summary": "Read current paid-checkout restrictions before preparing payment",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Current configured country policy. Present this list before requesting the declaration or payment.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckoutCountryPolicy"
+                }
+              }
+            }
           }
         }
       }

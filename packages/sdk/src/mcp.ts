@@ -65,6 +65,31 @@ const sendAttachments = {
 
 export const MCP_TOOLS: McpToolDef[] = [
   {
+    name: "get_terms",
+    description: "Read Mailery's exact current Terms link and immutable version before signup or accepting for paid entry. Never infer permission to accept.",
+    inputSchema: { type: "object", properties: {} },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: "accept_terms",
+    description: "Record the tenant owner's explicitly authorized acceptance of the exact version returned by get_terms. Do not select acceptance by default or accept without the owner's authority.",
+    inputSchema: {
+      type: "object", required: ["acceptedTerms", "termsVersion"],
+      properties: { acceptedTerms: { type: "boolean", const: true }, termsVersion: { type: "string" } },
+    },
+  },
+  {
+    name: "signup",
+    description: "Create a Mailery account only after showing the exact Terms link/version from get_terms and obtaining explicit acceptance. No country gate applies to free signup.",
+    inputSchema: {
+      type: "object", required: ["email", "password", "acceptedTerms", "termsVersion"],
+      properties: {
+        email: { type: "string" }, password: { type: "string" }, name: { type: "string" }, inviteCode: { type: "string" },
+        acceptedTerms: { type: "boolean", const: true }, termsVersion: { type: "string" },
+      },
+    },
+  },
+  {
     name: "send_email",
     description: "Send hosted email from a Mailery mailbox on an outbound-ready tenant domain. Supports attachments (base64 or the id of an attachment you already received), threaded replies (inReplyTo/references), custom X- headers, and an idempotency key.",
     inputSchema: {
@@ -173,7 +198,7 @@ export const MCP_TOOLS: McpToolDef[] = [
   },
   {
     name: "get_domain_status",
-    description: "Read domain readiness, warm-up state and remaining UTC-day recipient capacity. Pending warm-up means the domain is still ramping; zero remaining capacity or a pause blocks sends.",
+    description: "Read domain readiness, warm-up state and remaining UTC-day recipient capacity. Connected-domain availability.check_status=not_requested means no registrar availability was queried; available=false is conservative. Pending warm-up means the domain is still ramping; zero remaining capacity or a pause blocks sends.",
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", required: ["domain"], properties: { domain: { type: "string" } } },
   },
@@ -270,12 +295,21 @@ export const MCP_TOOLS: McpToolDef[] = [
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "get_checkout_country_policy",
+    description: "First checkout step. Read and show the current country restrictions to the customer before preparing a paid purchase. Signup and free use remain open. Obtain a billing or residence country declaration and retain this policy version for add_wallet_funds.",
+    annotations: { readOnlyHint: true },
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
     name: "add_wallet_funds",
-    description: "Open a Stripe Checkout session that adds USD to the prepaid wallet (the balance domain purchases and renewals are charged against). Minimum $10.00; presets are $10/$25/$50/$100. Returns a checkout URL a human must complete — funds land only after payment. Use a stable idempotencyKey so a retry replays the same session instead of opening a second payable one.",
+    description: "Open a Stripe Checkout session that adds USD to the prepaid wallet (the balance domain purchases and renewals are charged against). Minimum $10.00; presets are $10/$25/$50/$100. Returns a checkout URL a human must complete — funds land only after payment. Use a stable idempotencyKey and preserve all original country declaration fields and policy version on every retry. New purchases require all three country fields. Omit all three only to replay an exact pre-country purchase with its original amount/key; the server refuses a missing claim before creating a payable session.",
     inputSchema: {
       type: "object",
       required: ["amountCents", "idempotencyKey"],
       properties: {
+        country: { type: "string", description: "Customer-declared ISO 3166-1 alpha-2 billing or residence country. Never infer from IP or nationality." },
+        countryBasis: { type: "string", enum: ["billing", "residence"] },
+        countryPolicyVersion: { type: "string", description: "Original version from get_checkout_country_policy after showing its restrictions to the customer. Retain it on every retry, even after the current policy changes." },
         amountCents: { type: "integer", minimum: 1000, description: "USD cents to add; at least 1000 ($10.00)." },
         idempotencyKey: { type: "string", description: "Caller-stable key for this top-up attempt." },
       },
@@ -421,6 +455,14 @@ export async function callTool(name: string, rawArgs: Record<string, unknown> | 
   const args = rawArgs ?? {};
   try {
     switch (name) {
+      case "get_terms": return textResult(await client.getCurrentTerms());
+      case "accept_terms":
+      case "signup": {
+        if (args.acceptedTerms !== true || typeof args.termsVersion !== "string") return textResult({ code: "terms_acceptance_required", message: "Read get_terms and obtain explicit acceptance of its exact version" }, true);
+        if (name === "accept_terms") return textResult(await client.acceptTerms({ acceptedTerms: true, termsVersion: args.termsVersion }));
+        if (typeof args.email !== "string" || typeof args.password !== "string") return textResult({ code: "bad_request", message: "email and password required" }, true);
+        return textResult(await client.signup({ email: args.email, password: args.password, name: typeof args.name === "string" ? args.name : undefined, inviteCode: typeof args.inviteCode === "string" ? args.inviteCode : undefined, acceptedTerms: true, termsVersion: args.termsVersion }));
+      }
       case "send_email": {
         const input = sendInputFromArgs(args);
         if ("error" in input) return textResult(input.error, true);
@@ -544,6 +586,8 @@ export async function callTool(name: string, rawArgs: Record<string, unknown> | 
         return textResult(await client.listDigests({ limit: typeof args.limit === "number" ? args.limit : undefined }));
       case "get_billing_status":
         return textResult(await client.getBillingStatus());
+      case "get_checkout_country_policy":
+        return textResult(await client.getCheckoutCountryPolicy());
       case "add_wallet_funds": {
         const amountCents = arg<number>(args, "amountCents");
         const idempotencyKey = arg<string>(args, "idempotencyKey");
@@ -551,7 +595,7 @@ export async function callTool(name: string, rawArgs: Record<string, unknown> | 
           return textResult({ code: "bad_request", message: "amountCents must be an integer of at least 1000 ($10.00)" }, true);
         }
         if (!idempotencyKey) return textResult({ code: "bad_request", message: "idempotencyKey is required" }, true);
-        return textResult(await client.topUpWallet({ amountCents, idempotencyKey }));
+        return textResult(await client.topUpWallet({ amountCents, idempotencyKey, country: arg<string>(args, "country"), countryBasis: arg<"billing" | "residence">(args, "countryBasis"), countryPolicyVersion: arg<string>(args, "countryPolicyVersion") }));
       }
       case "create_webhook": {
         const url = arg<string>(args, "url");

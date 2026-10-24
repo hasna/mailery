@@ -4,10 +4,13 @@
 
 import { describe, expect, test } from "bun:test";
 import { runCli } from "../src/program.js";
+import { checkoutCountryCopy } from "../src/checkout-country-copy.js";
 import { argv, makeHarness, parseJsonOut, type Harness } from "./support.js";
 
 function harness(...args: Parameters<typeof makeHarness>): Harness {
-  return makeHarness(...args);
+  const options = args[0] ?? {};
+  const route = options.route;
+  return makeHarness({ ...options, route: route ? (call) => call.path === "/api/v1/billing/countries" ? { body: { version: "2026-10-23.1", restricted_countries: ["RO", "GB", "IM"], declaration_bases: ["billing", "residence"], disclosure_path: "/checkout", pricing_path: "/#pricing" } } : route(call) : undefined });
 }
 
 const SESSION = "sess_owner_1";
@@ -264,16 +267,16 @@ describe("domain purchase (P5, live)", () => {
 
 describe("credential storage hardening", () => {
   test("signup does NOT store the session token, only prints it once", async () => {
-    const h = harness({ route: (c) => c.path === "/api/v1/auth/signup" ? { status: 201, body: { token: SESSION, user: USER, tenant: TENANT } } : undefined });
-    await runCli(argv("signup", "--email", "agent@example.com", "--password", "Sup3rSecret!"), h.deps);
+    const h = harness({ route: (c) => c.path === "/api/v1/terms/current" ? { body: { version: "a".repeat(64), url: "/api/v1/terms/versions/" + "a".repeat(64) } } : c.path === "/api/v1/auth/signup" ? { status: 201, body: { token: SESSION, user: USER, tenant: TENANT } } : undefined });
+    await runCli(argv("signup", "--accept-terms", "a".repeat(64), "--email", "agent@example.com", "--password", "Sup3rSecret!"), h.deps);
     // Output contains the token and env export instruction
     expect(h.out()).toContain(SESSION);
     expect(h.out()).toContain("MAILERY_SESSION_TOKEN");
   });
 
   test("signup JSON mode includes token in data envelope", async () => {
-    const h = harness({ route: (c) => c.path === "/api/v1/auth/signup" ? { status: 201, body: { token: SESSION, user: USER, tenant: TENANT } } : undefined });
-    await runCli(argv("signup", "--email", "agent@example.com", "--password", "Sup3rSecret!", "--json"), h.deps);
+    const h = harness({ route: (c) => c.path === "/api/v1/terms/current" ? { body: { version: "a".repeat(64), url: "/api/v1/terms/versions/" + "a".repeat(64) } } : c.path === "/api/v1/auth/signup" ? { status: 201, body: { token: SESSION, user: USER, tenant: TENANT } } : undefined });
+    await runCli(argv("signup", "--accept-terms", "a".repeat(64), "--email", "agent@example.com", "--password", "Sup3rSecret!", "--json"), h.deps);
     const env = parseJsonOut(h.out());
     expect(env.ok).toBe(true);
     expect((env.data as { token: string }).token).toBe(SESSION);
@@ -489,7 +492,7 @@ describe("subscribe", () => {
       env: { MAILERY_SESSION_TOKEN: SESSION },
       route: (c) => c.path === "/api/v1/billing/checkout" ? { body: { url: "https://stripe.test/c/123" } } : { body: {} },
     });
-    await runCli(argv("subscribe", "pro", "--no-wait", "--json"), h.deps);
+    await runCli(argv("subscribe", "pro", "--country", "US", "--country-basis", "billing", "--country-policy-version", "2026-10-23.1", "--no-wait", "--json"), h.deps);
     const env = parseJsonOut(h.out());
     expect((env.data as { checkout_url: string; waited: boolean }).checkout_url).toBe("https://stripe.test/c/123");
     expect((env.data as { waited: boolean }).waited).toBe(false);
@@ -512,7 +515,7 @@ describe("subscribe", () => {
         return { body: {} };
       },
     });
-    await runCli(argv("subscribe", "pro", "--json"), h.deps);
+    await runCli(argv("subscribe", "pro", "--country", "US", "--country-basis", "billing", "--country-policy-version", "2026-10-23.1", "--json"), h.deps);
     const env = parseJsonOut(h.out());
     expect((env.data as { entitled: boolean }).entitled).toBe(true);
     expect(polls).toBe(2);
@@ -526,11 +529,13 @@ describe("Checkout retry and resume", () => {
         env: { MAILERY_SESSION_TOKEN: SESSION },
         route: () => ({ body: { url: "https://stripe.test/original" } }),
       });
-      await runCli(argv("subscribe", "pro", "--idempotency-key", "stable-cli-purchase", "--no-wait", "--json"), h.deps);
+      await runCli(argv("subscribe", "pro", "--country", "US", "--country-basis", "billing", "--country-policy-version", "2026-10-23.1", "--idempotency-key", "stable-cli-purchase", "--no-wait", "--json"), h.deps);
       const creation = h.calls.find((c) => c.path === "/api/v1/billing/checkout")!;
       expect(creation.headers["idempotency-key"]).toBe("stable-cli-purchase");
-      expect(creation.body).toEqual({ kind: "subscription", plan: "pro" });
-      expect(h.calls).toHaveLength(1);
+      expect(creation.body).toEqual({ kind: "subscription", plan: "pro", country: "US", countryBasis: "billing", countryPolicyVersion: "2026-10-23.1" });
+      expect(h.calls).toHaveLength(2);
+      expect(h.calls[0]!.path).toBe("/api/v1/billing/countries");
+      expect(h.err()).toContain("RO, GB, IM");
     }
   });
 
@@ -541,7 +546,7 @@ describe("Checkout retry and resume", () => {
         ? { body: { balance: 1000, plans: {}, credit_packs: {}, subscriptions: [], ledger: [] } }
         : { status: 500, body: { error: { code: "unexpected", message: "unexpected mutation" } } },
     });
-    await runCli(argv("subscribe", "pro", "--resume", "--json"), h.deps);
+    await runCli(argv("subscribe", "pro", "--country", "US", "--country-basis", "billing", "--country-policy-version", "2026-10-23.1", "--resume", "--json"), h.deps);
     expect(h.calls.map((c) => [c.method, c.path])).toEqual([["GET", "/api/v1/billing/overview"]]);
     expect(parseJsonOut(h.out()).data).toMatchObject({ entitled: true, waited: true });
   });
@@ -572,7 +577,7 @@ describe("Checkout retry and resume", () => {
         ? { body: { url: "https://stripe.test/original" } }
         : { body: { balance: 0, plans: {}, credit_packs: {}, subscriptions: [], ledger: [] } },
     });
-    await runCli(argv("subscribe", "pro", "--timeout", "1", "--interval", "3", "--json"), h.deps);
+    await runCli(argv("subscribe", "pro", "--country", "US", "--country-basis", "billing", "--country-policy-version", "2026-10-23.1", "--timeout", "1", "--interval", "3", "--json"), h.deps);
     expect(parseJsonOut(h.out()).error).toMatchObject({ code: "entitlement_timeout" });
     expect(parseJsonOut(h.out()).error!.hint).toContain("--resume");
     expect(h.calls.filter((c) => c.method === "POST")).toHaveLength(1);
@@ -580,8 +585,68 @@ describe("Checkout retry and resume", () => {
 
   test("--resume refuses creation options without provider I/O", async () => {
     const h = harness({ env: { MAILERY_SESSION_TOKEN: SESSION }, route: () => ({}) });
-    await runCli(argv("subscribe", "pro", "--resume", "--idempotency-key", "unused-purchase-key", "--json"), h.deps);
+    await runCli(argv("subscribe", "pro", "--country", "US", "--country-basis", "billing", "--country-policy-version", "2026-10-23.1", "--resume", "--idempotency-key", "unused-purchase-key", "--json"), h.deps);
     expect(h.calls).toHaveLength(0);
     expect(parseJsonOut(h.out()).error!.code).toBe("cli_usage_error");
   });
 });
+
+
+test("subscribe presents the current restrictions and refuses omission before any POST", async () => {
+  const h = harness({ env: { MAILERY_SESSION_TOKEN: SESSION }, route: () => ({ body: {} }) });
+  await runCli(argv("subscribe", "pro", "--no-wait", "--json"), h.deps);
+  expect(parseJsonOut(h.out()).error!.code).toBe("checkout_country_required");
+  expect(h.err()).toContain("RO, GB, IM");
+  expect(h.calls.map((call) => call.method)).toEqual(["GET"]);
+});
+
+
+test("country disclosure follows the selected CLI language without changing the declaration", async () => {
+  const h = harness({ env: { MAILERY_SESSION_TOKEN: SESSION, MAILERY_LANGUAGE: "ro" }, route: () => ({ body: { url: "http://127.0.0.1:55586/checkout" } }) });
+  await runCli(argv("subscribe", "pro", "--country", "US", "--country-basis", "billing", "--country-policy-version", "2026-10-23.1", "--no-wait", "--json"), h.deps);
+  expect(h.err()).toContain("Plata nu este disponibilă în:");
+  expect(h.calls.find((call) => call.method === "POST")?.body).toMatchObject({ country: "US", countryBasis: "billing", countryPolicyVersion: "2026-10-23.1" });
+});
+
+
+for (const command of [["subscribe", "pro", "--no-wait"], ["billing", "add-funds", "25", "--yes", "--idempotency-key", "explicit-basis-topup"]]) {
+  test(`${command[0]} requires an explicit billing or residence basis before a paid POST`, async () => {
+    for (const basisArgs of [[], ["--country-basis", "nationality"]]) {
+      const h = harness({ env: { MAILERY_SESSION_TOKEN: SESSION }, route: () => ({ body: {} }) });
+      await runCli(argv(...command, "--country", "US", ...basisArgs, "--json"), h.deps);
+      expect(parseJsonOut(h.out()).error!.code).toBe("cli_usage_error");
+      expect(h.exitCode()).not.toBe(0);
+      expect(h.calls.map((call) => call.method)).toEqual(["GET"]);
+      expect(h.err()).toContain("RO, GB, IM");
+    }
+  });
+
+  test(`${command[0]} forwards each explicitly chosen country basis`, async () => {
+    for (const countryBasis of ["billing", "residence"]) {
+      const h = harness({ env: { MAILERY_SESSION_TOKEN: SESSION }, route: () => ({ body: { url: "http://127.0.0.1:1/synthetic-checkout" } }) });
+      await runCli(argv(...command, "--country", "US", "--country-basis", countryBasis, "--country-policy-version", "2026-10-23.1", "--json"), h.deps);
+      expect(h.exitCode()).toBe(0);
+      expect(h.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+      expect(h.calls.find((call) => call.method === "POST")!.body).toMatchObject({ country: "US", countryBasis, countryPolicyVersion: "2026-10-23.1" });
+    }
+  });
+}
+
+
+for (const lang of ["en", "ro"] as const) {
+  test(`the ${lang} explicit subscription handoff returns its URL in JSON mode before entitlement`, async () => {
+    const command = ["pro", "--country", "US", "--country-basis", "residence", "--country-policy-version", "2026-10-23.1", "--idempotency-key", "copied-stable-purchase-key", "--no-wait"];
+    const h = harness({
+      env: { MAILERY_SESSION_TOKEN: SESSION, MAILERY_JSON: "1", MAILERY_LANGUAGE: lang },
+      route: (call) => call.path === "/api/v1/billing/checkout"
+        ? { body: { url: "http://127.0.0.1:1/synthetic-checkout" } }
+        : { body: { balance: 0, plans: {}, credit_packs: {}, subscriptions: [], ledger: [] } },
+    });
+    await runCli(argv("subscribe", ...command, "--timeout", "1"), h.deps);
+    expect(h.exitCode()).toBe(0);
+    expect(h.err()).toContain(checkoutCountryCopy({ MAILERY_LANGUAGE: lang }).restrictions);
+    expect(parseJsonOut(h.out()).data).toMatchObject({ checkout_url: "http://127.0.0.1:1/synthetic-checkout", waited: false });
+    expect(h.calls.map((call) => call.path)).toEqual(["/api/v1/billing/countries", "/api/v1/billing/checkout"]);
+    expect(h.calls[1]!.headers["idempotency-key"]).toBe("copied-stable-purchase-key");
+  });
+}

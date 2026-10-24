@@ -53,6 +53,13 @@ const OPENAPI_COVERAGE_EXCEPTIONS = new Map<string, string>([
 ]);
 
 describe("SDK ↔ /api/v1 contract drift", () => {
+  test("domain status documents an explicitly unqueried registrar without changing availability checks", async () => {
+    const spec = await Bun.file(SPEC_URL).json();
+    const availability = spec.components.schemas.DomainProviderStatus.properties.availability;
+    expect(availability.allOf).toEqual([{ $ref: "#/components/schemas/DomainAvailability" }]);
+    expect(availability.properties.check_status.enum).toEqual(["not_requested"]);
+    expect(spec.paths["/api/v1/domains/status"].get.responses["200"].content["application/json"].schema.$ref).toBe("#/components/schemas/DomainProviderStatus");
+  });
   test("docs/openapi.json is a valid OpenAPI 3.1 document with paths", async () => {
     const spec = await loadSpec();
     expect(spec.openapi).toBe("3.1.0");
@@ -116,6 +123,7 @@ describe("SDK ↔ /api/v1 contract drift", () => {
     expect(missing).toEqual([]);
   });
 
+
   test("the SDK surface stays covered by exactly the expected endpoint states", () => {
     // Locks the manifest so a future edit that silently drops a route or flips a
     // state is caught here.
@@ -128,7 +136,7 @@ describe("SDK ↔ /api/v1 contract drift", () => {
     expect(byState.pending ?? []).toEqual([]);
     expect(byState.unversioned).toEqual(["health"]);
     // Stable = the frozen /api/v1 surface the SDK depends on. The reverse
-    // OpenAPI/server gates above now provide the full exhaustive coverage
+    // OpenAPI coverage checks above now provide the full exhaustive coverage
     // assertion, so keep this test focused on accidental duplicate ids/states.
     expect(new Set(byState.stable ?? []).size).toBe((byState.stable ?? []).length);
     expect(byState.stable).toContain("accountExport");
@@ -153,7 +161,7 @@ test("billing OpenAPI includes inbound usage and account exports include its ret
   expect(spec.components.schemas.AccountExport.properties.inbound_usage_windows.type).toBe("array");
 });
 
-test("Checkout keeps additive 0.1.0 compatibility and documents durable caller binding", async () => {
+test("Checkout preserves original retry key compatibility and documents the required country declaration", async () => {
   const spec = await Bun.file(SPEC_URL).json();
   const operation = spec.paths["/api/v1/billing/checkout"].post;
   expect(operation.parameters).toContainEqual(expect.objectContaining({
@@ -163,4 +171,16 @@ test("Checkout keeps additive 0.1.0 compatibility and documents durable caller b
   expect(operation.description).toContain("permanently replays");
   expect(operation.description).toContain("checkout_outcome_ambiguous");
   expect(operation.responses["200"].content["application/json"].schema.required).toEqual(["url"]);
+});
+
+
+test("both payable entries require full declaration for creation and expose exact historical replay", async () => {
+  const spec = await Bun.file(SPEC_URL).json();
+  for (const name of ["CheckoutRequest", "WalletTopupRequest"]) {
+    const schema = spec.components.schemas[name];
+    expect(schema.allOf[0].anyOf[0].required).toEqual(["country", "countryBasis", "countryPolicyVersion"]);
+    expect(schema.allOf[0].anyOf[1].not.anyOf).toEqual(["country", "countryBasis", "countryPolicyVersion"].map(field => ({ required: [field] })));
+    expect(schema.description).toContain("exact pre-country claim");
+  }
+  expect(spec.paths["/api/v1/billing/countries"].get.security).toEqual([]);
 });

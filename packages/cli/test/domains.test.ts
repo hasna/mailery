@@ -22,6 +22,17 @@ test("domain status exposes the actual warm-up recipient cap in text and JSON", 
   await runCli(argv("domains", "status", "agent-mail.com", "--json"), j.deps);
   expect((parseJsonOut(j.out()).data as any).domain_record.warmup).toEqual(warmup);
 });
+test("connected-domain status explains an unqueried registrar and preserves its JSON marker", async () => {
+  const availability = { domain: "agent-mail.com", available: false, provider: "manual", mode: "live", purchase_supported: false, check_status: "not_requested" };
+  const route = () => ({ body: { domain: "agent-mail.com", availability, domain_record: domainRecord() } });
+  const text = makeHarness({ env: API_KEY, route });
+  await runCli(argv("domains", "status", "agent-mail.com"), text.deps);
+  expect(text.exitCode()).toBe(0);
+  expect(text.out()).toContain("Registrar availability: not requested for a connected domain");
+  const json = makeHarness({ env: API_KEY, route });
+  await runCli(argv("domains", "status", "agent-mail.com", "--json"), json.deps);
+  expect((parseJsonOut(json.out()).data as any).availability).toEqual(availability);
+});
 const ID = "0190a1b2-0000-7000-8000-000000000001";
 
 function domainRecord(overrides: Record<string, unknown> = {}) {

@@ -35,13 +35,21 @@ import { MaileryClient } from "@hasna/mailery/sdk";
 const mailery = new MaileryClient({ baseUrl: "https://mailery.co" });
 
 // 1. Bootstrap: sign up (or log in) — the session token is cached on the client.
-await mailery.signup({ email: "agent@example.com", password: "Correct horse 1A" });
+const terms = await mailery.getCurrentTerms();
+// Show terms.url and terms.version to the customer. Leave acceptance unselected.
+// Continue only after their explicit acceptance of this exact version.
+await mailery.signup({ email: "agent@example.com", password: "<password>", acceptedTerms: true, termsVersion: terms.version });
 
 // 2. Mint a scoped API key for daily use.
 const { key } = await mailery.createKey({ name: "agent", scopes: ["mail_read", "mail_write"] });
 
 // 3. Subscribe, then wait for the entitlement to land after the Stripe redirect.
-const checkoutUrl = await mailery.createCheckout("pro"); // paid tier: "pro" or "scale"
+const countryPolicy = await mailery.getCheckoutCountryPolicy();
+// Show the restrictions and obtain the customer declaration before continuing.
+const checkoutUrl = await mailery.createCheckout({
+  plan: "pro", country: "US", countryBasis: "billing",
+  countryPolicyVersion: countryPolicy.version, idempotencyKey: "<stable-purchase-key>",
+}); // paid tier: "pro" or "scale"
 await mailery.waitForEntitlement({ timeoutMs: 120_000 });
 
 // 4. Run daily on the API key.
@@ -68,8 +76,8 @@ raises `MaileryAuthRequiredError` before any request is made.
 
 ## Surface
 
-`health` · `signup` / `login` / `logout` / `me` · `createKey` / `listKeys` /
-`revokeKey` / `revokeAllKeys` · `createCheckout` / `getBillingStatus` /
+`health` · `getCurrentTerms` / `getTermsVersion` / `acceptTerms` · `signup` / `login` / `logout` / `me` · `createKey` / `listKeys` /
+`revokeKey` / `revokeAllKeys` · `getCheckoutCountryPolicy` / `createCheckout` / `getBillingStatus` /
 `getUsage` / `waitForEntitlement` · `send` / `listInbox` / `getMessage` ·
 `searchDomains` / `listDomains` / `getDomainStatus` / `purchaseDomain` ·
 `listWebhooks` / `createWebhook` / `getWebhook` / `updateWebhook` /
@@ -95,4 +103,26 @@ Subclasses: `MaileryAuthRequiredError` (missing credential, no request made),
 `MaileryTimeoutError` (`waitForEntitlement` deadline), and
 `NotYetAvailableError` (route not shipped yet).
 
-Checkout retries retain the original purchase intent. Supply and persist an explicit `idempotencyKey` in SDK `createCheckout({...})`, or `--idempotency-key` on CLI `subscribe`, for a deliberate purchase. Never change it on timeout or an uncertain outcome. Without a key, the accepted 0.1.0 call remains supported through the server's permanent tenant/actor/request legacy fence; identical requests replay their first attempt. A deliberate identical repeat purchase needs an explicit fresh key. Use `mailery subscribe pro --resume` or `getBillingStatus()` to observe entitlement without opening Checkout.
+Checkout retries retain the original purchase intent. Supply and persist an explicit `idempotencyKey` in SDK `createCheckout({...})`, or `--idempotency-key` on CLI `subscribe`, for a deliberate purchase. Never change it on timeout or an uncertain outcome. New purchases require all country declaration fields. Omitting those fields can only replay an exact pre-country claim with its original key (including its historical no-header key); it cannot create a new claim. A deliberate identical repeat purchase needs an explicit fresh key. Use `mailery subscribe pro --resume` or `getBillingStatus()` to observe entitlement without opening Checkout.
+
+## Paid purchase declarations and retries
+
+Read `getCheckoutCountryPolicy()` and show its restrictions before asking the customer for their billing or residence country. Free signup and free use do not require a country declaration.
+
+```ts
+const policy = await mailery.getCheckoutCountryPolicy();
+// Show policy to the customer and obtain their own declaration first.
+const purchase = {
+  kind: "subscription" as const,
+  plan: "pro",
+  country: "US",
+  countryBasis: "billing" as const,
+  countryPolicyVersion: policy.version,
+  idempotencyKey: "<stable-purchase-key>",
+};
+const checkoutUrl = await mailery.createCheckout(purchase);
+```
+
+Retain the complete original input on every retry, including its policy version. Never replace the purchase key after a timeout. `topUpWallet()` takes the same country fields plus `amountCents` and a stable `idempotencyKey`. Omit all country fields only when replaying an exact pre-country purchase with its original key and amount. The server refuses a missing historical claim before creating a payable session. The checkout URL still requires the customer's payment action.
+
+MCP clients first call `get_terms` and obtain explicit acceptance before `signup` or `accept_terms`. Before `add_wallet_funds`, call `get_checkout_country_policy`, show its restrictions, and retain the customer's declaration and original policy version.

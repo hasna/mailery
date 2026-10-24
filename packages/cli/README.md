@@ -56,7 +56,9 @@ No subscription, no card. The Free plan is 1 mailbox on the shared subdomain
 
 ```sh
 # 1. create an account — session token is printed ONCE (store it securely)
-mailery signup --email you@example.com --password 'StrongPass!42' --json
+mailery terms --json
+# Read the returned Terms link and version. Only after explicitly accepting:
+mailery signup --email you@example.com --password '<password>' --accept-terms '<exact-version>' --json
 # Store the returned token:
 export MAILERY_SESSION_TOKEN='sess_...'
 
@@ -97,11 +99,12 @@ and higher send limits are paid-tier features (`pro` / `scale`).
 # 1. subscribe to a paid identity tier — plan is `pro` or `scale` ("starter" is
 #    NOT a plan). Prints a Stripe Checkout URL, opens the browser when
 #    interactive, then polls until the entitlement is active (--no-wait skips).
-mailery subscribe pro
+mailery billing countries --json  # show restrictions and obtain the customer declaration first
+mailery subscribe pro --country <declared-ISO-code> --country-basis billing --country-policy-version <returned-version> --idempotency-key <stable-purchase-key>
 
 # 2. get a working, deliverable identity in ONE command:
 #    purchase -> zone -> mail DNS -> verification -> ready-to-send
-mailery billing add-funds 25 --yes --idempotency-key <stable-key>  # domains are paid from a prepaid wallet
+mailery billing add-funds 25 --country <declared-ISO-code> --country-basis billing --country-policy-version <returned-version> --yes --idempotency-key <stable-key>  # domains are paid from a prepaid wallet
 mailery domains search agent-mail.com --json      # check availability
 mailery domains buy agent-mail.com                # fetch and show the signed quote; no purchase
 mailery domains buy agent-mail.com --yes --max-price-cents <quoted-cents> --currency <quoted-currency> --idempotency-key <suggested-key>
@@ -140,10 +143,23 @@ domain that already sends re-plans it and pauses sending until `verify` and
 > from where it left off.
 >
 > **Domains are paid from a prepaid wallet.** Add funds first
-> (`mailery billing add-funds 25 --yes --idempotency-key <key>`, minimum $10);
+> (`mailery billing add-funds` with the declared country, policy version, and stable key, minimum $10);
 > the exact quoted all-in price is debited before anything is registered. A
 > wallet that cannot cover the quote returns `wallet_insufficient_funds` with
 > the shortfall and registers nothing. Check it with `mailery billing wallet`.
+
+## Terms and paid checkout
+
+Read `mailery terms --json` before signup. Pass `--accept-terms <exact-version>` only after the customer explicitly accepts that version. An existing tenant owner can record acceptance with `mailery terms --accept <exact-version>`.
+
+Before a new paid purchase, run `mailery billing countries --json` and show its restrictions to the customer. Ask for their billing or residence country. Do not infer it from an IP address or nationality. Signup and free use remain available without a country declaration.
+
+```sh
+mailery subscribe pro --country US --country-basis billing --country-policy-version '<returned-version>' --idempotency-key '<stable-purchase-key>' --no-wait --json
+mailery billing add-funds 10 --country US --country-basis residence --country-policy-version '<returned-version>' --idempotency-key '<stable-topup-key>' --yes --json
+```
+
+Use the customer's own declared country. Retain the same purchase key and every original declaration field, including policy version, after failure or uncertainty. A changed declaration conflicts with that key. To replay an exact purchase made before country declarations, use its original key with `--replay-legacy` and omit the country options. This cannot create a new purchase. `subscribe --resume` only observes entitlement.
 
 ## Authentication model
 
@@ -169,7 +185,8 @@ local config files; any historical files are left untouched.
 
 | Command | What it does |
 |---|---|
-| `signup --email --password [--name] [--invite-code]` | Create an account; returns session token (shown once) |
+| `signup --email --password --accept-terms <version> [--name] [--invite-code]` | Create an account; returns session token (shown once) |
+| `terms [--accept <version>]` | Read the exact Terms link/version. Explicit acceptance is an active tenant-owner operation. |
 | `login --email --password` / `logout` | Session lifecycle (tokens in env, not stored) |
 | `verify [--resend] [--poll]` | Check email-verification status from the terminal (email link is a one-time browser step). `--poll` waits for that click (default 10 min, max 30; `--email`, `--timeout`, `--interval`) and prints a fresh session token. Then continue with `mailery subscribe pro`. |
 | `whoami` | Current identity, tenant, auth scopes |
@@ -177,7 +194,8 @@ local config files; any historical files are left untouched.
 | `account delete --password <pw> --confirm-email <email>` | Permanently delete the account and everything in it (irreversible); refuses unless the typed email matches the session identity, and while a subscription is still active |
 | `keys create --scopes <csv> [--name]` | Mint an API key (shown once; store securely) |
 | `keys list` / `keys revoke <id>` / `keys revoke --all` | Manage keys (revoke `--all` = break-glass) |
-| `subscribe <plan> [--no-wait]` | Stripe Checkout handoff, then poll entitlement |
+| `subscribe <plan> --country <code> --country-basis <billing\|residence> --country-policy-version <version> [--no-wait]` | Stripe Checkout handoff, then poll entitlement |
+| `billing countries` | Current paid-checkout restrictions and policy version |
 | `billing status` / `usage` | Credit balance, inbound allowance/count/status/reset, prepaid wallet, plans, subscriptions, ledger |
 | `billing wallet [--limit <n>]` | Prepaid wallet balance and recent wallet transactions (domains are charged to it) |
 | `billing add-funds <dollars> --yes --idempotency-key <key>` | Stripe Checkout handoff that adds funds to the wallet (minimum $10; presets 10/25/50/100) |
@@ -229,13 +247,9 @@ Register it with any MCP client:
   "env": { "MAILERY_API_KEY": "ml_…" } } } }
 ```
 
-Tools: `send_email`, `list_inbox`, `read_message`, `update_message`,
-`list_changes`, `list_mailboxes`, `search_domains`, `get_domain_status`, `buy_domain`,
-`create_mailbox`, `generate_digest`, `list_digests`, `get_billing_status`,
-`create_webhook`, `list_webhooks`, `test_webhook`, `list_suppressions`,
-`submit_feedback`.
+Tools: `get_terms`, `accept_terms`, `signup`, `send_email`, `send_email_batch`, `get_message_events`, `list_inbox`, `read_message`, `search_domains`, `get_domain_status`, `buy_domain`, `create_mailbox`, `list_mailboxes`, `update_message`, `list_changes`, `generate_digest`, `list_digests`, `get_billing_status`, `get_checkout_country_policy`, `add_wallet_funds`, `create_webhook`, `list_webhooks`, `list_suppressions`, `test_webhook`, `submit_feedback`.
 
-Checkout retries retain the original purchase intent. Supply and persist an explicit `idempotencyKey` in SDK `createCheckout({...})`, or `--idempotency-key` on CLI `subscribe`, for a deliberate purchase. Never change it on timeout or an uncertain outcome. Without a key, the accepted 0.1.0 call remains supported through the server's permanent tenant/actor/request legacy fence; identical requests replay their first attempt. A deliberate identical repeat purchase needs an explicit fresh key. Use `mailery subscribe pro --resume` or `getBillingStatus()` to observe entitlement without opening Checkout.
+Checkout retries retain the original purchase intent. Supply and persist an explicit `idempotencyKey` in SDK `createCheckout({...})`, or `--idempotency-key` on CLI `subscribe`, for a deliberate purchase. Never change it on timeout or an uncertain outcome. New purchases require all country declaration fields. Omitting those fields can only replay an exact pre-country claim with its original key (including its historical no-header key); it cannot create a new claim. A deliberate identical repeat purchase needs an explicit fresh key. Use `mailery subscribe pro --resume` or `getBillingStatus()` to observe entitlement without opening Checkout.
 
 
 ## License

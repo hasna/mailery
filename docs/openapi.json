@@ -6007,7 +6007,7 @@
           "Domains"
         ],
         "summary": "Prepare a custom-domain identity",
-        "description": "Connect or prepare a custom-domain identity and return the DNS records Mailery needs to verify it. When purchase/buy is true, the request requires a signed availability quote and Idempotency-Key and is serialized before paid domain setup.",
+        "description": "First paid opening: new purchases and renewals are disabled (409 domain_sales_disabled); setup without buy/purchase remains available. Existing exact-key replay and observation-only reconciliation remain available. Connect or prepare a custom-domain identity and return the DNS records Mailery needs to verify it. When purchase/buy is true, the request requires a signed availability quote and Idempotency-Key and is serialized before paid domain setup.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -6036,6 +6036,9 @@
           },
           "428": {
             "description": "A new paid-entry admission requires tenant owner acceptance of the exact current Terms. Idempotent replays and reconciliation retain their original admission."
+          },
+          "409": {
+            "description": "First paid opening: new purchases and renewals are disabled (409 domain_sales_disabled); setup without buy/purchase remains available."
           }
         },
         "parameters": [
@@ -6059,7 +6062,7 @@
           "Domains"
         ],
         "summary": "Purchase and prepare a custom-domain identity",
-        "description": "Creates a paid custom-domain identity and drives it toward ownershipStatus: ready in one call. The same Idempotency-Key exactly replays its stored result. If verification is still pending or the stored result is incomplete, obtain a fresh quote and use a new key to continue from the current lifecycle state without double-charging or creating duplicate ownership. Requires domains:purchase scope and applies account, plan, and anti-abuse gates. AutoRenew defaults to false. The response carries lifecycle_steps, ownership_ready, and resumed.",
+        "description": "First paid opening: new purchases and renewals are disabled (409 domain_sales_disabled); setup without buy/purchase remains available. Existing exact-key replay and observation-only reconciliation remain available. Creates a paid custom-domain identity and drives it toward ownershipStatus: ready in one call. The same Idempotency-Key exactly replays its stored result. If verification is still pending or the stored result is incomplete, obtain a fresh quote and use a new key to continue from the current lifecycle state without double-charging or creating duplicate ownership. Requires domains:purchase scope and applies account, plan, and anti-abuse gates. AutoRenew defaults to false. The response carries lifecycle_steps, ownership_ready, and resumed.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -6088,6 +6091,9 @@
           },
           "428": {
             "description": "A new paid-entry admission requires tenant owner acceptance of the exact current Terms. Idempotent replays and reconciliation retain their original admission."
+          },
+          "409": {
+            "description": "First paid opening: new purchases and renewals are disabled (409 domain_sales_disabled); setup without buy/purchase remains available."
           }
         },
         "parameters": [
@@ -7767,7 +7773,7 @@
           "Billing"
         ],
         "summary": "Add funds to the prepaid wallet",
-        "description": "Opens a one-time Stripe Checkout Session that credits the wallet on `checkout.session.completed`. Owner session and a verified email are required, the same 10/hour limit as POST /api/v1/billing/checkout applies, and an Idempotency-Key header is REQUIRED so a retry replays the same session instead of opening a second payable one. Lost provider results, local persistence failures or unresolved success bookkeeping return checkout_outcome_ambiguous: keep the original key and reconcile that attempt before another purchase. An expired claim lease cannot start another session. First read GET /api/v1/billing/countries and present the list before payment. Requires country, countryBasis (billing or residence), and countryPolicyVersion. Listed countries are refused before provider I/O. The declaration is bound to the authenticated actor and purchase fingerprint and copied to Stripe metadata. Stripe billing-address editing is not locked or independently verified.  New purchases require the full country declaration. Omitting all three declaration fields replays only an exact pre-country claim: checkout retains its original actor/kind/plan/credits fingerprint, and wallet retains its original amountCents fingerprint under the authenticated tenant and key. Missing claims fail country admission before insertion or provider I/O. Supplying any declaration never matches a legacy fingerprint. Retain the exact original countryPolicyVersion on retries; never substitute the current version. Exact pre-country wallet replay projects only the historical terminal status409 request_outcome_ambiguous error to checkout_outcome_ambiguous with same-key reconciliation advice. Stored claim bytes and every unrelated terminal outcome remain unchanged.",
+        "description": "First paid opening: new wallet funding is disabled (409 wallet_funding_disabled). Existing exact-key replay and observation-only reconciliation remain available. Opens a one-time Stripe Checkout Session that credits the wallet on `checkout.session.completed`. Owner session and a verified email are required, the same 10/hour limit as POST /api/v1/billing/checkout applies, and an Idempotency-Key header is REQUIRED so a retry replays the same session instead of opening a second payable one. Lost provider results, local persistence failures or unresolved success bookkeeping return checkout_outcome_ambiguous: keep the original key and reconcile that attempt before another purchase. An expired claim lease cannot start another session. First read GET /api/v1/billing/countries and present the list before payment. Requires country, countryBasis (billing or residence), and countryPolicyVersion. Listed countries are refused before provider I/O. The declaration is bound to the authenticated actor and purchase fingerprint and copied to Stripe metadata. Stripe billing-address editing is not locked or independently verified.  New purchases require the full country declaration. Omitting all three declaration fields replays only an exact pre-country claim: checkout retains its original actor/kind/plan/credits fingerprint, and wallet retains its original amountCents fingerprint under the authenticated tenant and key. Missing claims fail country admission before insertion or provider I/O. Supplying any declaration never matches a legacy fingerprint. Retain the exact original countryPolicyVersion on retries; never substitute the current version. Exact pre-country wallet replay projects only the historical terminal status409 request_outcome_ambiguous error to checkout_outcome_ambiguous with same-key reconciliation advice. Stored claim bytes and every unrelated terminal outcome remain unchanged.",
         "parameters": [
           {
             "name": "Idempotency-Key",
@@ -7820,7 +7826,7 @@
             "description": "A new paid-entry admission requires tenant owner acceptance of the exact current Terms. Idempotent replays and reconciliation retain their original admission."
           },
           "409": {
-            "description": "checkout_outcome_ambiguous for an unresolved payable attempt, idempotency_request_in_progress, checkout_country_policy_changed or idempotency_key_conflict. Retain the original purchase key and reconcile it before starting another purchase."
+            "description": "checkout_outcome_ambiguous for an unresolved payable attempt, idempotency_request_in_progress, checkout_country_policy_changed or idempotency_key_conflict. Retain the original purchase key and reconcile it before starting another purchase. First paid opening: new wallet funding is disabled (409 wallet_funding_disabled)."
           }
         }
       }
@@ -7831,7 +7837,7 @@
           "Domains"
         ],
         "summary": "Renew a Mailery-registered domain, charged to the prepaid wallet",
-        "description": "Debits the exact all-in renewal quote from the prepaid wallet in the same transaction that claims the renewal, BEFORE the renewal is submitted. An insufficient balance returns 402 with the shortfall and nothing is submitted or charged. Requires the domains:purchase scope and an Idempotency-Key header.",
+        "description": "First paid opening: new purchases and renewals are disabled (409 domain_sales_disabled); setup without buy/purchase remains available. Existing exact-key replay and observation-only reconciliation remain available. Debits the exact all-in renewal quote from the prepaid wallet in the same transaction that claims the renewal, BEFORE the renewal is submitted. An insufficient balance returns 402 with the shortfall and nothing is submitted or charged. Requires the domains:purchase scope and an Idempotency-Key header.",
         "parameters": [
           {
             "name": "id",
@@ -7886,7 +7892,7 @@
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
-            "description": "The domain was not purchased through Mailery, its expiry could not be confirmed, the renewal was refused upstream (nothing charged), or the outcome is ambiguous and awaits reconciliation"
+            "description": "The domain was not purchased through Mailery, its expiry could not be confirmed, the renewal was refused upstream (nothing charged), or the outcome is ambiguous and awaits reconciliation First paid opening: new purchases and renewals are disabled (409 domain_sales_disabled); setup without buy/purchase remains available."
           },
           "428": {
             "description": "A new paid-entry admission requires tenant owner acceptance of the exact current Terms. Idempotent replays and reconciliation retain their original admission."
@@ -7900,7 +7906,7 @@
           "Domains"
         ],
         "summary": "Set the auto-renew opt-in for a Mailery-registered domain",
-        "description": "Auto-renew is OFF by default. When on, the renewal poller renews the domain only if the prepaid wallet covers the quote; otherwise it emits a domain.expiring notice with the shortfall and leaves the domain alone. Charges nothing, so no Idempotency-Key is required.",
+        "description": "First paid opening: enabling automatic renewal returns 409 domain_sales_disabled; disabling remains available. Auto-renew is OFF by default. When on, the renewal poller renews the domain only if the prepaid wallet covers the quote; otherwise it emits a domain.expiring notice with the shortfall and leaves the domain alone. Charges nothing, so no Idempotency-Key is required.",
         "parameters": [
           {
             "name": "id",
@@ -7941,6 +7947,9 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "domain_sales_disabled when enabling automatic renewal while domain sales are closed"
           }
         }
       }

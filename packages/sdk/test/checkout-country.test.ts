@@ -27,7 +27,8 @@ test("SDK exposes the public policy and forwards the exact declaration with the 
 test("MCP first-step policy and wallet schema expose and preserve the country declaration", async () => {
   const tool = MCP_TOOLS.find((tool) => tool.name === "add_wallet_funds")!;
   expect(tool.inputSchema.required).toEqual(["amountCents", "idempotencyKey"]);
-  expect(tool.description).toContain("New purchases require all three country fields");
+  expect(tool.description).toContain("wallet_funding_disabled");
+  expect(tool.description).toContain("Preserve its original amount, key and country declaration exactly");
   const calls: Array<{ path: string; body: unknown }> = [];
   const client = new MaileryClient({ baseUrl: "http://127.0.0.1:55586", sessionToken: "synthetic-owner-session", retries: 0, fetch: async (input, init) => {
     calls.push({ path: new URL(String(input)).pathname, body: init?.body ? JSON.parse(String(init.body)) : undefined });

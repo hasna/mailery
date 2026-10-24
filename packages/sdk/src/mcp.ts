@@ -204,7 +204,7 @@ export const MCP_TOOLS: McpToolDef[] = [
   },
   {
     name: "buy_domain",
-    description: "Purchase a domain only when a fresh signed quote is within the caller's explicit maximum and currency, using a stable idempotency key. The all-in quote is debited from the PREPAID WALLET before the registrar is contacted, so top up first (add_wallet_funds) if get_billing_status shows too little; an insufficient balance fails closed with the shortfall and registers nothing.",
+    description: "New domain purchases are unavailable at paid opening (domain_sales_disabled). Use get_domain_status to check an existing domain. To replay an existing purchase, use the SDK purchaseDomain method with the original idempotency key and unchanged request body. Connect a domain you already own through the CLI or SDK.",
     inputSchema: {
       type: "object",
       required: ["domain", "maxPriceCents", "currency", "idempotencyKey"],
@@ -290,7 +290,7 @@ export const MCP_TOOLS: McpToolDef[] = [
   },
   {
     name: "get_billing_status",
-    description: "Return the tenant billing overview: send-credit balance, the PREPAID WALLET (wallet.balance_cents — the USD balance domain purchases and renewals are charged against, with its recent transactions and top-up presets), plans, subscriptions, and recent credit ledger. Check wallet.balance_cents before buy_domain: an insufficient wallet fails the purchase closed with the shortfall.",
+    description: "Return the tenant billing overview: send-credit balance, the PREPAID WALLET (wallet.balance_cents — the USD balance domain purchases and renewals are charged against, with its recent transactions and top-up presets), plans, subscriptions, and recent credit ledger. New wallet funding and domain sales are unavailable at paid opening; existing balances and transactions remain readable.",
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: {} },
   },
@@ -302,7 +302,7 @@ export const MCP_TOOLS: McpToolDef[] = [
   },
   {
     name: "add_wallet_funds",
-    description: "Open a Stripe Checkout session that adds USD to the prepaid wallet (the balance domain purchases and renewals are charged against). Minimum $10.00; presets are $10/$25/$50/$100. Returns a checkout URL a human must complete — funds land only after payment. Use a stable idempotencyKey and preserve all original country declaration fields and policy version on every retry. New purchases require all three country fields. Omit all three only to replay an exact pre-country purchase with its original amount/key; the server refuses a missing claim before creating a payable session.",
+    description: "New wallet funding is unavailable at paid opening (wallet_funding_disabled). Retained for replay of an existing checkout attempt. Preserve its original amount, key and country declaration exactly. Plans and send-credit packs remain available.",
     inputSchema: {
       type: "object",
       required: ["amountCents", "idempotencyKey"],

@@ -1,5 +1,7 @@
 # mailery
 
+> Paid opening sells plans and send-credit packs only. Wallet add-funds, domains buy, domains setup --buy and domain renewals refuse new sales. The server returns wallet_funding_disabled or domain_sales_disabled. Existing request replay and purchase reconciliation remain supported. Connect a domain you already own with domains setup without --buy.
+
 **Email identity for agents.** One npm package — CLI, MCP server, and SDK — gives an agent
 a managed, deliverable email identity: signup, subscribe, buy a domain, send, and
 receive. Every command is a thin call to the mailery.co API; there is **no local

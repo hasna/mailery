@@ -548,6 +548,7 @@ export class MaileryClient {
    * instead of opening a second payable one. Retain every original declaration
    * field, including countryPolicyVersion. Omit all declaration fields only
    * to replay an exact pre-country claim; that cannot create a new claim.
+   * New funding is disabled at paid opening (409 wallet_funding_disabled); exact-key replay is retained.
    */
   topUpWallet(input: WalletTopupInput): Promise<WalletTopupResult> {
     const { idempotencyKey, ...body } = input;
@@ -816,6 +817,7 @@ export class MaileryClient {
    * The call is idempotent and resumable: re-invoking with the same domain
    * continues from the current lifecycle state and never double-charges.
    * Requires the `domains:purchase` scope and an entitled tenant.
+   * New purchases are disabled at paid opening (409 domain_sales_disabled); replay/reconciliation is retained.
    */
   purchaseDomain(input: PurchaseDomainInput): Promise<MaileryDomainPurchaseResult> {
     const { idempotencyKey, ...body } = input;
@@ -827,6 +829,7 @@ export class MaileryClient {
    * charge is taken BEFORE the registrar call: an insufficient balance fails
    * with a 402 carrying the shortfall and never reaches the registrar.
    * Requires the domains:purchase scope and an idempotency key.
+   * New renewals are disabled at paid opening (409 domain_sales_disabled); exact-key replay is retained.
    */
   renewDomain(input: RenewDomainInput): Promise<MaileryDomainRenewResult> {
     const { id, idempotencyKey, ...body } = input;
@@ -837,6 +840,7 @@ export class MaileryClient {
    * Turn the auto-renew opt-in on or off. Auto-renew proceeds only when the
    * prepaid wallet covers the renewal quote; otherwise Mailery notifies rather
    * than letting the domain lapse silently. Charges nothing.
+   * Enabling is unavailable at paid opening (409 domain_sales_disabled); disabling remains available.
    */
   setDomainAutoRenew(id: string, enabled: boolean): Promise<MaileryDomainRenewal> {
     return this.request(ENDPOINTS.setDomainAutoRenew, { auth: "any", params: { id }, body: { enabled } });

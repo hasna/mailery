@@ -31,6 +31,7 @@
   "packages/cli/test/mcp.test.ts",
   "packages/cli/test/packaging.test.ts",
   "packages/cli/test/pagination-attachments.test.ts",
+  "packages/cli/test/sales-scope.test.ts",
   "packages/cli/test/send-parity.test.ts",
   "packages/cli/test/support.ts",
   "packages/cli/test/suppressions.test.ts",

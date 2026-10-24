@@ -968,7 +968,7 @@ export function buildProgram(deps: CliDeps): Command {
     });
   });
 
-  const billingAddFunds = leaf(billing, "add-funds <amount>", "Add funds to the prepaid wallet (amount in dollars, e.g. 25 or 25.00; minimum 10)");
+  const billingAddFunds = leaf(billing, "add-funds <amount>", "Wallet funding is unavailable at paid opening (wallet_funding_disabled); existing request replay is retained");
   billingAddFunds.option("--country <code>", countryCopy.countryOption);
   billingAddFunds.option("--country-basis <basis>", countryCopy.basisOption);
   billingAddFunds.option("--country-policy-version <version>", countryCopy.policyOption);
@@ -1056,7 +1056,7 @@ export function buildProgram(deps: CliDeps): Command {
     });
   });
 
-  const domainsBuy = leaf(domains, "buy <domain>", "Quote, confirm, purchase, and provision a domain into a ready-to-send identity");
+  const domainsBuy = leaf(domains, "buy <domain>", "New domain purchases are unavailable at paid opening (domain_sales_disabled); original-key replay and reconciliation remain supported");
   domainsBuy.option("--yes", "Confirm the quoted purchase may spend money (required; non-interactive)");
   domainsBuy.option("--max-price-cents <cents>", "Maximum all-in price authorized, in the expected currency's minor units");
   domainsBuy.option("--currency <currency>", "Expected three-letter quote currency", "usd");
@@ -1122,7 +1122,7 @@ export function buildProgram(deps: CliDeps): Command {
     });
   });
 
-  const domainsSetup = leaf(domains, "setup <domain>", "Connect a domain you own (or --buy one) and return the DNS records to publish; the MX record and nameservers change only with the explicit consent flags");
+  const domainsSetup = leaf(domains, "setup <domain>", "Connect a domain you own and return DNS records to publish; --buy is unavailable at paid opening (domain_sales_disabled)");
   domainsSetup
     .option("--address <local-part>", "Local part of the mailbox you plan on the domain; echoed back as the planned address only — create it with `mailery mailboxes create <local-part>@<domain>` once outbound is enabled")
     .option("--catch-all", "Route unmatched recipients on the domain to its default mailbox (implies --inbound)")
@@ -1268,7 +1268,7 @@ export function buildProgram(deps: CliDeps): Command {
   // Renewing spends real money from the prepaid wallet, so it takes the same
   // consent shape as `domains buy`: explicit --yes plus a caller-stable
   // idempotency key that binds every retry to one charge.
-  const domainsRenew = leaf(domains, "renew <id>", "Renew a domain purchased through Mailery, charged to the prepaid wallet");
+  const domainsRenew = leaf(domains, "renew <id>", "New domain renewals are unavailable at paid opening (domain_sales_disabled); existing request replay is retained");
   domainsRenew.option("--yes", "Confirm the renewal may spend wallet funds (required; non-interactive)");
   domainsRenew.option("--auto-renew <state>", "Also set auto-renew (on|off), applied only after the renewal succeeds");
   domainsRenew.option("--idempotency-key <key>", "Required caller-stable idempotency key for this paid operation");
@@ -1316,7 +1316,7 @@ export function buildProgram(deps: CliDeps): Command {
     });
   });
 
-  const domainsAutoRenew = leaf(domains, "auto-renew <id> <state>", "Turn auto-renew on or off for a domain (state: on or off). Spends nothing.");
+  const domainsAutoRenew = leaf(domains, "auto-renew <id> <state>", "New auto-renew opt-ins are unavailable at paid opening; turning it off remains available");
   domainsAutoRenew.action(async (id: string, state: string) => {
     const json = jsonOf(domainsAutoRenew, deps);
     await run(deps, json, async () => {

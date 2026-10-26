@@ -527,6 +527,30 @@ async function runVerifyPoll(
 
 // ─── program ─────────────────────────────────────────────────────────────────
 
+type PasswordOptions = { password?: string; passwordStdin?: boolean };
+
+async function readAuthPassword(opts: PasswordOptions, deps: CliDeps, json: boolean): Promise<string | null> {
+  if ((opts.password !== undefined) === Boolean(opts.passwordStdin)) {
+    fail(deps, json, { code: "usage_error", message: "Provide exactly one of --password or --password-stdin." });
+    return null;
+  }
+  let password = opts.password;
+  if (opts.passwordStdin) {
+    try {
+      // Remove one conventional line ending, preserving all other whitespace.
+      password = (await (deps.readStdin ?? defaultReadStdin)()).replace(/\r?\n$/, "");
+    } catch {
+      fail(deps, json, { code: "usage_error", message: "Could not read the password from stdin." });
+      return null;
+    }
+  }
+  if (!password) {
+    fail(deps, json, { code: "usage_error", message: "The password must not be empty." });
+    return null;
+  }
+  return password;
+}
+
 export function buildProgram(deps: CliDeps): Command {
   const program = new Command();
   program
@@ -540,14 +564,17 @@ export function buildProgram(deps: CliDeps): Command {
   const signup = leaf(program, "signup", "Create an account (email + password); return a session token once; save it in env or a secret manager");
   signup
     .requiredOption("--email <email>", "Account email")
-    .requiredOption("--password <password>", "Account password")
+    .option("--password <password>", "Account password (prefer --password-stdin)")
+    .option("--password-stdin", "Read the password from stdin; mutually exclusive with --password")
     .option("--name <name>", "Display name")
     .option("--invite-code <code>", "Invite code (when signup is invite-gated)")
     .option("--accept-terms <version>", "Explicitly accept this exact Terms version after reading `mailery terms`");
   signup.action(async () => {
     const json = jsonOf(signup, deps);
-    const opts = signup.opts<{ email: string; password: string; name?: string; inviteCode?: string; acceptTerms?: string }>();
+    const opts = signup.opts<PasswordOptions & { email: string; name?: string; inviteCode?: string; acceptTerms?: string }>();
     await run(deps, json, async () => {
+      const password = await readAuthPassword(opts, deps, json);
+      if (password === null) return;
       const client = buildClient(deps, { preferSession: true });
       const terms = await client.getCurrentTerms();
       if (!json) deps.stderr(`Terms: ${new URL(terms.url, resolveBaseUrl(deps.env)).href} (version ${terms.version})\n`);
@@ -555,7 +582,7 @@ export function buildProgram(deps: CliDeps): Command {
         fail(deps, json, { code: "terms_acceptance_required", message: `Read ${new URL(terms.url, resolveBaseUrl(deps.env)).href}. Signup requires explicit --accept-terms ${terms.version}` });
         return;
       }
-      const result = await client.signup({ email: opts.email, password: opts.password, name: opts.name, inviteCode: opts.inviteCode, acceptedTerms: true, termsVersion: opts.acceptTerms });
+      const result = await client.signup({ email: opts.email, password, name: opts.name, inviteCode: opts.inviteCode, acceptedTerms: true, termsVersion: opts.acceptTerms });
       ok(deps, json, { user: result.user, tenant: result.tenant, token: result.token }, [
         `Signed up as ${result.user.email} (tenant ${result.tenant.slug}).`,
         `Session token (shown once): ${result.token}`,
@@ -586,13 +613,16 @@ export function buildProgram(deps: CliDeps): Command {
   });
 
   const login = leaf(program, "login", "Log in (email + password); return a session token once; save it in env or a secret manager");
-  login.requiredOption("--email <email>", "Account email").requiredOption("--password <password>", "Account password");
+  login.requiredOption("--email <email>", "Account email").option("--password <password>", "Account password (prefer --password-stdin)")
+    .option("--password-stdin", "Read the password from stdin; mutually exclusive with --password");
   login.action(async () => {
     const json = jsonOf(login, deps);
-    const opts = login.opts<{ email: string; password: string }>();
+    const opts = login.opts<PasswordOptions & { email: string }>();
     await run(deps, json, async () => {
+      const password = await readAuthPassword(opts, deps, json);
+      if (password === null) return;
       const client = buildClient(deps, { preferSession: true });
-      const result = await client.login({ email: opts.email, password: opts.password });
+      const result = await client.login({ email: opts.email, password });
       ok(deps, json, { user: result.user, tenant: result.tenant, token: result.token }, [
         `Logged in as ${result.user.email} (tenant ${result.tenant.slug}).`,
         `Session token (shown once): ${result.token}`,

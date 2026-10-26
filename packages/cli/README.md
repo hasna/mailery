@@ -257,3 +257,9 @@ Checkout retries retain the original purchase intent. Supply and persist an expl
 ## License
 
 Apache-2.0. Install and use the public package as `@hasna/mailery`.
+
+### Password input
+
+For automation, use `mailery signup --email <email> --password-stdin --accept-terms <version>` or `mailery login --email <email> --password-stdin`. Pipe the password from your secret manager to stdin so it does not appear in process arguments. Signup still requires explicit acceptance of the current Terms.
+
+The CLI removes one trailing LF or CRLF line ending and preserves all other password whitespace. Empty input is refused before any request. The existing `--password <password>` option remains supported, but cannot be combined with `--password-stdin`.

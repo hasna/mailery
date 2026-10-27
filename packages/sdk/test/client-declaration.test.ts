@@ -77,7 +77,7 @@ test("native Request serialization preserves declaration rejection and held publ
     { declaration: null, valid: true },
     { declaration: { name: "custom-agent", version: "2.4.1" }, valid: true },
     { declaration: { name: "custom agent", version: "2.4.1" }, valid: true },
-    ...[{"name": "bad\nname", "version": "1"}, {"name": "bad\rname", "version": "1"}, {"name": "valid", "version": "1\n"}, {"name": "valid", "version": "1\r"}, { name: "mailery-sdk ", version: "1" }, { name: "bad☃", version: "1" }, { name: "valid", version: "1☃" }, { name: " mailery-sdk", version: "1" }, { name: "\tmailery-sdk", version: "1" },
+    ...[false, 0, "", true, {"name": "bad\nname", "version": "1"}, {"name": "bad\rname", "version": "1"}, {"name": "valid", "version": "1\n"}, {"name": "valid", "version": "1\r"}, { name: "mailery-sdk ", version: "1" }, { name: "bad☃", version: "1" }, { name: "valid", version: "1☃" }, { name: " mailery-sdk", version: "1" }, { name: "\tmailery-sdk", version: "1" },
       { name: "valid", version: "1 " }, { name: "valid", version: "1\t" }, { name: "partial" }, { version: "1" }, {},
       { name: null, version: "1" }, { name: "valid", version: null },
       { name: 123, version: "1" }, { name: "valid", version: 123 },

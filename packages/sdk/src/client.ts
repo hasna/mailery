@@ -283,7 +283,7 @@ export class MaileryClient {
         const headers: Record<string, string> = {};
         if (options.body !== undefined) headers["content-type"] = "application/json";
         const declaration = options.clientDeclaration ?? this.clientDeclaration;
-        if (declaration && (endpoint === ENDPOINTS.signup || endpoint === ENDPOINTS.acceptTerms)) {
+        if (declaration !== null && declaration !== undefined && (endpoint === ENDPOINTS.signup || endpoint === ENDPOINTS.acceptTerms)) {
           headers["x-mailery-client-name"] = declarationHeader(declaration.name);
           headers["x-mailery-client-version"] = declarationHeader(declaration.version);
         }

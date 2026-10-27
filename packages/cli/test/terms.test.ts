@@ -12,6 +12,21 @@ async function run(args: string[]) {
   await program.parseAsync(["node", "mailery", ...args]); return { calls, output: output.join(""), exitCode };
 }
 describe("CLI Terms acceptance", () => {
+  test("held signup shows only the paused error for missing and explicit consent", async () => {
+    const message = "Signup and new purchases are temporarily paused. Please try again later.";
+    for (const consent of [[], ["--accept-terms", version]]) {
+      const output: string[] = [], calls: string[] = []; let exitCode = 0;
+      const program = buildProgram({ env: { MAILERY_BASE_URL: "http://127.0.0.1:9" }, stdout: x => output.push(String(x)), stderr: x => output.push(x), setExitCode: x => { exitCode = x; }, fetch: async url => {
+        calls.push(new URL(String(url)).pathname);
+        return Response.json({ error: { code: "terms_unavailable", message } }, { status: 503 });
+      }});
+      await program.parseAsync(["node", "mailery", "signup", "--email", "held@example.test", "--password", "Testing1234", ...consent]);
+      expect(exitCode).toBe(1); expect(output.join("")).toContain(message);
+      expect(output.join("")).not.toContain("Read GET");
+      expect(calls.length).toBeGreaterThan(0); expect(calls.every(path => path === "/api/v1/terms/current")).toBe(true);
+    }
+  });
+
   test("signup displays link/version and refuses missing acceptance before POST", async () => {
     const result = await run(["signup", "--email", "new@example.test", "--password", "Testing1234"]);
     expect(result.exitCode).toBe(1); expect(result.calls).toHaveLength(1); expect(result.output).toContain(version); expect(result.output).toContain(`/api/v1/terms/versions/${version}`);

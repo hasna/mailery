@@ -3693,6 +3693,53 @@
             "type": "string"
           }
         }
+      },
+      "AdminBillingAnomaliesResult": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "eventReconciliation": {
+            "type": "object",
+            "required": [
+              "checked",
+              "complete"
+            ],
+            "properties": {
+              "checked": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Ordinary candidate rows actually reclassified, bounded at 1000."
+              },
+              "complete": {
+                "type": "boolean",
+                "description": "All ordinary candidates and returned anomalies were covered; false forces ok false."
+              }
+            }
+          },
+          "foreignEventReconciliation": {
+            "type": "object",
+            "required": [
+              "performed",
+              "checked",
+              "complete"
+            ],
+            "properties": {
+              "performed": {
+                "type": "boolean"
+              },
+              "checked": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "complete": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
       }
     },
     "responses": {
@@ -3955,7 +4002,7 @@
             "description": "Account already exists or Terms version changed"
           },
           "503": {
-            "description": "Terms catalogue or compatibility fence unavailable"
+            "description": "Signup and new purchases are temporarily paused. Please try again later. Returned before any signup write for both legacy and explicit-consent callers when Terms publication is held."
           }
         }
       }
@@ -6714,7 +6761,14 @@
         "description": "Runs the billing reconciliation sweep. Stripe subscription checks use only the server-side Stripe configuration; clients never send Stripe keys.",
         "responses": {
           "200": {
-            "description": "Billing anomalies report. Includes foreignEventReconciliation {performed, checked, complete}; checked counts reclassified candidate events, not all historical events. If complete is false, ok is false even when eventAnomalies is empty. Historical foreign disputes without retained charge evidence remain visible. No charge fetch or money replay is performed."
+            "description": "Billing anomaly report with separate ordinary eventReconciliation {checked, complete} and foreignEventReconciliation {performed, checked, complete}. Either incomplete lane forces ok false, including empty result pages. Ordinary scanning classifies up to 1000 candidate originals before capping returned anomalies; missing/mismatched originals remain unresolved. Counts cover examined candidates only. No provider replay or charge fetch occurs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminBillingAnomaliesResult"
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -6753,7 +6807,14 @@
         },
         "responses": {
           "200": {
-            "description": "Billing anomalies report. Includes foreignEventReconciliation {performed, checked, complete}; checked counts reclassified candidate events, not all historical events. If complete is false, ok is false even when eventAnomalies is empty. Historical foreign disputes without retained charge evidence remain visible. No charge fetch or money replay is performed."
+            "description": "Billing anomaly report with separate ordinary eventReconciliation {checked, complete} and foreignEventReconciliation {performed, checked, complete}. Either incomplete lane forces ok false, including empty result pages. Ordinary scanning classifies up to 1000 candidate originals before capping returned anomalies; missing/mismatched originals remain unresolved. Counts cover examined candidates only. No provider replay or charge fetch occurs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminBillingAnomaliesResult"
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"

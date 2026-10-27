@@ -82,7 +82,7 @@ export const MCP_TOOLS: McpToolDef[] = [
     name: "signup",
     description: "Create a Mailery account only after showing the exact Terms link/version from get_terms and obtaining explicit acceptance. No country gate applies to free signup.",
     inputSchema: {
-      type: "object", required: ["email", "password", "acceptedTerms", "termsVersion"],
+      type: "object", required: ["email", "password"],
       properties: {
         email: { type: "string" }, password: { type: "string" }, name: { type: "string" }, inviteCode: { type: "string" },
         acceptedTerms: { type: "boolean", const: true }, termsVersion: { type: "string" },
@@ -458,6 +458,9 @@ export async function callTool(name: string, rawArgs: Record<string, unknown> | 
       case "get_terms": return textResult(await client.getCurrentTerms());
       case "accept_terms":
       case "signup": {
+        // Held publication must also win over missing consent in this client.
+        // No account mutation or implied acceptance occurs during discovery.
+        if (name === "signup") await client.getCurrentTerms();
         if (args.acceptedTerms !== true || typeof args.termsVersion !== "string") return textResult({ code: "terms_acceptance_required", message: "Read get_terms and obtain explicit acceptance of its exact version" }, true);
         if (name === "accept_terms") return textResult(await client.acceptTerms({ acceptedTerms: true, termsVersion: args.termsVersion }));
         if (typeof args.email !== "string" || typeof args.password !== "string") return textResult({ code: "bad_request", message: "email and password required" }, true);

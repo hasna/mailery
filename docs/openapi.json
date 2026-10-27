@@ -4013,19 +4013,19 @@
             "in": "header",
             "name": "X-Mailery-Client-Name",
             "required": false,
-            "description": "Declared technical client name; supply together with version or omit both. No inference of human reading.",
+            "description": "Declared technical client name; supply together with version or omit both. No inference of human reading. Leading and trailing whitespace are invalid.",
             "schema": {
               "type": "string",
               "minLength": 1,
               "maxLength": 64,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._ /+-]{0,63}$"
+              "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._ /+-]{0,62}[A-Za-z0-9._/+-])?$"
             }
           },
           {
             "in": "header",
             "name": "X-Mailery-Client-Version",
             "required": false,
-            "description": "Declared technical version; supply together with name or omit both.",
+            "description": "Declared technical version; supply together with name or omit both. Leading and trailing whitespace are invalid.",
             "schema": {
               "type": "string",
               "minLength": 1,
@@ -8217,19 +8217,19 @@
             "in": "header",
             "name": "X-Mailery-Client-Name",
             "required": false,
-            "description": "Declared technical client name; supply together with version or omit both. No inference of human reading.",
+            "description": "Declared technical client name; supply together with version or omit both. No inference of human reading. Leading and trailing whitespace are invalid.",
             "schema": {
               "type": "string",
               "minLength": 1,
               "maxLength": 64,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._ /+-]{0,63}$"
+              "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._ /+-]{0,62}[A-Za-z0-9._/+-])?$"
             }
           },
           {
             "in": "header",
             "name": "X-Mailery-Client-Version",
             "required": false,
-            "description": "Declared technical version; supply together with name or omit both.",
+            "description": "Declared technical version; supply together with name or omit both. Leading and trailing whitespace are invalid.",
             "schema": {
               "type": "string",
               "minLength": 1,

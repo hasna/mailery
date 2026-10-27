@@ -34,8 +34,8 @@ test("partial and malformed declarations preserve server errors, including held 
           return Response.json({ error: { code: status === 503 ? "terms_unavailable" : "bad_request", message: "synthetic refusal" } }, { status });
         } });
       await expect(client.acceptTerms(consent)).rejects.toMatchObject({ status, code: status === 503 ? "terms_unavailable" : "bad_request" });
-      expect(headers["x-mailery-client-name"]).toBe(declaration.name);
-      expect(headers["x-mailery-client-version"]).toBe(declaration.version);
+      expect(headers["x-mailery-client-name"]).toBe(typeof declaration.name === "string" && !/[^\x20-\x7e]/.test(declaration.name) && declaration.name.trim() === declaration.name ? declaration.name : "");
+      expect(headers["x-mailery-client-version"]).toBe(typeof declaration.version === "string" && !/[^\x20-\x7e]/.test(declaration.version) && declaration.version.trim() === declaration.version ? declaration.version : "");
     }
   }
 });
@@ -66,4 +66,61 @@ test("MCP uses its transport version and preserves the original SDK session and 
   expect(calls[2]!.headers.authorization).toBe("Bearer synthetic-session");
   expect(calls[3]!.headers["x-mailery-client-name"]).toBe("custom-sdk");
   expect(calls[3]!.headers.authorization).toBe("Bearer synthetic-session");
+});
+
+test("native Request serialization preserves declaration rejection and held publication precedence", async () => {
+  // Local contract adapter after WHATWG serialization. This is not a live HTTP check.
+  const namePattern = /^[A-Za-z0-9][A-Za-z0-9._ /+-]{0,63}$/;
+  const versionPattern = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$/;
+  const cases: { declaration: unknown; valid: boolean }[] = [
+    { declaration: undefined, valid: true },
+    { declaration: null, valid: true },
+    { declaration: { name: "custom-agent", version: "2.4.1" }, valid: true },
+    { declaration: { name: "custom agent", version: "2.4.1" }, valid: true },
+    ...[{"name": "bad\nname", "version": "1"}, {"name": "bad\rname", "version": "1"}, {"name": "valid", "version": "1\n"}, {"name": "valid", "version": "1\r"}, { name: "mailery-sdk ", version: "1" }, { name: "bad☃", version: "1" }, { name: "valid", version: "1☃" }, { name: " mailery-sdk", version: "1" }, { name: "\tmailery-sdk", version: "1" },
+      { name: "valid", version: "1 " }, { name: "valid", version: "1\t" }, { name: "partial" }, { version: "1" }, {},
+      { name: null, version: "1" }, { name: "valid", version: null },
+      { name: 123, version: "1" }, { name: "valid", version: 123 },
+      { name: true, version: "1" }, { name: "valid", version: {} },
+      { name: "", version: "1" }, { name: "valid", version: "x".repeat(33) },
+    ].map(declaration => ({ declaration, valid: false })),
+  ];
+  for (const { declaration, valid } of cases) {
+    for (const held of [false, true]) {
+      for (const route of ["signup", "accept"] as const) {
+        let wire: Request | undefined;
+        let declarationValidated = false;
+        const client = new MaileryClient({
+          baseUrl: "http://127.0.0.1:9", sessionToken: "synthetic", retries: 0,
+          clientDeclaration: declaration as { name: string; version: string } | null | undefined,
+          fetch: async (url, init) => {
+            wire = new Request(url, init);
+            if (held) return Response.json({ error: { code: "terms_unavailable", message: "held" } }, { status: 503 });
+            declarationValidated = true;
+            const name = wire.headers.get("x-mailery-client-name");
+            const version = wire.headers.get("x-mailery-client-version");
+            const omitted = name === null && version === null;
+            if (!omitted && !(name !== null && version !== null && namePattern.test(name) && versionPattern.test(version) && name.trim() === name && version.trim() === version)) {
+              return Response.json({ error: { code: "bad_request", message: "invalid declaration" } }, { status: 400 });
+            }
+            return Response.json({ token: "synthetic-session", version: consent.termsVersion, url: "/terms",
+              acceptedAt: "2026-10-27T00:00:00Z", client: { declaration: omitted ? "undeclared" : "declared", name, version } });
+          },
+        });
+        const result = route === "signup"
+          ? client.signup({ email: "fixture@example.test", password: "Synthetic password 1234", ...consent })
+          : client.acceptTerms(consent);
+        if (held || !valid) await expect(result).rejects.toMatchObject({ status: held ? 503 : 400 });
+        else {
+          const receipt = await result;
+          if (route === "accept") expect(receipt).toMatchObject({ client: declaration === null
+            ? { declaration: "undeclared", name: null, version: null }
+            : { declaration: "declared", ...(declaration === undefined ? { name: "mailery-sdk", version: SDK_VERSION } : declaration as object) } });
+        }
+        expect(wire).toBeDefined();
+        expect(new URL(wire!.url).pathname).toBe(route === "signup" ? "/api/v1/auth/signup" : "/api/v1/terms/accept");
+        expect(declarationValidated).toBe(!held);
+      }
+    }
+  }
 });

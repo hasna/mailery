@@ -184,6 +184,12 @@ function coerceError(data: unknown, fallback: string): { message: string; code?:
   return { message: fallback };
 }
 
+// Preserve malformed runtime declarations across WHATWG header serialization.
+// Keep invalid pairs present so the server retains publication-first validation.
+function declarationHeader(value: unknown): string {
+  return typeof value === "string" && !/[^\x20-\x7e]/.test(value) && value.trim() === value ? value : "";
+}
+
 export class MaileryClient {
   readonly baseUrl: string;
   private readonly clientDeclaration: { name: string; version: string } | null;
@@ -278,8 +284,8 @@ export class MaileryClient {
         if (options.body !== undefined) headers["content-type"] = "application/json";
         const declaration = options.clientDeclaration ?? this.clientDeclaration;
         if (declaration && (endpoint === ENDPOINTS.signup || endpoint === ENDPOINTS.acceptTerms)) {
-          headers["x-mailery-client-name"] = declaration.name;
-          headers["x-mailery-client-version"] = declaration.version;
+          headers["x-mailery-client-name"] = declarationHeader(declaration.name);
+          headers["x-mailery-client-version"] = declarationHeader(declaration.version);
         }
         if (token) headers["authorization"] = `Bearer ${token}`;
         if (options.idempotencyKey) headers["idempotency-key"] = options.idempotencyKey;

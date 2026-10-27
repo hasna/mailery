@@ -73,7 +73,7 @@ export const MCP_TOOLS: McpToolDef[] = [
   },
   {
     name: "accept_terms",
-    description: "Record the tenant owner's explicitly authorized acceptance of the exact version returned by get_terms. Do not select acceptance by default or accept without the owner's authority.",
+    description: "Show the exact Terms link/version from get_terms to the person. Record acceptance only after an explicit yes from the person or an agent they authorized. Supply the exact version, never a default.",
     inputSchema: {
       type: "object", required: ["acceptedTerms", "termsVersion"],
       properties: { acceptedTerms: { type: "boolean", const: true }, termsVersion: { type: "string" } },
@@ -81,7 +81,7 @@ export const MCP_TOOLS: McpToolDef[] = [
   },
   {
     name: "signup",
-    description: "Create a Mailery account only after showing the exact Terms link/version from get_terms and obtaining explicit acceptance. No country gate applies to free signup.",
+    description: "Create a Mailery account only after showing the exact Terms link/version from get_terms to the person and receiving an explicit yes from the person or an agent they authorized. No country gate applies to free signup.",
     inputSchema: {
       type: "object", required: ["email", "password"],
       properties: {
@@ -455,18 +455,26 @@ function withPublicDomainAvailability(availability: MaileryDomainAvailability): 
 export async function callTool(name: string, rawArgs: Record<string, unknown> | undefined, client: MaileryClient, transportVersion = SDK_VERSION): Promise<ToolResult> {
   const clientDeclaration = { name: "mailery-mcp", version: transportVersion };
   const args = rawArgs ?? {};
+  let signupTerms: { url: string; version: string } | undefined;
   try {
     switch (name) {
-      case "get_terms": return textResult(await client.getCurrentTerms());
+      case "get_terms": {
+        const terms = await client.getCurrentTerms();
+        return textResult({ ...terms, url: new URL(terms.url, client.baseUrl).href });
+      }
       case "accept_terms":
       case "signup": {
         // Held publication must also win over missing consent in this client.
         // No account mutation or implied acceptance occurs during discovery.
-        if (name === "signup") await client.getCurrentTerms();
-        if (args.acceptedTerms !== true || typeof args.termsVersion !== "string") return textResult({ code: "terms_acceptance_required", message: "Read get_terms and obtain explicit acceptance of its exact version" }, true);
+        if (name === "signup") {
+          const current = await client.getCurrentTerms();
+          signupTerms = { url: new URL(current.url, client.baseUrl).href, version: current.version };
+        }
+        if (args.acceptedTerms !== true || typeof args.termsVersion !== "string") return textResult({ code: "terms_acceptance_required", message: "Show the Terms link/version to the person and obtain an explicit yes from the person or an agent they authorized", ...(signupTerms ? { terms: signupTerms } : {}) }, true);
         if (name === "accept_terms") return textResult(await client.acceptTerms({ acceptedTerms: true, termsVersion: args.termsVersion }, clientDeclaration));
-        if (typeof args.email !== "string" || typeof args.password !== "string") return textResult({ code: "bad_request", message: "email and password required" }, true);
-        return textResult(await client.signup({ email: args.email, password: args.password, name: typeof args.name === "string" ? args.name : undefined, inviteCode: typeof args.inviteCode === "string" ? args.inviteCode : undefined, acceptedTerms: true, termsVersion: args.termsVersion }, clientDeclaration));
+        if (typeof args.email !== "string" || typeof args.password !== "string") return textResult({ code: "bad_request", message: "email and password required", terms: signupTerms }, true);
+        const result = await client.signup({ email: args.email, password: args.password, name: typeof args.name === "string" ? args.name : undefined, inviteCode: typeof args.inviteCode === "string" ? args.inviteCode : undefined, acceptedTerms: true, termsVersion: args.termsVersion }, clientDeclaration);
+        return textResult({ ...result, terms: signupTerms });
       }
       case "send_email": {
         const input = sendInputFromArgs(args);
@@ -642,9 +650,9 @@ export async function callTool(name: string, rawArgs: Record<string, unknown> | 
     }
   } catch (err) {
     if (err instanceof MaileryError) {
-      return textResult({ code: err.code ?? "request_failed", message: err.message, status: err.status, details: err.details }, true);
+      return textResult({ code: err.code ?? "request_failed", message: err.message, status: err.status, details: err.details, ...(signupTerms ? { terms: signupTerms } : {}) }, true);
     }
-    return textResult({ code: "cli_error", message: err instanceof Error ? err.message : String(err) }, true);
+    return textResult({ code: "cli_error", message: err instanceof Error ? err.message : String(err), ...(signupTerms ? { terms: signupTerms } : {}) }, true);
   }
 }
 

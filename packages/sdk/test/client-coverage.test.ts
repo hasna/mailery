@@ -99,3 +99,11 @@ describe("MaileryClient API coverage", () => {
     expect(calls[0]!.auth).toBe("Bearer sess_owner");
   });
 });
+
+
+test("existing admin SDK methods preserve both reconciliation coverage lanes", async () => {
+  const report = { ok: false, eventAnomalies: [], eventReconciliation: { checked: 1000, complete: false }, foreignEventReconciliation: { performed: true, checked: 0, complete: true } };
+  const client = new MaileryClient({ baseUrl: "http://127.0.0.1:9", sessionToken: "fixture", retries: 0, fetch: async () => Response.json(report) });
+  expect(await client.adminBillingAnomalies({ limit: 1 })).toEqual(report);
+  expect(await client.adminBillingAnomaliesGet({ limit: 1 })).toEqual(report);
+});

@@ -946,6 +946,7 @@ export interface AdminAuditPurgeResult {
 
 // Older servers may omit coverage. Absence never establishes reconciliation.
 export interface AdminBillingAnomaliesResult extends AdminApiResult {
+  eventReconciliation?: { checked: number; complete: boolean };
   foreignEventReconciliation?: { performed: boolean; checked: number; complete: boolean };
 }
 

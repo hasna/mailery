@@ -101,17 +101,17 @@ describe("Terms SDK and MCP contract", () => {
     expect(calls.at(-1)!.body).toMatchObject({ acceptedTerms: true, termsVersion: version });
     expect(JSON.parse((await callTool("get_terms", {}, client)).content[0]!.text)).toEqual(terms);
   });
-  test("MCP preserves explicit stale-version server rejection order and the discovered version", async () => {
-    const paths: string[] = []; const stale = "c".repeat(64);
+  test("MCP preserves explicit old-version failure order and newer authoritative server Terms", async () => {
+    const paths: string[] = []; const stale = "c".repeat(64), newer = "d".repeat(64);
     const client = new MaileryClient({ baseUrl: "http://127.0.0.1:9", retries: 0, fetch: async (url, init) => {
       const path = new URL(String(url)).pathname; paths.push(path);
       if (path.endsWith("/current")) return Response.json({ version, url: `/api/v1/terms/versions/${version}` });
       expect(JSON.parse(String(init?.body))).toMatchObject({ acceptedTerms: true, termsVersion: stale });
-      return Response.json({ error: { code: "terms_version_mismatch", message: "Version is not currently published" } }, { status: 428 });
+      return Response.json({ error: { code: "terms_version_changed", message: "Terms changed. Read the current version before accepting again", details: { terms: { version: newer, url: `/api/v1/terms/versions/${newer}` }, retry: true } } }, { status: 409 });
     }});
     const result = await callTool("signup", { email: "new@example.test", password: "Testing1234", acceptedTerms: true, termsVersion: stale }, client);
     expect(result.isError).toBe(true);
-    expect(JSON.parse(result.content[0]!.text)).toMatchObject({ code: "terms_version_mismatch", status: 428, terms: { version, url: `http://127.0.0.1:9/api/v1/terms/versions/${version}` } });
+    expect(JSON.parse(result.content[0]!.text)).toMatchObject({ code: "terms_version_changed", status: 409, terms: { version: newer, url: `http://127.0.0.1:9/api/v1/terms/versions/${newer}` }, details: { terms: { version: newer, url: `http://127.0.0.1:9/api/v1/terms/versions/${newer}` }, retry: true } });
     expect(paths).toEqual(["/api/v1/terms/current", "/api/v1/auth/signup"]);
     expect(MCP_TOOLS.find(tool => tool.name === "accept_terms")!.description).toContain("an explicit yes from the person");
     expect(MCP_TOOLS.find(tool => tool.name === "accept_terms")!.description).toContain("an agent they authorized");

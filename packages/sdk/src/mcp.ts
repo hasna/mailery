@@ -650,7 +650,21 @@ export async function callTool(name: string, rawArgs: Record<string, unknown> | 
     }
   } catch (err) {
     if (err instanceof MaileryError) {
-      return textResult({ code: err.code ?? "request_failed", message: err.message, status: err.status, details: err.details, ...(signupTerms ? { terms: signupTerms } : {}) }, true);
+      let details = err.details;
+      if (signupTerms && details && typeof details === "object" && !Array.isArray(details)) {
+        const record = details as Record<string, unknown>;
+        const supplied = record.terms;
+        if (supplied && typeof supplied === "object" && !Array.isArray(supplied)) {
+          const serverTerms = supplied as Record<string, unknown>;
+          if (typeof serverTerms.url === "string" && typeof serverTerms.version === "string") {
+            try {
+              signupTerms = { url: new URL(serverTerms.url, client.baseUrl).href, version: serverTerms.version };
+              details = { ...record, terms: { ...serverTerms, ...signupTerms } };
+            } catch { /* Keep the successful preflight discovery if server metadata is malformed. */ }
+          }
+        }
+      }
+      return textResult({ code: err.code ?? "request_failed", message: err.message, status: err.status, details, ...(signupTerms ? { terms: signupTerms } : {}) }, true);
     }
     return textResult({ code: "cli_error", message: err instanceof Error ? err.message : String(err), ...(signupTerms ? { terms: signupTerms } : {}) }, true);
   }

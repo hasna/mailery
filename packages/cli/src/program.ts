@@ -12,7 +12,7 @@ import { Command } from "commander";
 import { MaileryError, type MaileryClient, type MaileryTenantDomain, type MaileryInboundUsage } from "@hasna/mailery-sdk-internal";
 import { buildClient, resolveBaseUrl, type CliDeps } from "./client.js";
 import { runMcpServer } from "./mcp.js";
-import { RESETUP_PAUSES_SENDING, fail, ok, printJson, run, toCliError } from "./output.js";
+import { RESETUP_PAUSES_SENDING, fail, ok, printJson, run, toCliError, withTermsDiscovery } from "./output.js";
 import { withPublicDomainAvailability } from "./pricing.js";
 import { VERSION } from "./version.js";
 
@@ -572,15 +572,17 @@ export function buildProgram(deps: CliDeps): Command {
   signup.action(async () => {
     const json = jsonOf(signup, deps);
     const opts = signup.opts<PasswordOptions & { email: string; name?: string; inviteCode?: string; acceptTerms?: string }>();
+    let discoveredTerms: { url: string; version: string } | undefined;
     await run(deps, json, async () => {
       const password = await readAuthPassword(opts, deps, json);
       if (password === null) return;
       const client = buildClient(deps, { preferSession: true });
       const current = await client.getCurrentTerms();
       const terms = { url: new URL(current.url, resolveBaseUrl(deps.env)).href, version: current.version };
+      discoveredTerms = terms;
       if (!json) deps.stderr(`Terms: ${new URL(terms.url, resolveBaseUrl(deps.env)).href} (version ${terms.version})\n`);
       if (!opts.acceptTerms || opts.acceptTerms !== terms.version) {
-        fail(deps, json, { code: "terms_acceptance_required", message: `Read ${terms.url}. Signup requires explicit --accept-terms ${terms.version}`, details: { terms } });
+        fail(deps, json, withTermsDiscovery({ code: "terms_acceptance_required", message: `Read ${terms.url}. Signup requires explicit --accept-terms ${terms.version}` }, terms, client.baseUrl));
         return;
       }
       const result = await client.signup({ email: opts.email, password, name: opts.name, inviteCode: opts.inviteCode, acceptedTerms: true, termsVersion: opts.acceptTerms });
@@ -593,7 +595,7 @@ export function buildProgram(deps: CliDeps): Command {
         "Next: `mailery keys create --scopes full`, then `mailery mailboxes create <name>@<shared-domain>`.",
         "Custom domains and higher limits: `mailery subscribe pro`.",
       ].filter(Boolean));
-    });
+    }, error => discoveredTerms ? withTermsDiscovery(error, discoveredTerms, resolveBaseUrl(deps.env)) : error);
   });
 
   const terms = leaf(program, "terms", "Read the exact current Terms link/version, or record the owner's explicit acceptance");

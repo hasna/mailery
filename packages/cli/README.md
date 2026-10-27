@@ -263,3 +263,9 @@ Apache-2.0. Install and use the public package as `@hasna/mailery`.
 For automation, use `mailery signup --email <email> --password-stdin --accept-terms <version>` or `mailery login --email <email> --password-stdin`. Pipe the password from your secret manager to stdin so it does not appear in process arguments. Signup still requires explicit acceptance of the current Terms.
 
 The CLI removes one trailing LF or CRLF line ending and preserves all other password whitespace. Empty input is refused before any request. The existing `--password <password>` option remains supported, but cannot be combined with `--password-stdin`.
+
+## Terms receipt client metadata
+
+Terms acceptance remains an explicit, separate action after reading the exact Terms version. Signup and acceptance send paired `X-Mailery-Client-Name` and `X-Mailery-Client-Version` headers. The SDK defaults to `mailery-sdk`, the CLI to `mailery-cli`, and MCP to `mailery-mcp`, each with its shipped version. SDK `clientDeclaration: { name, version }` overrides the declaration, and `clientDeclaration: null` omits both headers. Names are 1–64 ASCII characters matching `^[A-Za-z0-9][A-Za-z0-9._ /+-]{0,63}$`. Versions are 1–32 ASCII characters matching `^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$`. Partial or malformed declarations return HTTP 400. Held publication returns HTTP 503 first.
+
+Acceptance receipts add `client: { declaration, name, version }`. `declared` preserves the received pair, `undeclared` records omitted headers with null values, and historical receipts with no recorded metadata use `unrecorded`. This technical declaration does not establish that a human read the Terms.

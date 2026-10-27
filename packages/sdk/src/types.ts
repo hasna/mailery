@@ -47,7 +47,8 @@ export interface MaileryMeResponse {
 
 export interface PublishedTerms { version: string; url: string }
 export interface TermsAcceptanceInput { acceptedTerms: true; termsVersion: string }
-export interface TermsAcceptanceReceipt extends PublishedTerms { acceptedAt: string }
+export interface TermsClientReceipt { declaration: "declared" | "undeclared" | "unrecorded"; name: string | null; version: string | null }
+export interface TermsAcceptanceReceipt extends PublishedTerms { acceptedAt: string; client: TermsClientReceipt }
 
 export interface SignupInput {
   email: string;

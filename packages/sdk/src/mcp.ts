@@ -1,3 +1,4 @@
+import { SDK_VERSION } from "./version.js";
 // MCP (Model Context Protocol) core for Mailery. Exposes agent-facing SDK
 // tools via JSON-RPC 2.0 dispatch. No transport: the stdio server (packages/cli/src/mcp.ts)
 // and the HTTP API endpoint (src/server/app.ts POST /api/v1/mcp) both delegate
@@ -451,7 +452,8 @@ function withPublicDomainAvailability(availability: MaileryDomainAvailability): 
 }
 
 /** Execute a single MCP tool against the SDK. Never throws — SDK errors become isError results. */
-export async function callTool(name: string, rawArgs: Record<string, unknown> | undefined, client: MaileryClient): Promise<ToolResult> {
+export async function callTool(name: string, rawArgs: Record<string, unknown> | undefined, client: MaileryClient, transportVersion = SDK_VERSION): Promise<ToolResult> {
+  const clientDeclaration = { name: "mailery-mcp", version: transportVersion };
   const args = rawArgs ?? {};
   try {
     switch (name) {
@@ -462,9 +464,9 @@ export async function callTool(name: string, rawArgs: Record<string, unknown> | 
         // No account mutation or implied acceptance occurs during discovery.
         if (name === "signup") await client.getCurrentTerms();
         if (args.acceptedTerms !== true || typeof args.termsVersion !== "string") return textResult({ code: "terms_acceptance_required", message: "Read get_terms and obtain explicit acceptance of its exact version" }, true);
-        if (name === "accept_terms") return textResult(await client.acceptTerms({ acceptedTerms: true, termsVersion: args.termsVersion }));
+        if (name === "accept_terms") return textResult(await client.acceptTerms({ acceptedTerms: true, termsVersion: args.termsVersion }, clientDeclaration));
         if (typeof args.email !== "string" || typeof args.password !== "string") return textResult({ code: "bad_request", message: "email and password required" }, true);
-        return textResult(await client.signup({ email: args.email, password: args.password, name: typeof args.name === "string" ? args.name : undefined, inviteCode: typeof args.inviteCode === "string" ? args.inviteCode : undefined, acceptedTerms: true, termsVersion: args.termsVersion }));
+        return textResult(await client.signup({ email: args.email, password: args.password, name: typeof args.name === "string" ? args.name : undefined, inviteCode: typeof args.inviteCode === "string" ? args.inviteCode : undefined, acceptedTerms: true, termsVersion: args.termsVersion }, clientDeclaration));
       }
       case "send_email": {
         const input = sendInputFromArgs(args);
@@ -686,7 +688,7 @@ export async function handleMcpMessage(
     case "tools/call": {
       const name = typeof msg.params?.name === "string" ? msg.params.name : "";
       const args = (msg.params?.arguments as Record<string, unknown> | undefined) ?? {};
-      const result = await callTool(name, args, client);
+      const result = await callTool(name, args, client, serverInfo?.version ?? SDK_VERSION);
       return reply(id, result);
     }
     default:

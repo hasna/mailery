@@ -1,3 +1,4 @@
+import { SDK_VERSION } from "./version.js";
 // MaileryClient — a zero-dependency TypeScript client for the Mailery
 // /api/v1. Aligned to src/server/app.ts; the server is the source of
 // truth. Runs anywhere a WHATWG `fetch` exists (Bun, Node 18+, browsers); the
@@ -106,6 +107,8 @@ import type {
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 export interface MaileryClientOptions {
+  /** Declared technical identity for Terms receipts. null explicitly omits both headers. */
+  clientDeclaration?: { name: string; version: string } | null;
   /** Base origin of the API, e.g. "https://mailery.co". Trailing slashes are trimmed. */
   baseUrl: string;
   /** Tenant API key (ml_…) for the daily surface (send/inbox/messages/domains/feedback). */
@@ -126,6 +129,7 @@ type AuthMode = "none" | "session" | "key" | "any" | "admin" | "optional";
 const MANAGED_MAILBOX_PROVIDER = ["s", "e", "s"].join("");
 
 interface RequestOptions {
+  clientDeclaration?: { name: string; version: string };
   auth?: AuthMode;
   body?: unknown;
   query?: Record<string, string | number | boolean | undefined>;
@@ -182,6 +186,7 @@ function coerceError(data: unknown, fallback: string): { message: string; code?:
 
 export class MaileryClient {
   readonly baseUrl: string;
+  private readonly clientDeclaration: { name: string; version: string } | null;
   private apiKey?: string;
   private sessionToken?: string;
   private readonly fetchImpl: FetchLike;
@@ -191,6 +196,7 @@ export class MaileryClient {
 
   constructor(options: MaileryClientOptions) {
     this.baseUrl = normalizeBaseUrl(options.baseUrl);
+    this.clientDeclaration = options.clientDeclaration === undefined ? { name: "mailery-sdk", version: SDK_VERSION } : options.clientDeclaration;
     this.apiKey = options.apiKey || undefined;
     this.sessionToken = options.sessionToken || undefined;
     const injected = options.fetch;
@@ -270,6 +276,11 @@ export class MaileryClient {
       try {
         const headers: Record<string, string> = {};
         if (options.body !== undefined) headers["content-type"] = "application/json";
+        const declaration = options.clientDeclaration ?? this.clientDeclaration;
+        if (declaration && (endpoint === ENDPOINTS.signup || endpoint === ENDPOINTS.acceptTerms)) {
+          headers["x-mailery-client-name"] = declaration.name;
+          headers["x-mailery-client-version"] = declaration.version;
+        }
         if (token) headers["authorization"] = `Bearer ${token}`;
         if (options.idempotencyKey) headers["idempotency-key"] = options.idempotencyKey;
 
@@ -383,13 +394,13 @@ export class MaileryClient {
     return result.raw;
   }
 
-  acceptTerms(input: import("./types.js").TermsAcceptanceInput): Promise<import("./types.js").TermsAcceptanceReceipt> {
-    return this.request(ENDPOINTS.acceptTerms, { auth: "session", body: input });
+  acceptTerms(input: import("./types.js").TermsAcceptanceInput, clientDeclaration?: { name: string; version: string }): Promise<import("./types.js").TermsAcceptanceReceipt> {
+    return this.request(ENDPOINTS.acceptTerms, { auth: "session", body: input, clientDeclaration });
   }
 
   /** Create an account. Returns a session bootstrap and caches the session token on the client. */
-  async signup(input: SignupInput): Promise<MaileryAuthResult> {
-    const result = await this.request<MaileryAuthResult>(ENDPOINTS.signup, { auth: "none", body: input });
+  async signup(input: SignupInput, clientDeclaration?: { name: string; version: string }): Promise<MaileryAuthResult> {
+    const result = await this.request<MaileryAuthResult>(ENDPOINTS.signup, { auth: "none", body: input, clientDeclaration });
     if (result.token) this.setSessionToken(result.token);
     return result;
   }

@@ -126,3 +126,9 @@ const checkoutUrl = await mailery.createCheckout(purchase);
 Retain the complete original input on every retry, including its policy version. Never replace the purchase key after a timeout. `topUpWallet()` takes the same country fields plus `amountCents` and a stable `idempotencyKey`. Omit all country fields only when replaying an exact pre-country purchase with its original key and amount. The server refuses a missing historical claim before creating a payable session. The checkout URL still requires the customer's payment action.
 
 MCP clients first call `get_terms` and obtain explicit acceptance before `signup` or `accept_terms`. Before `add_wallet_funds`, call `get_checkout_country_policy`, show its restrictions, and retain the customer's declaration and original policy version.
+
+## Terms receipt client metadata
+
+Terms acceptance remains an explicit, separate action after reading the exact Terms version. Signup and acceptance send paired `X-Mailery-Client-Name` and `X-Mailery-Client-Version` headers. The SDK defaults to `mailery-sdk`, the CLI to `mailery-cli`, and MCP to `mailery-mcp`, each with its shipped version. SDK `clientDeclaration: { name, version }` overrides the declaration, and `clientDeclaration: null` omits both headers. Names are 1–64 ASCII characters matching `^[A-Za-z0-9][A-Za-z0-9._ /+-]{0,63}$`. Versions are 1–32 ASCII characters matching `^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$`. Partial or malformed declarations return HTTP 400. Held publication returns HTTP 503 first.
+
+Acceptance receipts add `client: { declaration, name, version }`. `declared` preserves the received pair, `undeclared` records omitted headers with null values, and historical receipts with no recorded metadata use `unrecorded`. This technical declaration does not establish that a human read the Terms.

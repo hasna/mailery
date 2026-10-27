@@ -14,7 +14,7 @@ import { VERSION } from "./version.js";
  * newline-delimited responses to stdout. Resolves when stdin closes.
  */
 export async function runMcpServer(deps: CliDeps): Promise<void> {
-  const client = buildClient(deps);
+  const client = buildClient(deps, { technicalClientName: "mailery-mcp" });
   const decoder = new TextDecoder();
   let buffer = "";
 

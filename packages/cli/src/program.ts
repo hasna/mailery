@@ -187,6 +187,7 @@ interface AccountExportPage {
   tenant?: Record<string, unknown> | null;
   mailboxes?: unknown[];
   messages?: { data?: unknown[]; next_cursor?: string | null; nextCursor?: string | null };
+  withdrawal_evidence?: {data?:unknown[];next_cursor?:string|null};
   [key: string]: unknown;
 }
 
@@ -226,9 +227,21 @@ async function collectAccountExport(
     if (pages >= ACCOUNT_EXPORT_MAX_PAGES) throw new Error(`account export exceeded ${ACCOUNT_EXPORT_MAX_PAGES} pages; contact support@mailery.co for an out-of-band export`);
     cursor = next;
   } while (cursor);
+  const withdrawals:unknown[]=[...(last?.withdrawal_evidence?.data??[])];
+  let withdrawalCursor=last?.withdrawal_evidence?.next_cursor;
+  const visitedWithdrawalCursors=new Set<string>();
+  while(withdrawalCursor){
+    if(visitedWithdrawalCursors.has(withdrawalCursor)||visitedWithdrawalCursors.size>=ACCOUNT_EXPORT_MAX_PAGES)throw new Error("withdrawal evidence export did not reach END");
+    visitedWithdrawalCursors.add(withdrawalCursor);
+    const page=await client.exportAccount({limit:pageSize,withdrawalCursor}) as AccountExportPage;
+    if(!page.withdrawal_evidence||!Array.isArray(page.withdrawal_evidence.data))throw new Error("withdrawal evidence export is unavailable");
+    withdrawals.push(...page.withdrawal_evidence.data);
+    withdrawalCursor=page.withdrawal_evidence.next_cursor;
+  }
   const { messages: _dropped, ...rest } = last ?? {};
   return {
     ...rest,
+    ...(last?.withdrawal_evidence?{withdrawal_evidence:{data:withdrawals,next_cursor:null}}:{}),
     export_version: typeof last?.export_version === "number" ? last.export_version : 1,
     generated_at: typeof last?.generated_at === "string" ? last.generated_at : new Date().toISOString(),
     pages,
@@ -914,7 +927,7 @@ export function buildProgram(deps: CliDeps): Command {
     if (!opts.countryPolicyVersion) throw new MaileryError(countryCopy.policyRequired, { code: "checkout_country_policy_required", details: policy });
     return { country: opts.country.trim().toUpperCase(), countryBasis: opts.countryBasis as "billing" | "residence", countryPolicyVersion: opts.countryPolicyVersion };
   }
-  const subscribe = leaf(program, "subscribe <plan>", "Start a subscription (plan: pro or scale): open Stripe Checkout and wait until the entitlement is active");
+  const subscribe = leaf(program, "subscribe <plan>", "Start a subscription (plan: pro or scale): review the Mailery order and its two separate consent choices before payment");
   subscribe
     .option("--country <code>", countryCopy.countryOption)
     .option("--country-basis <basis>", countryCopy.basisOption)
@@ -962,6 +975,17 @@ export function buildProgram(deps: CliDeps): Command {
   });
 
   const billing = program.command("billing").description("Billing, prepaid wallet, and usage");
+  const purchases=leaf(billing,"purchases","List your account's completed purchases and withdrawal status (owner session)");
+  purchases.option("--limit <n>","Page size, 1–100").option("--cursor <cursor>","Continue from next_cursor");
+  purchases.action(async()=>{const json=jsonOf(purchases,deps);await run(deps,json,async()=>{const opts=purchases.opts<{limit?:string;cursor?:string}>();const result=await buildClient(deps).listWithdrawalPurchases({limit:opts.limit?Number(opts.limit):undefined,cursor:opts.cursor});ok(deps,json,result,result.data.map(p=>`${p.id}: ${p.kind} · withdrawal period: ${p.withdrawal_period.status}`));});});
+  const withdraw=leaf(billing,"withdraw <purchase-id>","Identify a purchase for withdrawal. Does not confirm or refund it");
+  withdraw.requiredOption("--email <email>","Your signed-in account email for the acknowledgement").requiredOption("--idempotency-key <key>","Stable request key, retained on retries").option("--language <language>","Acknowledgement language: en or ro","en");
+  withdraw.action(async(purchaseId:string)=>{const json=jsonOf(withdraw,deps);await run(deps,json,async()=>{const opts=withdraw.opts<{email:string;idempotencyKey:string;language:string}>();if(!["en","ro"].includes(opts.language))throw new MaileryError("language must be en or ro",{code:"cli_usage_error"});const result=await buildClient(deps).identifyWithdrawal(purchaseId,{email:opts.email,idempotencyKey:opts.idempotencyKey,language:opts.language as "en"|"ro"});ok(deps,json,result,[result.message,`request: ${result.id}`,`purchase: ${result.purchase_id}`,`acknowledgement: ${result.acknowledgement_email}`]);});});
+  const confirmWithdrawal=leaf(billing,"confirm-withdrawal <request-id>","Confirm withdrawal of the purchase you reviewed. Refund remains pending policy execution");
+  confirmWithdrawal.requiredOption("--purchase-id <purchase-id>","Exact purchase from the identified request").requiredOption("--idempotency-key <key>","Stable confirmation key").option("--yes","Confirm withdrawal after the customer reviewed the purchase and email");
+  confirmWithdrawal.action(async(requestId:string)=>{const json=jsonOf(confirmWithdrawal,deps);await run(deps,json,async()=>{const opts=confirmWithdrawal.opts<{purchaseId:string;idempotencyKey:string;yes?:boolean}>();if(opts.yes!==true)throw new MaileryError("review the identified purchase and use --yes to confirm withdrawal",{code:"withdrawal_confirmation_required"});const result=await buildClient(deps).confirmWithdrawal(requestId,{purchaseId:opts.purchaseId,idempotencyKey:opts.idempotencyKey,confirm:true});ok(deps,json,result,[result.message,`acknowledgement: ${result.acknowledgement_status}`,`refund: ${result.refund_status}`]);});});
+  const withdrawalStatus=leaf(billing,"withdrawal <request-id>","Read withdrawal request, acknowledgement and refund status");
+  withdrawalStatus.action(async(requestId:string)=>{const json=jsonOf(withdrawalStatus,deps);await run(deps,json,async()=>{const result=await buildClient(deps).getWithdrawal(requestId);ok(deps,json,result,[result.message,`acknowledgement: ${result.acknowledgement_status}`,`refund: ${result.refund_status}`]);});});
   const billingStatus = leaf(billing, "status", "Show credit balance, prepaid wallet, plans, subscriptions, and recent ledger");
   billingStatus.action(async () => {
     const json = jsonOf(billingStatus, deps);
@@ -976,6 +1000,15 @@ export function buildProgram(deps: CliDeps): Command {
       ]);
     });
   });
+
+  const checkoutOrder = leaf(billing, "order <order-id>", countryCopy.orderCommand);
+  checkoutOrder.action(async (orderId: string) => { const json = jsonOf(checkoutOrder, deps); await run(deps, json, async () => { const data = await buildClient(deps, { preferSession: true }).getCheckoutOrder(orderId); ok(deps, json, data, [JSON.stringify(data)]); }); });
+  const checkoutConfirm = leaf(billing, "confirm-order <order-id>", countryCopy.confirmCommand);
+  checkoutConfirm.option("--request-start-now", countryCopy.startOption).option("--acknowledge-withdrawal", countryCopy.withdrawalOption).requiredOption("--language <language>", countryCopy.languageOption).requiredOption("--immediate-version <version>", countryCopy.immediateVersionOption).requiredOption("--withdrawal-version <version>", countryCopy.withdrawalVersionOption).requiredOption("--idempotency-key <key>", countryCopy.confirmationKeyOption);
+  checkoutConfirm.action(async (orderId: string) => { const json=jsonOf(checkoutConfirm,deps), opts=checkoutConfirm.opts(); await run(deps,json,async () => {
+    if (opts.requestStartNow !== true || opts.acknowledgeWithdrawal !== true || !["en","ro"].includes(opts.language)) throw new MaileryError(countryCopy.choicesRequired, { code: "checkout_consent_required" });
+    const url=await buildClient(deps,{preferSession:true}).confirmCheckoutOrder(orderId,{ language:opts.language, requestImmediatePerformance:true, acknowledgeWithdrawal:true, immediateVersion:opts.immediateVersion, withdrawalVersion:opts.withdrawalVersion, idempotencyKey:opts.idempotencyKey }); ok(deps,json,{url},[url]);
+  }); });
 
   // ── prepaid wallet (launch lane L07) ──
   // The wallet is the USD balance domain purchases and renewals are charged

@@ -8468,7 +8468,11 @@
       "get": {
         "operationId": "getCheckoutOrder",
         "summary": "Read an owner-bound order and its two separate consent statements",
-        "security": [],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "parameters": [
           {
             "name": "orderId",
@@ -8682,15 +8686,20 @@
           "404": {
             "description": "No matching tenant and owner order"
           }
-        }
+        },
+        "description": "Requires a bearer token for the owner user session. API keys are not accepted."
       }
     },
     "/api/v1/billing/checkout/{orderId}/confirm": {
       "post": {
         "operationId": "confirmCheckoutOrder",
         "summary": "Record both explicit choices before opening payment",
-        "description": "Requires this order owner, verified email, current accepted Terms and country policy, each separate explicit true choice and each exact wording version. Both immutable server-timestamped receipts commit before provider dispatch. The permanent dispatch claim is order-bound, so a new header never creates another payment. No consent is inferred from purchase, Terms or defaults. Uncertain outcomes require reconciliation of this order.",
-        "security": [],
+        "description": "Requires a bearer token for the owner user session. API keys are not accepted. Requires this order owner, verified email, current accepted Terms and country policy, each separate explicit true choice and each exact wording version. Both immutable server-timestamped receipts commit before provider dispatch. The permanent dispatch claim is order-bound, so a new header never creates another payment. No consent is inferred from purchase, Terms or defaults. Uncertain outcomes require reconciliation of this order.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "parameters": [
           {
             "name": "orderId",

@@ -9,7 +9,7 @@ server, no self-host mode, ever**.
 
 Two steps intentionally happen in a browser — everything else is terminal-only: a
 one-time **email-verification** click (confirm it from the terminal with
-`mailery verify`) and the **Stripe Checkout** page for `subscribe`.
+`mailery verify`) and the **Mailery order approval and payment flow** for `subscribe`.
 
 **The Free plan is real and needs no subscription**: every verified account gets
 1 agent identity on a shared subdomain and **3,000 emails/mo** — signup →
@@ -99,8 +99,10 @@ and higher send limits are paid-tier features (`pro` / `scale`).
 
 ```sh
 # 1. subscribe to a paid identity tier — plan is `pro` or `scale` ("starter" is
-#    NOT a plan). Prints a Stripe Checkout URL, opens the browser when
-#    interactive, then polls until the entitlement is active (--no-wait skips).
+#    NOT a plan). Prints a Mailery order approval URL. The person reviews the
+#    order and separately selects both checkout statements before payment.
+#    Opens the browser when interactive, then polls until entitlement is active
+#    (--no-wait skips polling).
 mailery billing countries --json  # show restrictions and obtain the customer declaration first
 mailery subscribe pro --country <declared-ISO-code> --country-basis billing --country-policy-version <returned-version> --idempotency-key <stable-purchase-key>
 
@@ -196,7 +198,7 @@ local config files; any historical files are left untouched.
 | `account delete --password <pw> --confirm-email <email>` | Permanently delete the account and everything in it (irreversible); refuses unless the typed email matches the session identity, and while a subscription is still active |
 | `keys create --scopes <csv> [--name]` | Mint an API key (shown once; store securely) |
 | `keys list` / `keys revoke <id>` / `keys revoke --all` | Manage keys (revoke `--all` = break-glass) |
-| `subscribe <plan> --country <code> --country-basis <billing\|residence> --country-policy-version <version> [--no-wait]` | Stripe Checkout handoff, then poll entitlement |
+| `subscribe <plan> --country <code> --country-basis <billing\|residence> --country-policy-version <version> [--no-wait]` | Mailery order approval before payment, then poll entitlement |
 | `billing countries` | Current paid-checkout restrictions and policy version |
 | `billing status` / `usage` | Credit balance, inbound allowance/count/status/reset, prepaid wallet, plans, subscriptions, ledger |
 | `billing wallet [--limit <n>]` | Prepaid wallet balance and recent wallet transactions (domains are charged to it) |
@@ -249,7 +251,7 @@ Register it with any MCP client:
   "env": { "MAILERY_API_KEY": "ml_…" } } } }
 ```
 
-Tools: `get_terms`, `accept_terms`, `signup`, `send_email`, `send_email_batch`, `get_message_events`, `list_inbox`, `read_message`, `search_domains`, `get_domain_status`, `buy_domain`, `create_mailbox`, `list_mailboxes`, `update_message`, `list_changes`, `generate_digest`, `list_digests`, `get_billing_status`, `get_checkout_country_policy`, `add_wallet_funds`, `create_webhook`, `list_webhooks`, `list_suppressions`, `test_webhook`, `submit_feedback`.
+Tools (31): `get_checkout_order`, `confirm_checkout_order`, `get_terms`, `accept_terms`, `signup`, `send_email`, `send_email_batch`, `get_message_events`, `list_inbox`, `read_message`, `search_domains`, `get_domain_status`, `buy_domain`, `create_mailbox`, `list_mailboxes`, `update_message`, `list_changes`, `generate_digest`, `list_digests`, `get_billing_status`, `list_withdrawal_purchases`, `identify_purchase_withdrawal`, `confirm_purchase_withdrawal`, `get_purchase_withdrawal`, `get_checkout_country_policy`, `add_wallet_funds`, `create_webhook`, `list_webhooks`, `list_suppressions`, `test_webhook`, `submit_feedback`.
 
 Checkout retries retain the original purchase intent. Supply and persist an explicit `idempotencyKey` in SDK `createCheckout({...})`, or `--idempotency-key` on CLI `subscribe`, for a deliberate purchase. Never change it on timeout or an uncertain outcome. New purchases require all country declaration fields. Omitting those fields can only replay an exact pre-country claim with its original key (including its historical no-header key); it cannot create a new claim. A deliberate identical repeat purchase needs an explicit fresh key. Use `mailery subscribe pro --resume` or `getBillingStatus()` to observe entitlement without opening Checkout.
 

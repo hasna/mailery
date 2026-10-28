@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { MaileryClient } from "../src/client.js";
 import { callTool, MCP_TOOLS } from "../src/mcp.js";
+import { ENDPOINTS } from "../src/endpoints.js";
 
 test("SDK obtains exact order and sends only explicit separate choices on confirm", async () => {
   const calls: Array<{url: string; body: any; key: string | null}> = [];
@@ -25,3 +26,15 @@ test("MCP never supplies default consent", async () => {
   expect((tool.inputSchema.required as string[])).toContain("requestImmediatePerformance");
   expect((tool.inputSchema.required as string[])).toContain("acknowledgeWithdrawal");
 });
+
+for (const endpoint of [ENDPOINTS.getCheckoutOrder, ENDPOINTS.confirmCheckoutOrder]) {
+  test(`OpenAPI ${endpoint.method} ${endpoint.path} requires owner user-session bearer authentication`, async () => {
+    const spec = await Bun.file(new URL("../../../docs/openapi.json", import.meta.url)).json();
+    expect(spec.components.securitySchemes.bearerAuth).toMatchObject({ type: "http", scheme: "bearer" });
+    const operation = spec.paths[endpoint.path]?.[endpoint.method.toLowerCase()];
+    expect(operation).toBeDefined();
+    expect(operation.security).toEqual([{ bearerAuth: [] }]);
+    expect(operation.description).toContain("owner user session");
+    expect(operation.description).toContain("API keys are not accepted");
+  });
+}

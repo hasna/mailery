@@ -12,7 +12,7 @@ import { Command } from "commander";
 import { MaileryError, type MaileryClient, type MaileryTenantDomain, type MaileryInboundUsage } from "@hasna/mailery-sdk-internal";
 import { buildClient, resolveBaseUrl, type CliDeps } from "./client.js";
 import { runMcpServer } from "./mcp.js";
-import { RESETUP_PAUSES_SENDING, fail, ok, printJson, run, toCliError } from "./output.js";
+import { RESETUP_PAUSES_SENDING, fail, ok, printJson, run, toCliError, withTermsDiscovery } from "./output.js";
 import { withPublicDomainAvailability } from "./pricing.js";
 import { VERSION } from "./version.js";
 
@@ -568,22 +568,25 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--password-stdin", "Read the password from stdin; mutually exclusive with --password")
     .option("--name <name>", "Display name")
     .option("--invite-code <code>", "Invite code (when signup is invite-gated)")
-    .option("--accept-terms <version>", "Explicitly accept this exact Terms version after reading `mailery terms`");
+    .option("--accept-terms <version>", "Show the Terms link/version to the person. Accept this exact version only after an explicit yes from the person or an agent they authorized");
   signup.action(async () => {
     const json = jsonOf(signup, deps);
     const opts = signup.opts<PasswordOptions & { email: string; name?: string; inviteCode?: string; acceptTerms?: string }>();
+    let discoveredTerms: { url: string; version: string } | undefined;
     await run(deps, json, async () => {
       const password = await readAuthPassword(opts, deps, json);
       if (password === null) return;
       const client = buildClient(deps, { preferSession: true });
-      const terms = await client.getCurrentTerms();
+      const current = await client.getCurrentTerms();
+      const terms = { url: new URL(current.url, resolveBaseUrl(deps.env)).href, version: current.version };
+      discoveredTerms = terms;
       if (!json) deps.stderr(`Terms: ${new URL(terms.url, resolveBaseUrl(deps.env)).href} (version ${terms.version})\n`);
       if (!opts.acceptTerms || opts.acceptTerms !== terms.version) {
-        fail(deps, json, { code: "terms_acceptance_required", message: `Read ${new URL(terms.url, resolveBaseUrl(deps.env)).href}. Signup requires explicit --accept-terms ${terms.version}` });
+        fail(deps, json, withTermsDiscovery({ code: "terms_acceptance_required", message: `Read ${terms.url}. Signup requires explicit --accept-terms ${terms.version}` }, terms, client.baseUrl));
         return;
       }
       const result = await client.signup({ email: opts.email, password, name: opts.name, inviteCode: opts.inviteCode, acceptedTerms: true, termsVersion: opts.acceptTerms });
-      ok(deps, json, { user: result.user, tenant: result.tenant, token: result.token }, [
+      ok(deps, json, { user: result.user, tenant: result.tenant, token: result.token, terms }, [
         `Signed up as ${result.user.email} (tenant ${result.tenant.slug}).`,
         `Session token (shown once): ${result.token}`,
         `Store it securely: export MAILERY_SESSION_TOKEN='${result.token}'`,
@@ -592,11 +595,11 @@ export function buildProgram(deps: CliDeps): Command {
         "Next: `mailery keys create --scopes full`, then `mailery mailboxes create <name>@<shared-domain>`.",
         "Custom domains and higher limits: `mailery subscribe pro`.",
       ].filter(Boolean));
-    });
+    }, error => discoveredTerms ? withTermsDiscovery(error, discoveredTerms, resolveBaseUrl(deps.env)) : error);
   });
 
   const terms = leaf(program, "terms", "Read the exact current Terms link/version, or record the owner's explicit acceptance");
-  terms.option("--accept <version>", "Explicitly accept this version as the tenant owner (never selected by default)");
+  terms.option("--accept <version>", "Show the Terms link/version to the person. Run only after an explicit yes from the person or an agent they authorized. Supply the exact version, never a default");
   terms.action(async () => {
     const json = jsonOf(terms, deps);
     const opts = terms.opts<{ accept?: string }>();
@@ -604,7 +607,7 @@ export function buildProgram(deps: CliDeps): Command {
       const client = buildClient(deps, { preferSession: true });
       const current = await client.getCurrentTerms();
       if (!opts.accept) {
-        ok(deps, json, current, [`Terms: ${new URL(current.url, resolveBaseUrl(deps.env)).href}`, `Version: ${current.version}`, `After reading, the tenant owner may run: mailery terms --accept ${current.version}`]);
+        ok(deps, json, { ...current, url: new URL(current.url, resolveBaseUrl(deps.env)).href }, [`Terms: ${new URL(current.url, resolveBaseUrl(deps.env)).href}`, `Version: ${current.version}`, `Show this link and version to the person. Only after an explicit yes from the person or an agent they authorized, run: mailery terms --accept ${current.version}`]);
         return;
       }
       const receipt = await client.acceptTerms({ acceptedTerms: true, termsVersion: opts.accept });

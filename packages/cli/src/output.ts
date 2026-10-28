@@ -15,6 +15,8 @@ export interface CliError {
   status?: number;
   details?: unknown;
   hint?: string;
+  /** Current public Terms discovered during signup, never inferred consent. */
+  terms?: { url: string; version: string };
 }
 
 type TextOutput = { stdout: (chunk: string) => void };
@@ -43,6 +45,7 @@ export function fail(deps: CliDeps, json: boolean, error: CliError): void {
     printJson(deps, { ok: false, error });
   } else {
     deps.stderr(`error: ${error.message}\n`);
+    if (error.terms) deps.stderr(`Terms: ${error.terms.url} (version ${error.terms.version})\n`);
     if (error.hint) deps.stderr(`hint: ${error.hint}\n`);
   }
   deps.setExitCode(1);
@@ -158,11 +161,31 @@ export function toCliError(err: unknown): CliError {
   return { code: "cli_error", message: String(err) };
 }
 
+/** Retain signup discovery on a later failure, preferring authoritative server Terms. */
+export function withTermsDiscovery(error: CliError, fallback: { url: string; version: string }, baseUrl: string): CliError {
+  const details = error.details;
+  const record = details && typeof details === "object" && !Array.isArray(details) ? details as Record<string, unknown> : undefined;
+  const supplied = record?.terms;
+  const serverTerms = supplied && typeof supplied === "object" && !Array.isArray(supplied) ? supplied as Record<string, unknown> : undefined;
+  let terms = fallback;
+  if (typeof serverTerms?.url === "string" && typeof serverTerms.version === "string") {
+    try { terms = { url: new URL(serverTerms.url, baseUrl).href, version: serverTerms.version }; } catch { /* Retain the successful preflight if server metadata is malformed. */ }
+  }
+  return {
+    ...error,
+    terms,
+    // Keep unrelated fields, including non-object details, unchanged. The top-level
+    // terms field remains available even when details cannot carry named fields.
+    details: record ? { ...record, terms: { ...serverTerms, ...terms } } : details === undefined ? { terms } : details,
+  };
+}
+
 /** Run an action body, formatting any thrown error as a CliError failure. */
-export async function run(deps: CliDeps, json: boolean, fn: () => Promise<void>): Promise<void> {
+export async function run(deps: CliDeps, json: boolean, fn: () => Promise<void>, mapError?: (error: CliError) => CliError): Promise<void> {
   try {
     await fn();
   } catch (err) {
-    fail(deps, json, toCliError(err));
+    const error = toCliError(err);
+    fail(deps, json, mapError ? mapError(error) : error);
   }
 }

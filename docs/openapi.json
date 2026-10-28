@@ -4003,8 +4003,37 @@
           },
           "503": {
             "description": "Signup and new purchases are temporarily paused. Please try again later. Returned before any signup write for both legacy and explicit-consent callers when Terms publication is held."
+          },
+          "400": {
+            "description": "Partial or invalid technical client declaration. Both headers must be valid or both omitted. Held publication returns 503 before declaration validation."
           }
-        }
+        },
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Mailery-Client-Name",
+            "required": false,
+            "description": "Declared technical client name; supply together with version or omit both. No inference of human reading. Leading and trailing whitespace are invalid.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._ /+-]{0,62}[A-Za-z0-9._/+-])?$"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Mailery-Client-Version",
+            "required": false,
+            "description": "Declared technical version; supply together with name or omit both. Leading and trailing whitespace are invalid.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$"
+            }
+          }
+        ]
       }
     },
     "/api/v1/auth/login": {
@@ -8125,12 +8154,40 @@
                     {
                       "type": "object",
                       "required": [
-                        "acceptedAt"
+                        "acceptedAt",
+                        "client"
                       ],
                       "properties": {
                         "acceptedAt": {
                           "type": "string",
                           "format": "date-time"
+                        },
+                        "client": {
+                          "type": "object",
+                          "required": [
+                            "declaration",
+                            "name",
+                            "version"
+                          ],
+                          "properties": {
+                            "declaration": {
+                              "type": "string",
+                              "enum": [
+                                "declared",
+                                "undeclared",
+                                "unrecorded"
+                              ]
+                            },
+                            "name": {
+                              "type": "string",
+                              "nullable": true
+                            },
+                            "version": {
+                              "type": "string",
+                              "nullable": true
+                            }
+                          },
+                          "description": "Technical declaration only. Omitted headers produce undeclared with null name/version. Historical receipts without recorded metadata are unrecorded. Does not prove human reading."
                         }
                       }
                     }
@@ -8150,8 +8207,37 @@
           },
           "503": {
             "description": "Terms compatibility fence mismatch"
+          },
+          "400": {
+            "description": "Partial or invalid technical client declaration. Both headers must be valid or both omitted. Held publication returns 503 before declaration validation."
           }
-        }
+        },
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Mailery-Client-Name",
+            "required": false,
+            "description": "Declared technical client name; supply together with version or omit both. No inference of human reading. Leading and trailing whitespace are invalid.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._ /+-]{0,62}[A-Za-z0-9._/+-])?$"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Mailery-Client-Version",
+            "required": false,
+            "description": "Declared technical version; supply together with name or omit both. Leading and trailing whitespace are invalid.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$"
+            }
+          }
+        ]
       }
     },
     "/api/v1/billing/countries": {

@@ -1,3 +1,4 @@
+import { VERSION } from "./version.js";
 // Resolves a MaileryClient from environment variables only.
 // The CLI is cloud-only: the base URL defaults to https://mailery.co and is
 // overridable ONLY via MAILERY_BASE_URL. There is no local-server mode and no
@@ -38,6 +39,7 @@ export function resolveBaseUrl(env: Env): string {
 export interface ClientOptions {
   /** Force session-only auth (owner routes); ignore any stored API key. */
   preferSession?: boolean;
+  technicalClientName?: "mailery-cli" | "mailery-mcp";
   /** Override the API key (e.g. a freshly minted one before exporting it). */
   apiKey?: string;
   /** Override the session token. */
@@ -55,6 +57,7 @@ export function buildClient(deps: CliDeps, options: ClientOptions = {}): Mailery
   const sessionToken = options.sessionToken ?? deps.env.MAILERY_SESSION_TOKEN?.trim();
   return new MaileryClient({
     baseUrl,
+    clientDeclaration: { name: options.technicalClientName ?? "mailery-cli", version: VERSION },
     apiKey: apiKey || undefined,
     sessionToken: sessionToken || undefined,
     fetch: deps.fetch,

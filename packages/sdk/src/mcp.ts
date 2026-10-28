@@ -66,6 +66,14 @@ const sendAttachments = {
 
 export const MCP_TOOLS: McpToolDef[] = [
   {
+    name: "get_checkout_order", description: "Read an existing Mailery order and show both exact consent statements to the person before payment.",
+    inputSchema: { type: "object", required: ["orderId"], properties: { orderId: { type: "string" } } }, annotations: { readOnlyHint: true },
+  },
+  {
+    name: "confirm_checkout_order", description: "Open payment only after the person separately chose both exact statements from get_checkout_order. Never infer either choice from purchase approval, Terms, or an agent prompt. Prefer giving the person the Mailery order URL to select the choices themselves.",
+    inputSchema: { type: "object", required: ["orderId", "language", "requestImmediatePerformance", "acknowledgeWithdrawal", "immediateVersion", "withdrawalVersion", "idempotencyKey"], properties: { orderId: { type: "string" }, language: { type: "string", enum: ["en", "ro"] }, requestImmediatePerformance: { type: "boolean", const: true }, acknowledgeWithdrawal: { type: "boolean", const: true }, immediateVersion: { type: "string" }, withdrawalVersion: { type: "string" }, idempotencyKey: { type: "string" } } },
+  },
+  {
     name: "get_terms",
     description: "Read Mailery's exact current Terms link and immutable version before signup or accepting for paid entry. Never infer permission to accept.",
     inputSchema: { type: "object", properties: {} },
@@ -295,6 +303,10 @@ export const MCP_TOOLS: McpToolDef[] = [
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: {} },
   },
+  {name:"list_withdrawal_purchases",description:"List this account owner's completed purchases. Show the purchase and withdrawal period before asking whether to withdraw. Missing legacy evidence means review_required, never expired. Follow next_cursor.",annotations:{readOnlyHint:true},inputSchema:{type:"object",properties:{limit:{type:"integer",minimum:1,maximum:100},cursor:{type:"string"}}}},
+  {name:"identify_purchase_withdrawal",description:"First withdrawal step. Identify the purchase and account email for acknowledgement. Show returned purchase and email to the customer. This does not confirm withdrawal or issue a refund.",inputSchema:{type:"object",required:["purchaseId","email","idempotencyKey"],properties:{purchaseId:{type:"string"},email:{type:"string"},language:{type:"string",enum:["en","ro"]},idempotencyKey:{type:"string"}}}},
+  {name:"confirm_purchase_withdrawal",description:"Second step. Only call after the customer reviewed the identified purchase and email and explicitly confirmed withdrawal. Records the request and one acknowledgement. Refund remains pending policy execution, no refund or cancellation is performed.",inputSchema:{type:"object",required:["requestId","purchaseId","confirm","idempotencyKey"],properties:{requestId:{type:"string"},purchaseId:{type:"string"},confirm:{type:"boolean",const:true},idempotencyKey:{type:"string"}}}},
+  {name:"get_purchase_withdrawal",description:"Read the withdrawal request, email acknowledgement and refund status. A confirmed request is not a settled refund.",annotations:{readOnlyHint:true},inputSchema:{type:"object",required:["requestId"],properties:{requestId:{type:"string"}}}},
   {
     name: "get_checkout_country_policy",
     description: "First checkout step. Read and show the current country restrictions to the customer before preparing a paid purchase. Signup and free use remain open. Obtain a billing or residence country declaration and retain this policy version for add_wallet_funds.",
@@ -597,8 +609,26 @@ export async function callTool(name: string, rawArgs: Record<string, unknown> | 
       }
       case "list_digests":
         return textResult(await client.listDigests({ limit: typeof args.limit === "number" ? args.limit : undefined }));
+      case "get_checkout_order":
+        return textResult(await client.getCheckoutOrder(arg<string>(args, "orderId")));
+      case "confirm_checkout_order": {
+        if (args.requestImmediatePerformance !== true || args.acknowledgeWithdrawal !== true || !["en", "ro"].includes(String(args.language))) return textResult({ code: "checkout_consent_required", message: "Both separate explicit choices and a supported language are required." }, true);
+        return textResult({ url: await client.confirmCheckoutOrder(arg<string>(args, "orderId"), { language: args.language as "en" | "ro", requestImmediatePerformance: true, acknowledgeWithdrawal: true, immediateVersion: arg<string>(args, "immediateVersion"), withdrawalVersion: arg<string>(args, "withdrawalVersion"), idempotencyKey: arg<string>(args, "idempotencyKey") }) });
+      }
       case "get_billing_status":
         return textResult(await client.getBillingStatus());
+      case "list_withdrawal_purchases":return textResult(await client.listWithdrawalPurchases({limit:typeof args.limit==="number"?args.limit:undefined,cursor:typeof args.cursor==="string"?args.cursor:undefined}));
+      case "identify_purchase_withdrawal": {
+        const purchaseId=arg<string>(args,"purchaseId"),email=arg<string>(args,"email"),idempotencyKey=arg<string>(args,"idempotencyKey");
+        if(!purchaseId||!email||!idempotencyKey)return textResult({code:"bad_request",message:"purchaseId, email and idempotencyKey are required"},true);
+        return textResult(await client.identifyWithdrawal(purchaseId,{email,idempotencyKey,language:arg<"en"|"ro">(args,"language")}));
+      }
+      case "confirm_purchase_withdrawal": {
+        const requestId=arg<string>(args,"requestId"),purchaseId=arg<string>(args,"purchaseId"),idempotencyKey=arg<string>(args,"idempotencyKey");
+        if(!requestId||!purchaseId||!idempotencyKey||args.confirm!==true)return textResult({code:"withdrawal_confirmation_required",message:"review the identified request and explicitly confirm it"},true);
+        return textResult(await client.confirmWithdrawal(requestId,{purchaseId,idempotencyKey,confirm:true}));
+      }
+      case "get_purchase_withdrawal":return textResult(await client.getWithdrawal(arg<string>(args,"requestId")));
       case "get_checkout_country_policy":
         return textResult(await client.getCheckoutCountryPolicy());
       case "add_wallet_funds": {

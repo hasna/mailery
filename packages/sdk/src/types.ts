@@ -5,6 +5,8 @@
 
 export type MaileryAuthVia = "session" | "api_key" | "admin_key" | (string & {});
 export type MaileryUserRole = "owner" | "admin" | "member" | "viewer" | (string & {});
+export type * from "./purchase-withdrawal-types.js";
+
 export type MaileryApiKeyScope = "full" | "mail_read" | "mail_write" | "billing_read" | "domains:purchase" | (string & {});
 
 // ─── Auth / account ────────────────────────────────────────────────────────
@@ -92,6 +94,8 @@ export interface VerifyPollInput {
 export type VerificationPollResult = { status: "pending" } | { status: "verified"; token: string };
 
 export interface AccountExportOptions {
+  /** Independent cursor from withdrawal_evidence.next_cursor. */
+  withdrawalCursor?: string;
   limit?: number;
   cursor?: string;
 }
@@ -1077,4 +1081,25 @@ export interface MaileryWebhookEvent<TData = Record<string, unknown>> {
   created_at: string;
   tenant_id: string;
   data: TData;
+}
+
+/** Each value must come from the person's separate explicit choice. Never default. */
+export interface CheckoutConsentInput {
+  language: "en" | "ro";
+  requestImmediatePerformance: true;
+  acknowledgeWithdrawal: true;
+  immediateVersion: string;
+  withdrawalVersion: string;
+  idempotencyKey: string;
+}
+export interface CheckoutOrderResult {
+  orderId: string;
+  intent: { kind: "subscription"; plan: string } | { kind: "credit_pack"; credits: number };
+  amountCents: number;
+  currency: string;
+  country: { country: string; countryBasis: "billing" | "residence"; countryPolicyVersion: string };
+  termsVersion: string;
+  /** Exact purchase-time source Markdown, content-addressed by SHA-256. */
+  refundPolicy: { version: string; text: string };
+  consent: Record<"en" | "ro", { language: "en" | "ro"; immediate: { text: string; version: string }; withdrawal: { text: string; version: string } }>;
 }

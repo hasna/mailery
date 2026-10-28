@@ -56,6 +56,12 @@ export const ENDPOINTS = {
 
   getCheckoutCountryPolicy: { id: "getCheckoutCountryPolicy", method: "GET", path: "/api/v1/billing/countries", state: "stable" },
   createCheckout: { id: "createCheckout", method: "POST", path: "/api/v1/billing/checkout", state: "stable" },
+  getCheckoutOrder: { id: "getCheckoutOrder", method: "GET", path: "/api/v1/billing/checkout/{orderId}", state: "stable" },
+  confirmCheckoutOrder: { id: "confirmCheckoutOrder", method: "POST", path: "/api/v1/billing/checkout/{orderId}/confirm", state: "stable" },
+  listWithdrawalPurchases: {id:"listWithdrawalPurchases",method:"GET",path:"/api/v1/billing/purchases",state:"stable"},
+  identifyWithdrawal: {id:"identifyWithdrawal",method:"POST",path:"/api/v1/billing/purchases/{purchaseId}/withdrawals",state:"stable"},
+  getWithdrawal: {id:"getWithdrawal",method:"GET",path:"/api/v1/billing/withdrawals/{requestId}",state:"stable"},
+  confirmWithdrawal: {id:"confirmWithdrawal",method:"POST",path:"/api/v1/billing/withdrawals/{requestId}/confirm",state:"stable"},
   billingOverview: { id: "billingOverview", method: "GET", path: "/api/v1/billing/overview", state: "stable" },
   billingPortal: { id: "billingPortal", method: "POST", path: "/api/v1/billing/portal", state: "stable" },
   // Prepaid wallet (launch lane L07): the USD balance domain purchases and

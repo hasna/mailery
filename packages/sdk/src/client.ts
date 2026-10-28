@@ -1,3 +1,4 @@
+import type { WithdrawalPurchasePage,WithdrawalRequest,IdentifyWithdrawalInput,ConfirmWithdrawalInput } from "./purchase-withdrawal-types.js";
 import { SDK_VERSION } from "./version.js";
 // MaileryClient — a zero-dependency TypeScript client for the Mailery
 // /api/v1. Aligned to src/server/app.ts; the server is the source of
@@ -30,6 +31,8 @@ import type {
   CreateApiKeyInput,
   CreateApiKeyResult,
   CreateCheckoutInput,
+  CheckoutConsentInput,
+  CheckoutOrderResult,
   CheckoutCountryPolicy,
   CreateDomainInput,
   CreateMailboxInput,
@@ -479,7 +482,7 @@ export class MaileryClient {
 
   /** GDPR Art. 20 tenant export. Owner/admin session only; never billing-gated. */
   exportAccount(options: AccountExportOptions = {}): Promise<Record<string, unknown>> {
-    return this.request(ENDPOINTS.accountExport, { auth: "session", query: { limit: options.limit, cursor: options.cursor } });
+    return this.request(ENDPOINTS.accountExport, { auth: "session", query: { limit: options.limit, cursor: options.cursor, withdrawal_cursor: options.withdrawalCursor } });
   }
 
   /** GDPR Art. 17 tenant deletion. Requires owner password re-authentication. */
@@ -521,7 +524,7 @@ export class MaileryClient {
   }
 
   /**
-   * Open Stripe Checkout after presenting getCheckoutCountryPolicy(). Current
+   * Prepare a Mailery order approval URL after presenting getCheckoutCountryPolicy(). Current
    * new purchases require country, countryBasis and countryPolicyVersion.
    * Omitting all declaration fields can replay only an exact pre-country
    * purchase under its original key (including the historical no-header key).
@@ -538,10 +541,41 @@ export class MaileryClient {
     return result.url;
   }
 
+  /** Read the exact order and separate current consent statements. */
+  getCheckoutOrder(orderId: string): Promise<CheckoutOrderResult> {
+    return this.request(ENDPOINTS.getCheckoutOrder, { auth: "session", params: { orderId } });
+  }
+  /** Confirm only after the person chose BOTH statements. Never infer from Terms or purchase. */
+  async confirmCheckoutOrder(orderId: string, input: CheckoutConsentInput): Promise<string> {
+    if (input.requestImmediatePerformance !== true || input.acknowledgeWithdrawal !== true || !input.immediateVersion || !input.withdrawalVersion || !input.idempotencyKey) throw new MaileryError("Two explicit choices, exact versions and a stable confirmation key are required", { code: "checkout_consent_required" });
+    const { idempotencyKey, ...body } = input;
+    const result = await this.request<{ url: string }>(ENDPOINTS.confirmCheckoutOrder, { auth: "session", params: { orderId }, body, idempotencyKey });
+    return result.url;
+  }
+
   /** Create a Stripe billing-portal session URL for the tenant. */
   async createBillingPortal(): Promise<string> {
     const result = await this.request<BillingPortalResult>(ENDPOINTS.billingPortal, { auth: "session" });
     return result.url;
+  }
+
+  /** Read completed purchases in the current owner's tenant, including legacy purchases without a purchaser record. Follow next_cursor to END. */
+  listWithdrawalPurchases(options:{limit?:number;cursor?:string}={}):Promise<WithdrawalPurchasePage>{
+    return this.request(ENDPOINTS.listWithdrawalPurchases,{auth:"session",query:options});
+  }
+  /** First step. Present the purchase and email to the customer before confirmation. */
+  identifyWithdrawal(purchaseId:string,input:IdentifyWithdrawalInput):Promise<WithdrawalRequest>{
+    const {idempotencyKey,...body}=input;
+    return this.request(ENDPOINTS.identifyWithdrawal,{auth:"session",params:{purchaseId},body,idempotencyKey});
+  }
+  getWithdrawal(requestId:string):Promise<WithdrawalRequest>{
+    return this.request(ENDPOINTS.getWithdrawal,{auth:"session",params:{requestId}});
+  }
+  /** Explicit second step. Records withdrawal and queues one acknowledgement. No fund movement. */
+  confirmWithdrawal(requestId:string,input:ConfirmWithdrawalInput):Promise<WithdrawalRequest>{
+    const {idempotencyKey,...body}=input;
+    if(body.confirm!==true)throw new MaileryError("explicit withdrawal confirmation is required",{code:"withdrawal_confirmation_required",status:428});
+    return this.request(ENDPOINTS.confirmWithdrawal,{auth:"session",params:{requestId},body,idempotencyKey});
   }
 
   /** Full billing overview: balance, wallet, plans, credit packs, subscriptions, and ledger. */

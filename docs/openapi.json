@@ -2711,6 +2711,37 @@
                 }
               }
             }
+          },
+          "withdrawal_evidence": {
+            "type": "object",
+            "description": "Owner-created identified/confirmed withdrawal records with preserved purchase/consent/policy evidence. Independent cursor.",
+            "properties": {
+              "data": {
+                "type": "array",
+                "items": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/WithdrawalRequest"
+                    }
+                  ],
+                  "properties": {
+                    "purchase_evidence": {
+                      "type": "object"
+                    },
+                    "refund_policy_text": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "next_cursor": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              }
+            }
           }
         }
       },
@@ -3740,6 +3771,168 @@
             }
           }
         }
+      },
+      "WithdrawalPurchase": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "amount_cents",
+          "currency",
+          "withdrawal_period",
+          "withdrawal_available"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "subscription",
+              "credit_pack"
+            ]
+          },
+          "plan": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "amount_cents": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "currency": {
+            "type": "string"
+          },
+          "fulfilled_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "withdrawal_period": {
+            "type": "object",
+            "description": "Unknown statutory eligibility remains review_required. No expired inference from local creation or fulfillment timestamps.",
+            "required": [
+              "status",
+              "starts_at",
+              "ends_at",
+              "reason"
+            ],
+            "properties": {
+              "status": {
+                "const": "review_required"
+              },
+              "starts_at": {
+                "type": "null"
+              },
+              "ends_at": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          },
+          "withdrawal_available": {
+            "type": "boolean"
+          },
+          "withdrawal_request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "WithdrawalRequest": {
+        "type": "object",
+        "required": [
+          "id",
+          "purchase_id",
+          "acknowledgement_email",
+          "status",
+          "refund_status",
+          "acknowledgement_status",
+          "refund_policy_version",
+          "purchase",
+          "refund_policy_binding"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "purchase_id": {
+            "type": "string"
+          },
+          "acknowledgement_email": {
+            "type": "string",
+            "format": "email"
+          },
+          "language": {
+            "type": "string",
+            "enum": [
+              "en",
+              "ro"
+            ]
+          },
+          "identified_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "confirmed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "status": {
+            "enum": [
+              "identified",
+              "confirmed"
+            ]
+          },
+          "refund_status": {
+            "enum": [
+              "not_requested",
+              "pending_policy_execution"
+            ]
+          },
+          "acknowledgement_status": {
+            "enum": [
+              "not_queued",
+              "queued",
+              "sent",
+              "uncertain"
+            ]
+          },
+          "refund_policy_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Exact purchase-time policy hash, or null when not established. No request-time substitution."
+          },
+          "purchase": {
+            "$ref": "#/components/schemas/WithdrawalPurchase"
+          },
+          "message": {
+            "type": "string"
+          },
+          "refund_policy_binding": {
+            "enum": [
+              "purchase",
+              "unavailable"
+            ]
+          }
+        }
       }
     },
     "responses": {
@@ -4335,6 +4528,15 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "in": "query",
+            "name": "withdrawal_cursor",
+            "description": "Independent UUID cursor from withdrawal_evidence.next_cursor. Continue to null.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
@@ -4852,7 +5054,7 @@
           "Billing"
         ],
         "summary": "Create a Stripe checkout URL",
-        "description": "Creates a Stripe checkout session for a Pro/Scale subscription or a one-time credit pack. Requires an interactive owner/admin session. Rate limited to 10 attempts per tenant/actor per hour. Purchased credits never expire. When MAILERY_REQUIRE_EMAIL_VERIFICATION is enabled (default in production), an unverified email is rejected with 403 email_verification_required. Idempotency-Key is optional only for compatibility with public client 0.1.0: without it, the same tenant/actor and normalized purchase intent permanently replays its first attempt. There is no lease/TTL rollover. A deliberate identical repeat purchase requires an explicit new key via an upgraded client. Supplied keys bind the normalized kind/plan/credits and actor; a changed request returns 409 before provider I/O. Lost provider results or local persistence failures return checkout_outcome_ambiguous: keep the original key and reconcile it, never automatically start another purchase. Use billing status or CLI subscribe --resume for observation without creation. First read GET /api/v1/billing/countries and present the list before payment. Requires country, countryBasis (billing or residence), and countryPolicyVersion. Listed countries are refused before provider I/O. The declaration is bound to the authenticated actor and purchase fingerprint and copied to Stripe metadata. Stripe billing-address editing is not locked or independently verified.  New purchases require the full country declaration. Omitting all three declaration fields replays only an exact pre-country claim: checkout retains its original actor/kind/plan/credits fingerprint, and wallet retains its original amountCents fingerprint under the authenticated tenant and key. Missing claims fail country admission before insertion or provider I/O. Supplying any declaration never matches a legacy fingerprint. Retain the exact original countryPolicyVersion on retries; never substitute the current version.",
+        "description": "Prepare a tenant/owner-bound Mailery order approval URL. No provider payment session is created at this step. Request shape and {url} response stay compatible. The owner signs in at the URL and separately selects both unticked required performance/withdrawal statements before payment. Replayed legacy provider URLs fail closed with 428, without modifying original claims or sessions. Already issued provider URLs require a separate activation inventory and disposition. The same original purchase key permanently replays its order URL. An uncertain confirmation returns checkout_outcome_ambiguous and requires reconciliation.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -8255,6 +8457,611 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CheckoutCountryPolicy"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/billing/checkout/{orderId}": {
+      "get": {
+        "operationId": "getCheckoutOrder",
+        "summary": "Read an owner-bound order and its two separate consent statements",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "orderId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "orderId",
+                    "intent",
+                    "amountCents",
+                    "currency",
+                    "country",
+                    "termsVersion",
+                    "consent",
+                    "refundPolicy"
+                  ],
+                  "properties": {
+                    "orderId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "intent": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "plan"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "const": "subscription"
+                            },
+                            "plan": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "kind",
+                            "credits"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "const": "credit_pack"
+                            },
+                            "credits": {
+                              "type": "integer"
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "amountCents": {
+                      "type": "integer"
+                    },
+                    "currency": {
+                      "type": "string"
+                    },
+                    "country": {
+                      "type": "object"
+                    },
+                    "termsVersion": {
+                      "type": "string"
+                    },
+                    "consent": {
+                      "type": "object",
+                      "properties": {
+                        "en": {
+                          "type": "object",
+                          "required": [
+                            "language",
+                            "immediate",
+                            "withdrawal"
+                          ],
+                          "properties": {
+                            "language": {
+                              "type": "string",
+                              "enum": [
+                                "en",
+                                "ro"
+                              ]
+                            },
+                            "immediate": {
+                              "type": "object",
+                              "required": [
+                                "text",
+                                "version"
+                              ],
+                              "properties": {
+                                "text": {
+                                  "type": "string"
+                                },
+                                "version": {
+                                  "type": "string",
+                                  "pattern": "^[a-f0-9]{64}$"
+                                }
+                              }
+                            },
+                            "withdrawal": {
+                              "type": "object",
+                              "required": [
+                                "text",
+                                "version"
+                              ],
+                              "properties": {
+                                "text": {
+                                  "type": "string"
+                                },
+                                "version": {
+                                  "type": "string",
+                                  "pattern": "^[a-f0-9]{64}$"
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "ro": {
+                          "type": "object",
+                          "required": [
+                            "language",
+                            "immediate",
+                            "withdrawal"
+                          ],
+                          "properties": {
+                            "language": {
+                              "type": "string",
+                              "enum": [
+                                "en",
+                                "ro"
+                              ]
+                            },
+                            "immediate": {
+                              "type": "object",
+                              "required": [
+                                "text",
+                                "version"
+                              ],
+                              "properties": {
+                                "text": {
+                                  "type": "string"
+                                },
+                                "version": {
+                                  "type": "string",
+                                  "pattern": "^[a-f0-9]{64}$"
+                                }
+                              }
+                            },
+                            "withdrawal": {
+                              "type": "object",
+                              "required": [
+                                "text",
+                                "version"
+                              ],
+                              "properties": {
+                                "text": {
+                                  "type": "string"
+                                },
+                                "version": {
+                                  "type": "string",
+                                  "pattern": "^[a-f0-9]{64}$"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "refundPolicy": {
+                      "type": "object",
+                      "required": [
+                        "version",
+                        "text"
+                      ],
+                      "properties": {
+                        "version": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "text": {
+                          "type": "string",
+                          "description": "Exact purchase-time source Markdown for the Refund Policy, retained with the order."
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Owner session required"
+          },
+          "403": {
+            "description": "Active owner required"
+          },
+          "404": {
+            "description": "No matching tenant and owner order"
+          }
+        },
+        "description": "Requires a bearer token for the owner user session. API keys are not accepted."
+      }
+    },
+    "/api/v1/billing/checkout/{orderId}/confirm": {
+      "post": {
+        "operationId": "confirmCheckoutOrder",
+        "summary": "Record both explicit choices before opening payment",
+        "description": "Requires a bearer token for the owner user session. API keys are not accepted. Requires this order owner, verified email, current accepted Terms and country policy, each separate explicit true choice and each exact wording version. Both immutable server-timestamped receipts commit before provider dispatch. The permanent dispatch claim is order-bound, so a new header never creates another payment. No consent is inferred from purchase, Terms or defaults. Uncertain outcomes require reconciliation of this order.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "orderId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 200
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "language",
+                  "requestImmediatePerformance",
+                  "acknowledgeWithdrawal",
+                  "immediateVersion",
+                  "withdrawalVersion"
+                ],
+                "properties": {
+                  "language": {
+                    "type": "string",
+                    "enum": [
+                      "en",
+                      "ro"
+                    ]
+                  },
+                  "requestImmediatePerformance": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "acknowledgeWithdrawal": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "immediateVersion": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "withdrawalVersion": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "url"
+                  ],
+                  "properties": {
+                    "url": {
+                      "type": "string",
+                      "format": "uri"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Owner session required"
+          },
+          "403": {
+            "description": "Active owner or verified email required"
+          },
+          "404": {
+            "description": "No matching owner order"
+          },
+          "409": {
+            "description": "Changed statements, Terms, catalogue, subscription, conflict or ambiguous original outcome"
+          },
+          "428": {
+            "description": "A separate explicit choice is absent or false"
+          },
+          "503": {
+            "description": "Paid entry unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/billing/purchases": {
+      "get": {
+        "operationId": "listWithdrawalPurchases",
+        "summary": "List own-tenant completed purchases for the active tenant owner, including legacy purchaser-less records",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owner-bound withdrawal state. No fund movement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "next_cursor"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WithdrawalPurchase"
+                      }
+                    },
+                    "next_cursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Owner session required"
+          },
+          "403": {
+            "description": "Active account owner required"
+          },
+          "409": {
+            "description": "Idempotency or purchase conflict"
+          }
+        },
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/billing/purchases/{purchaseId}/withdrawals": {
+      "post": {
+        "operationId": "identifyWithdrawal",
+        "summary": "Identify purchase and account email. No confirmation, email or refund yet",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owner-bound withdrawal state. No fund movement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WithdrawalRequest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Owner session required"
+          },
+          "403": {
+            "description": "Active account owner required"
+          },
+          "409": {
+            "description": "Idempotency or purchase conflict"
+          }
+        },
+        "parameters": [
+          {
+            "in": "path",
+            "name": "purchaseId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "email"
+                ],
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  "language": {
+                    "enum": [
+                      "en",
+                      "ro"
+                    ],
+                    "default": "en"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/billing/withdrawals/{requestId}": {
+      "get": {
+        "operationId": "getWithdrawal",
+        "summary": "Read preserved withdrawal state",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owner-bound withdrawal state. No fund movement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WithdrawalRequest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Owner session required"
+          },
+          "403": {
+            "description": "Active account owner required"
+          },
+          "409": {
+            "description": "Idempotency or purchase conflict"
+          }
+        },
+        "parameters": [
+          {
+            "in": "path",
+            "name": "requestId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/billing/withdrawals/{requestId}/confirm": {
+      "post": {
+        "operationId": "confirmWithdrawal",
+        "summary": "Explicitly confirm withdrawal and queue one acknowledgement. Refund stays pending approved policy execution",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Owner-bound withdrawal state. No fund movement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WithdrawalRequest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Owner session required"
+          },
+          "403": {
+            "description": "Active account owner required"
+          },
+          "409": {
+            "description": "Idempotency or purchase conflict"
+          }
+        },
+        "parameters": [
+          {
+            "in": "path",
+            "name": "requestId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "confirm",
+                  "purchaseId"
+                ],
+                "properties": {
+                  "confirm": {
+                    "const": true
+                  },
+                  "purchaseId": {
+                    "type": "string"
+                  }
                 }
               }
             }

@@ -23,3 +23,4 @@ export { verifyWebhookSignature, parseWebhookEvent, WEBHOOK_REPLAY_WINDOW_SECOND
 export type { VerifyWebhookSignatureInput, VerifyWebhookSignatureResult } from "./webhooks.js";
 
 export type * from "./types.js";
+export type * from "./purchase-withdrawal-types.js";

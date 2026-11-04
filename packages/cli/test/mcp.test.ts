@@ -24,11 +24,14 @@ describe("protocol", () => {
     expect(res).toBeNull();
   });
 
-  test("tools/list returns exactly the twenty-five documented tools", async () => {
+  test("tools/list returns exactly the thirty-one documented tools", async () => {
     const res = await handleMcpMessage({ jsonrpc: "2.0", id: 2, method: "tools/list" }, client(() => ({})));
     const names = (res!.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "accept_terms",
+      "confirm_checkout_order",
+      "confirm_purchase_withdrawal",
+      "identify_purchase_withdrawal",
       "signup",
       "get_terms",
       "add_wallet_funds",
@@ -38,12 +41,15 @@ describe("protocol", () => {
       "generate_digest",
       "get_billing_status",
       "get_checkout_country_policy",
+      "get_checkout_order",
+      "get_purchase_withdrawal",
       "get_domain_status",
       "get_message_events",
       "list_changes",
       "list_digests",
       "list_inbox",
       "list_mailboxes",
+      "list_withdrawal_purchases",
       "list_suppressions",
       "list_webhooks",
       "read_message",
@@ -55,7 +61,7 @@ describe("protocol", () => {
       "update_message",
     ].sort());
     // Manifest and dispatcher agree.
-    expect(MCP_TOOLS).toHaveLength(25);
+    expect(MCP_TOOLS).toHaveLength(31);
   });
 
   test("every pure-read tool carries readOnlyHint; flag updates are marked non-destructive", () => {
@@ -63,6 +69,8 @@ describe("protocol", () => {
     expect(readOnly).toEqual([
       "get_billing_status",
       "get_checkout_country_policy",
+      "get_checkout_order",
+      "get_purchase_withdrawal",
       "get_domain_status",
       "get_message_events",
       "get_terms",
@@ -70,11 +78,12 @@ describe("protocol", () => {
       "list_digests",
       "list_inbox",
       "list_mailboxes",
+      "list_withdrawal_purchases",
       "list_suppressions",
       "list_webhooks",
       "read_message",
       "search_domains",
-    ]);
+    ].sort());
     expect(MCP_TOOLS.find((t) => t.name === "update_message")!.annotations?.destructiveHint).toBe(false);
     expect(MCP_TOOLS.find((t) => t.name === "test_webhook")!.annotations?.destructiveHint).toBe(false);
     // Mutating-but-additive tools stay unannotated (spec default applies).

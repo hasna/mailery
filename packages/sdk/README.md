@@ -45,11 +45,13 @@ const { key } = await mailery.createKey({ name: "agent", scopes: ["mail_read", "
 
 // 3. Subscribe, then wait for the entitlement to land after the Stripe redirect.
 const countryPolicy = await mailery.getCheckoutCountryPolicy();
-// Show the restrictions and obtain the customer declaration before continuing.
+// Show the restrictions and obtain both customer declarations before continuing.
 const checkoutUrl = await mailery.createCheckout({
-  plan: "pro", country: "US", countryBasis: "billing",
+  plan: "pro", billingCountry: "US", residenceCountry: "US",
   countryPolicyVersion: countryPolicy.version, idempotencyKey: "<stable-purchase-key>",
 }); // paid tier: "pro" or "scale"
+// Give checkoutUrl to the customer to review the Mailery order and continue to Stripe.
+// Wait only after their payment action.
 await mailery.waitForEntitlement({ timeoutMs: 120_000 });
 
 // 4. Run daily on the API key.
@@ -107,7 +109,7 @@ Checkout retries retain the original purchase intent. Supply and persist an expl
 
 ## Paid purchase declarations and retries
 
-Read `getCheckoutCountryPolicy()` and show its restrictions before asking the customer for their billing or residence country. Free signup and free use do not require a country declaration.
+Read `getCheckoutCountryPolicy()` and show its restrictions before asking the customer for both their billing country and their country of residence. Free signup and free use do not require a country declaration.
 
 ```ts
 const policy = await mailery.getCheckoutCountryPolicy();
@@ -115,17 +117,17 @@ const policy = await mailery.getCheckoutCountryPolicy();
 const purchase = {
   kind: "subscription" as const,
   plan: "pro",
-  country: "US",
-  countryBasis: "billing" as const,
+  billingCountry: "US",
+  residenceCountry: "US",
   countryPolicyVersion: policy.version,
   idempotencyKey: "<stable-purchase-key>",
 };
 const checkoutUrl = await mailery.createCheckout(purchase);
 ```
 
-Retain the complete original input on every retry, including its policy version. Never replace the purchase key after a timeout. `topUpWallet()` takes the same country fields plus `amountCents` and a stable `idempotencyKey`. Omit all country fields only when replaying an exact pre-country purchase with its original key and amount. The server refuses a missing historical claim before creating a payable session. The checkout URL still requires the customer's payment action.
+Retain the complete original input on every retry, including its policy version. Never replace the purchase key after a timeout. `topUpWallet()` takes the same country fields plus `amountCents` and a stable `idempotencyKey`, but new wallet funding is disabled at paid opening (`wallet_funding_disabled`). Existing exact request replay remains available. Omit all country fields only when replaying an exact pre-country purchase with its original key and amount. The server refuses a missing historical claim before creating a payable session. The checkout URL still requires the customer's payment action.
 
-MCP clients first call `get_terms` and obtain explicit acceptance before `signup` or `accept_terms`. Before `add_wallet_funds`, call `get_checkout_country_policy`, show its restrictions, and retain the customer's declaration and original policy version.
+MCP clients first call `get_terms` and obtain explicit acceptance before `signup` or `accept_terms`. Before `add_wallet_funds`, call `get_checkout_country_policy`, show its restrictions, and retain both customer declarations and original policy version.
 
 ## Terms receipt client metadata
 
@@ -134,3 +136,23 @@ Terms acceptance remains an explicit, separate action after reading the exact Te
 Acceptance receipts add `client: { declaration, name, version }`. `declared` preserves the received pair, `undeclared` records omitted headers with null values, and historical receipts with no recorded metadata use `unrecorded`. This technical declaration does not establish that a human read the Terms.
 
 Show the exact Terms link and version to the person. Run `mailery terms --accept <exact-version>` or MCP `accept_terms` only after an explicit yes from the person or an agent they authorized. Never select a default/latest version. The server refuses a version that is not currently published. CLI signup JSON includes `data.terms` on success and `error.terms` on any failure after successful discovery. Object-valued error details also retain `details.terms`; unrelated detail fields and non-object details are preserved. MCP signup includes `terms` after discovery. A version-race error (`terms_version_changed`, HTTP 409) supplies newer authoritative Terms: both clients prefer that server version and resolve its URL against the configured API base, including the copy in server error details. Other later errors retain the successful preflight URL and exact version. A failed Terms preflight adds no discovery fields. Neither client fetches Terms again after signup. `mailery terms --json` and MCP `get_terms` expose `url` and `version` directly in their discovery result. SDK method response shapes are unchanged.
+
+## Current order preparation
+
+`createCheckout()` supplies `checkoutProtocol: "stripe-terms-v1"` when country declarations are present. The returned Mailery order URL lets the customer review and continue to Stripe. For an existing order, `getCheckoutOrder(orderId)` requests the same protocol and returns `paymentTerms` as pending intent. Reading it never accepts Terms.
+
+```ts
+const order = await mailery.getCheckoutOrder(orderId);
+if (order.paymentTerms) {
+  const stripeUrl = await mailery.confirmCheckoutOrder(order.orderId, {
+    language: "en",
+    checkoutProtocol: order.paymentTerms.protocol,
+    checkoutTermsVersion: order.paymentTerms.version,
+    idempotencyKey: "<stable-confirmation-key>",
+  });
+  // Give stripeUrl to the customer. Required Terms acceptance happens on Stripe
+  // and applies only when payment succeeds. Keep the exact input for retries.
+}
+```
+
+Historical `CheckoutConsentInput` remains available only for server-enforced replay of fulfilled historical orders. Current MCP confirmation requires the exact protocol and version and refuses the old choice fields.

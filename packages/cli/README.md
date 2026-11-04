@@ -9,7 +9,7 @@ server, no self-host mode, ever**.
 
 Two steps intentionally happen in a browser — everything else is terminal-only: a
 one-time **email-verification** click (confirm it from the terminal with
-`mailery verify`) and the **Stripe Checkout** page for `subscribe`.
+`mailery verify`) and the **Mailery order approval and payment flow** for `subscribe`.
 
 **The Free plan is real and needs no subscription**: every verified account gets
 1 agent identity on a shared subdomain and **3,000 emails/mo** — signup →
@@ -99,14 +99,17 @@ and higher send limits are paid-tier features (`pro` / `scale`).
 
 ```sh
 # 1. subscribe to a paid identity tier — plan is `pro` or `scale` ("starter" is
-#    NOT a plan). Prints a Stripe Checkout URL, opens the browser when
-#    interactive, then polls until the entitlement is active (--no-wait skips).
-mailery billing countries --json  # show restrictions and obtain the customer declaration first
-mailery subscribe pro --country <declared-ISO-code> --country-basis billing --country-policy-version <returned-version> --idempotency-key <stable-purchase-key>
+#    NOT a plan). Prints a Mailery order approval URL. The person reviews the
+#    order, then continues to Stripe. Terms acceptance happens on Stripe
+#    and applies only when payment succeeds.
+#    Opens the browser when interactive, then polls until entitlement is active
+#    (--no-wait skips polling).
+mailery billing countries --json  # show restrictions and obtain both customer declarations first
+mailery subscribe pro --billing-country <declared-billing-ISO-code> --residence-country <declared-residence-ISO-code> --country-policy-version <returned-version> --idempotency-key <stable-purchase-key>
 
 # 2. get a working, deliverable identity in ONE command:
 #    purchase -> zone -> mail DNS -> verification -> ready-to-send
-mailery billing add-funds 25 --country <declared-ISO-code> --country-basis billing --country-policy-version <returned-version> --yes --idempotency-key <stable-key>  # domains are paid from a prepaid wallet
+mailery billing add-funds 25 --billing-country <declared-billing-ISO-code> --residence-country <declared-residence-ISO-code> --country-policy-version <returned-version> --yes --idempotency-key <stable-key>  # wallet funding is disabled at paid opening
 mailery domains search agent-mail.com --json      # check availability
 mailery domains buy agent-mail.com                # fetch and show the signed quote; no purchase
 mailery domains buy agent-mail.com --yes --max-price-cents <quoted-cents> --currency <quoted-currency> --idempotency-key <suggested-key>
@@ -145,7 +148,7 @@ domain that already sends re-plans it and pauses sending until `verify` and
 > from where it left off.
 >
 > **Domains are paid from a prepaid wallet.** Add funds first
-> (`mailery billing add-funds` with the declared country, policy version, and stable key, minimum $10);
+> New wallet funding is disabled at paid opening (`wallet_funding_disabled`);
 > the exact quoted all-in price is debited before anything is registered. A
 > wallet that cannot cover the quote returns `wallet_insufficient_funds` with
 > the shortfall and registers nothing. Check it with `mailery billing wallet`.
@@ -154,14 +157,23 @@ domain that already sends re-plans it and pauses sending until `verify` and
 
 Read `mailery terms --json` before signup. Pass `--accept-terms <exact-version>` only after the customer explicitly accepts that version. An existing tenant owner can record acceptance with `mailery terms --accept <exact-version>`.
 
-Before a new paid purchase, run `mailery billing countries --json` and show its restrictions to the customer. Ask for their billing or residence country. Do not infer it from an IP address or nationality. Signup and free use remain available without a country declaration.
+Before a new paid purchase, run `mailery billing countries --json` and show its restrictions to the customer. Ask for both their billing country and their country of residence. Do not infer it from an IP address or nationality. Signup and free use remain available without a country declaration.
 
 ```sh
-mailery subscribe pro --country US --country-basis billing --country-policy-version '<returned-version>' --idempotency-key '<stable-purchase-key>' --no-wait --json
-mailery billing add-funds 10 --country US --country-basis residence --country-policy-version '<returned-version>' --idempotency-key '<stable-topup-key>' --yes --json
+mailery subscribe pro --billing-country US --residence-country US --country-policy-version '<returned-version>' --idempotency-key '<stable-purchase-key>' --no-wait --json
+# New wallet funding is disabled at paid opening. Existing exact replay only:
+mailery billing add-funds 10 --billing-country US --residence-country US --country-policy-version '<returned-version>' --idempotency-key '<stable-topup-key>' --yes --json
 ```
 
-Use the customer's own declared country. Retain the same purchase key and every original declaration field, including policy version, after failure or uncertainty. A changed declaration conflicts with that key. To replay an exact purchase made before country declarations, use its original key with `--replay-legacy` and omit the country options. This cannot create a new purchase. `subscribe --resume` only observes entitlement.
+Use both of the customer's own country declarations. Retain the same purchase key and every original declaration field, including policy version, after failure or uncertainty. A changed declaration conflicts with that key. To replay an exact purchase made before country declarations, use its original key with `--replay-legacy` and omit the country options. This cannot create a new purchase. `subscribe --resume` only observes entitlement.
+
+Review an existing order with `mailery billing order <order-id> --json`. Its `paymentTerms` is pending intent, not acceptance. Continue using the exact returned protocol and version:
+
+```sh
+mailery billing confirm-order <order-id> --language en --checkout-protocol stripe-terms-v1 --checkout-terms-version <exact-returned-version> --idempotency-key <stable-confirmation-key> --json
+```
+
+This opens Stripe. Required Terms acceptance happens on Stripe and applies only when payment succeeds. Historical consent choices are retained only for server-enforced historical replay.
 
 ## Authentication model
 
@@ -177,11 +189,38 @@ environment variables for security.
    `mailery keys revoke --all --email you@example.com --password '…'` — even
    when no usable key or session is in the environment.
 
-The CLI does not persist config, credentials, base URLs, email context, cache,
-or mail data. It reads runtime state from environment variables only:
-`MAILERY_API_KEY`, `MAILERY_SESSION_TOKEN`, `MAILERY_BASE_URL`. Client
-construction and command startup do not inspect, create, modify, or delete
-local config files; any historical files are left untouched.
+Remote client configuration remains environment-only: `MAILERY_API_KEY`,
+`MAILERY_SESSION_TOKEN`, and `MAILERY_BASE_URL`. Credentials, base URLs, email
+context, cache, and mail data are never persisted. Client construction does
+not inspect local files. Historical config files are left untouched.
+
+## Display language
+
+The changed paid commands support English and Romanian display text. Run
+`mailery language ro` or `mailery language en` to save the display choice.
+`mailery language` shows the effective display language, and `--json` returns
+`{ "ok": true, "data": { "language": "ro" } }` for Romanian.
+
+Command startup reads only the language preference at
+`$HOME/.hasna/mailery/config/preferences.json`. `HASNA_HOME` overrides
+`$HOME/.hasna`; `HASNA_CONFIG_HOME` overrides the config root, giving
+`$HASNA_CONFIG_HOME/mailery/preferences.json`. These roots must be absolute.
+The resolver follows the Hasna app config-root convention and does not read
+credentials or legacy `MAILERY_CONFIG_DIR` files. The file contains only
+`{ "language": "en" }` or `{ "language": "ro" }`; saves use an atomic replacement,
+private file permissions and byte-for-byte readback. A malformed, unreadable,
+or unverified saved preference is an explicit error before remote dispatch.
+Missing preferences use the normal fallback without creating a file.
+
+Display precedence is `MAILERY_LANGUAGE`, then the saved choice, then the first
+nonempty `LC_ALL`, `LC_MESSAGES`, or `LANG`, then English. Unsupported languages
+fall back to English. Saving a choice does not change an environment override.
+Human numbers use the selected locale; JSON numbers and object keys remain
+neutral. The existing `--language` options still select order review or
+acknowledgement language sent to the API. They do not select or save the local
+display language. Protocol identifiers, flags, object IDs, server-authored policy
+text and status values are preserved as returned. Legacy commands outside the
+changed paid surface retain their existing copy.
 
 ## Commands
 
@@ -196,11 +235,13 @@ local config files; any historical files are left untouched.
 | `account delete --password <pw> --confirm-email <email>` | Permanently delete the account and everything in it (irreversible); refuses unless the typed email matches the session identity, and while a subscription is still active |
 | `keys create --scopes <csv> [--name]` | Mint an API key (shown once; store securely) |
 | `keys list` / `keys revoke <id>` / `keys revoke --all` | Manage keys (revoke `--all` = break-glass) |
-| `subscribe <plan> --country <code> --country-basis <billing\|residence> --country-policy-version <version> [--no-wait]` | Stripe Checkout handoff, then poll entitlement |
+| `subscribe <plan> --billing-country <code> --residence-country <code> --country-policy-version <version> [--no-wait]` | Mailery order approval before payment, then poll entitlement |
+| `billing order <order-id>` | Review the exact order and pending payment-page Terms intent |
+| `billing confirm-order <order-id> --language <en\|ro> --checkout-protocol stripe-terms-v1 --checkout-terms-version <version> --idempotency-key <key>` | Continue to Stripe without recording Terms acceptance |
 | `billing countries` | Current paid-checkout restrictions and policy version |
 | `billing status` / `usage` | Credit balance, inbound allowance/count/status/reset, prepaid wallet, plans, subscriptions, ledger |
 | `billing wallet [--limit <n>]` | Prepaid wallet balance and recent wallet transactions (domains are charged to it) |
-| `billing add-funds <dollars> --yes --idempotency-key <key>` | Stripe Checkout handoff that adds funds to the wallet (minimum $10; presets 10/25/50/100) |
+| `billing add-funds <dollars> --yes --idempotency-key <key>` | New wallet funding disabled at paid opening. Existing exact request replay only |
 | `domains search <q>` | Domain availability |
 | `domains buy <domain> [--yes --max-price-cents <cents> --currency <code>] --idempotency-key <key>` | Show a binding quote and suggested stable key first; purchase only with price- and currency-bound consent |
 | `domains list` / `domains status <domain>` | Inspect domains |
@@ -249,7 +290,7 @@ Register it with any MCP client:
   "env": { "MAILERY_API_KEY": "ml_…" } } } }
 ```
 
-Tools: `get_terms`, `accept_terms`, `signup`, `send_email`, `send_email_batch`, `get_message_events`, `list_inbox`, `read_message`, `search_domains`, `get_domain_status`, `buy_domain`, `create_mailbox`, `list_mailboxes`, `update_message`, `list_changes`, `generate_digest`, `list_digests`, `get_billing_status`, `get_checkout_country_policy`, `add_wallet_funds`, `create_webhook`, `list_webhooks`, `list_suppressions`, `test_webhook`, `submit_feedback`.
+Tools (31): `get_checkout_order`, `confirm_checkout_order`, `get_terms`, `accept_terms`, `signup`, `send_email`, `send_email_batch`, `get_message_events`, `list_inbox`, `read_message`, `search_domains`, `get_domain_status`, `buy_domain`, `create_mailbox`, `list_mailboxes`, `update_message`, `list_changes`, `generate_digest`, `list_digests`, `get_billing_status`, `list_withdrawal_purchases`, `identify_purchase_withdrawal`, `confirm_purchase_withdrawal`, `get_purchase_withdrawal`, `get_checkout_country_policy`, `add_wallet_funds`, `create_webhook`, `list_webhooks`, `list_suppressions`, `test_webhook`, `submit_feedback`.
 
 Checkout retries retain the original purchase intent. Supply and persist an explicit `idempotencyKey` in SDK `createCheckout({...})`, or `--idempotency-key` on CLI `subscribe`, for a deliberate purchase. Never change it on timeout or an uncertain outcome. New purchases require all country declaration fields. Omitting those fields can only replay an exact pre-country claim with its original key (including its historical no-header key); it cannot create a new claim. A deliberate identical repeat purchase needs an explicit fresh key. Use `mailery subscribe pro --resume` or `getBillingStatus()` to observe entitlement without opening Checkout.
 

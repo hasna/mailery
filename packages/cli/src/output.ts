@@ -8,6 +8,7 @@
 
 import { MaileryAuthRequiredError, MaileryError, NotYetAvailableError } from "@hasna/mailery-sdk-internal";
 import type { CliDeps } from "./client.js";
+import { checkoutCountryCopy } from "./checkout-country-copy.js";
 
 export interface CliError {
   code: string;
@@ -44,9 +45,10 @@ export function fail(deps: CliDeps, json: boolean, error: CliError): void {
   if (json) {
     printJson(deps, { ok: false, error });
   } else {
-    deps.stderr(`error: ${error.message}\n`);
+    const copy = checkoutCountryCopy(deps.env);
+    deps.stderr(`${copy.error} ${error.message}\n`);
     if (error.terms) deps.stderr(`Terms: ${error.terms.url} (version ${error.terms.version})\n`);
-    if (error.hint) deps.stderr(`hint: ${error.hint}\n`);
+    if (error.hint) deps.stderr(`${copy.hint} ${error.hint}\n`);
   }
   deps.setExitCode(1);
 }

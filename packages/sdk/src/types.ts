@@ -5,6 +5,8 @@
 
 export type MaileryAuthVia = "session" | "api_key" | "admin_key" | (string & {});
 export type MaileryUserRole = "owner" | "admin" | "member" | "viewer" | (string & {});
+export type * from "./purchase-withdrawal-types.js";
+
 export type MaileryApiKeyScope = "full" | "mail_read" | "mail_write" | "billing_read" | "domains:purchase" | (string & {});
 
 // ─── Auth / account ────────────────────────────────────────────────────────
@@ -92,6 +94,8 @@ export interface VerifyPollInput {
 export type VerificationPollResult = { status: "pending" } | { status: "verified"; token: string };
 
 export interface AccountExportOptions {
+  /** Independent cursor from withdrawal_evidence.next_cursor. */
+  withdrawalCursor?: string;
   limit?: number;
   cursor?: string;
 }
@@ -198,19 +202,23 @@ export interface MaileryWalletTransaction {
   [key: string]: unknown;
 }
 
-/** Read the current policy and present its restrictions before asking for this declaration. */
+/** Read the current country restrictions before gathering both declarations. */
 export interface CheckoutCountryInput {
-  /** ISO 3166-1 alpha-2 billing or residence country. Required by current servers. */
-  country?: string;
-  countryBasis?: "billing" | "residence";
-  /** Exact version returned by getCheckoutCountryPolicy(), after presenting the list. */
-  /** Exact original version. Never refresh it on a retry. Omit all country
-   * fields only for an exact pre-country replay; absent claims fail closed. */
+  /** Customer-declared ISO 3166-1 alpha-2 billing country. */
+  billingCountry?: string;
+  /** Independently declared ISO 3166-1 alpha-2 country of residence. */
+  residenceCountry?: string;
+  /** Retain the exact original policy version on every retry. Omitting every
+   * declaration field can replay only an exact historical claim. */
   countryPolicyVersion?: string;
 }
 export interface CheckoutCountryPolicy {
   version: string;
+  blocked_list_version: number;
+  blocked_list_effective_date: string;
   restricted_countries: string[];
+  required_declarations: Array<"billingCountry" | "residenceCountry">;
+  /** Deprecated display hint. New purchases require both required_declarations. */
   declaration_bases: Array<"billing" | "residence">;
   disclosure_path: string;
   pricing_path: string;
@@ -1077,4 +1085,32 @@ export interface MaileryWebhookEvent<TData = Record<string, unknown>> {
   created_at: string;
   tenant_id: string;
   data: TData;
+}
+
+/** Historical F2 input. Only fulfilled historical orders may replay it. */
+export interface CheckoutConsentInput {
+  language: "en" | "ro";
+  requestImmediatePerformance: true;
+  acknowledgeWithdrawal: true;
+  immediateVersion: string;
+  withdrawalVersion: string;
+  idempotencyKey: string;
+}
+export interface CheckoutPreparationInput {
+  language: "en" | "ro"; checkoutProtocol: "stripe-terms-v1"; checkoutTermsVersion: string; idempotencyKey: string;
+}
+export interface CheckoutOrderResult {
+  orderId: string;
+  intent: { kind: "subscription"; plan: string } | { kind: "credit_pack"; credits: number };
+  amountCents: number;
+  currency: string;
+  country:
+    | { billingCountry: string; residenceCountry: string; countryPolicyVersion: string }
+    | { country: string; countryBasis: "billing" | "residence"; countryPolicyVersion: string };
+  termsVersion: string;
+  paymentTerms: null | { protocol: "stripe-terms-v1"; version: string; termsVersion: string; termsUrl: string; refundPolicyVersion: string; refundPolicyUrl: string; publicationDate: string; acceptanceRequired: boolean; label: string | null; stripeLabel: string | null; submitText: string; effectiveAt: string | null; noticeDeliveredAt: string | null; route: "billing.checkout" };
+  /** Exact purchase-time source Markdown, content-addressed by SHA-256. */
+  refundPolicy: { version: string; text: string };
+  /** Null for the consumer-excluded opening. F2 wording is historical only. */
+  consent: null | Record<"en" | "ro", { language: "en" | "ro"; immediate: { text: string; version: string }; withdrawal: { text: string; version: string } }>;
 }

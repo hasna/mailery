@@ -1,3 +1,4 @@
+import type { WithdrawalPurchasePage,WithdrawalRequest,IdentifyWithdrawalInput,ConfirmWithdrawalInput } from "./purchase-withdrawal-types.js";
 import { SDK_VERSION } from "./version.js";
 // MaileryClient — a zero-dependency TypeScript client for the Mailery
 // /api/v1. Aligned to src/server/app.ts; the server is the source of
@@ -30,6 +31,9 @@ import type {
   CreateApiKeyInput,
   CreateApiKeyResult,
   CreateCheckoutInput,
+  CheckoutConsentInput,
+  CheckoutPreparationInput,
+  CheckoutOrderResult,
   CheckoutCountryPolicy,
   CreateDomainInput,
   CreateMailboxInput,
@@ -479,7 +483,7 @@ export class MaileryClient {
 
   /** GDPR Art. 20 tenant export. Owner/admin session only; never billing-gated. */
   exportAccount(options: AccountExportOptions = {}): Promise<Record<string, unknown>> {
-    return this.request(ENDPOINTS.accountExport, { auth: "session", query: { limit: options.limit, cursor: options.cursor } });
+    return this.request(ENDPOINTS.accountExport, { auth: "session", query: { limit: options.limit, cursor: options.cursor, withdrawal_cursor: options.withdrawalCursor } });
   }
 
   /** GDPR Art. 17 tenant deletion. Requires owner password re-authentication. */
@@ -521,8 +525,8 @@ export class MaileryClient {
   }
 
   /**
-   * Open Stripe Checkout after presenting getCheckoutCountryPolicy(). Current
-   * new purchases require country, countryBasis and countryPolicyVersion.
+   * Prepare a Mailery order approval URL after presenting getCheckoutCountryPolicy(). Current
+   * new purchases require billingCountry, residenceCountry and countryPolicyVersion.
    * Omitting all declaration fields can replay only an exact pre-country
    * purchase under its original key (including the historical no-header key).
    * An absent claim fails admission before any insert or provider call.
@@ -532,9 +536,21 @@ export class MaileryClient {
   async createCheckout(planOrInput: string | CreateCheckoutInput = "pro"): Promise<string> {
     const input: CreateCheckoutInput = typeof planOrInput === "string"
       ? { kind: "subscription", plan: planOrInput }
-      : { kind: planOrInput.kind ?? "subscription", plan: planOrInput.plan, credits: planOrInput.credits, country: planOrInput.country, countryBasis: planOrInput.countryBasis, countryPolicyVersion: planOrInput.countryPolicyVersion };
+      : { kind: planOrInput.kind ?? "subscription", plan: planOrInput.plan, credits: planOrInput.credits, billingCountry: planOrInput.billingCountry, residenceCountry: planOrInput.residenceCountry, countryPolicyVersion: planOrInput.countryPolicyVersion };
     const idempotencyKey = typeof planOrInput === "string" ? undefined : planOrInput.idempotencyKey;
-    const result = await this.request<{ url: string }>(ENDPOINTS.createCheckout, { auth: "session", body: input, idempotencyKey });
+    const result = await this.request<{ url: string }>(ENDPOINTS.createCheckout, { auth: "session", body: [input.billingCountry,input.residenceCountry,input.countryPolicyVersion].some(value=>value!==undefined) ? { ...input, checkoutProtocol: "stripe-terms-v1" } : input, idempotencyKey });
+    return result.url;
+  }
+
+  /** Read the exact order and payment-page Terms intent. This is not acceptance. */
+  getCheckoutOrder(orderId: string): Promise<CheckoutOrderResult> {
+    return this.request(ENDPOINTS.getCheckoutOrder, { auth: "session", params: { orderId }, query: {checkoutProtocol:"stripe-terms-v1"} });
+  }
+  /** Continue an exact order to Stripe. This request never accepts account Terms. */
+  async confirmCheckoutOrder(orderId: string, input: CheckoutPreparationInput | CheckoutConsentInput): Promise<string> {
+    if (!input.idempotencyKey || !("checkoutProtocol" in input ? input.checkoutProtocol === "stripe-terms-v1" && /^[a-f0-9]{64}$/.test(input.checkoutTermsVersion) : input.requestImmediatePerformance === true && input.acknowledgeWithdrawal === true && input.immediateVersion && input.withdrawalVersion)) throw new MaileryError("The current order protocol, exact version and stable confirmation key are required. Terms acceptance happens on Stripe, not through this request.", { code: "checkout_protocol_required" });
+    const { idempotencyKey, ...body } = input;
+    const result = await this.request<{ url: string }>(ENDPOINTS.confirmCheckoutOrder, { auth: "session", params: { orderId }, body, idempotencyKey });
     return result.url;
   }
 
@@ -542,6 +558,25 @@ export class MaileryClient {
   async createBillingPortal(): Promise<string> {
     const result = await this.request<BillingPortalResult>(ENDPOINTS.billingPortal, { auth: "session" });
     return result.url;
+  }
+
+  /** Read completed purchases in the current owner's tenant, including legacy purchases without a purchaser record. Follow next_cursor to END. */
+  listWithdrawalPurchases(options:{limit?:number;cursor?:string}={}):Promise<WithdrawalPurchasePage>{
+    return this.request(ENDPOINTS.listWithdrawalPurchases,{auth:"session",query:options});
+  }
+  /** First step. Present the purchase and email to the customer before confirmation. */
+  identifyWithdrawal(purchaseId:string,input:IdentifyWithdrawalInput):Promise<WithdrawalRequest>{
+    const {idempotencyKey,...body}=input;
+    return this.request(ENDPOINTS.identifyWithdrawal,{auth:"session",params:{purchaseId},body,idempotencyKey});
+  }
+  getWithdrawal(requestId:string):Promise<WithdrawalRequest>{
+    return this.request(ENDPOINTS.getWithdrawal,{auth:"session",params:{requestId}});
+  }
+  /** Explicit second step. Records withdrawal and queues one acknowledgement. No fund movement. */
+  confirmWithdrawal(requestId:string,input:ConfirmWithdrawalInput):Promise<WithdrawalRequest>{
+    const {idempotencyKey,...body}=input;
+    if(body.confirm!==true)throw new MaileryError("explicit withdrawal confirmation is required",{code:"withdrawal_confirmation_required",status:428});
+    return this.request(ENDPOINTS.confirmWithdrawal,{auth:"session",params:{requestId},body,idempotencyKey});
   }
 
   /** Full billing overview: balance, wallet, plans, credit packs, subscriptions, and ledger. */
@@ -1017,6 +1052,7 @@ export class MaileryClient {
   adminOverview(): Promise<AdminApiResult> {
     return this.request(ENDPOINTS.adminOverview, { auth: "admin" });
   }
+
 
   /**
    * Adjust a tenant's credits. Pass `idempotencyKey` (stable across YOUR

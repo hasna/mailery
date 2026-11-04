@@ -66,6 +66,14 @@ const sendAttachments = {
 
 export const MCP_TOOLS: McpToolDef[] = [
   {
+    name: "get_checkout_order", description: "Read an existing Mailery order and its payment-page Terms intent. Pending intent is not account acceptance.",
+    inputSchema: { type: "object", required: ["orderId"], properties: { orderId: { type: "string" } } }, annotations: { readOnlyHint: true },
+  },
+  {
+    name: "confirm_checkout_order", description: "Continue one order to Stripe with its exact protocol and version. Any required Terms acceptance takes place only on Stripe’s payment page and applies only when payment succeeds. This tool never records acceptance.",
+    inputSchema: {type:"object",required:["orderId","language","checkoutProtocol","checkoutTermsVersion","idempotencyKey"],properties:{orderId:{type:"string"},language:{type:"string",enum:["en","ro"]},checkoutProtocol:{type:"string",const:"stripe-terms-v1"},checkoutTermsVersion:{type:"string"},idempotencyKey:{type:"string"}}},
+  },
+  {
     name: "get_terms",
     description: "Read Mailery's exact current Terms link and immutable version before signup or accepting for paid entry. Never infer permission to accept.",
     inputSchema: { type: "object", properties: {} },
@@ -295,9 +303,13 @@ export const MCP_TOOLS: McpToolDef[] = [
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: {} },
   },
+  {name:"list_withdrawal_purchases",description:"List this account owner's completed purchases. Show the purchase and withdrawal period before asking whether to withdraw. Missing legacy evidence means review_required, never expired. Follow next_cursor.",annotations:{readOnlyHint:true},inputSchema:{type:"object",properties:{limit:{type:"integer",minimum:1,maximum:100},cursor:{type:"string"}}}},
+  {name:"identify_purchase_withdrawal",description:"First withdrawal step. Identify the purchase and account email for acknowledgement. Show returned purchase and email to the customer. This does not confirm withdrawal or issue a refund.",inputSchema:{type:"object",required:["purchaseId","email","idempotencyKey"],properties:{purchaseId:{type:"string"},email:{type:"string"},language:{type:"string",enum:["en","ro"]},idempotencyKey:{type:"string"}}}},
+  {name:"confirm_purchase_withdrawal",description:"Second step. Only call after the customer reviewed the identified purchase and email and explicitly confirmed withdrawal. Records the request and one acknowledgement. Refund remains pending policy execution, no refund or cancellation is performed.",inputSchema:{type:"object",required:["requestId","purchaseId","confirm","idempotencyKey"],properties:{requestId:{type:"string"},purchaseId:{type:"string"},confirm:{type:"boolean",const:true},idempotencyKey:{type:"string"}}}},
+  {name:"get_purchase_withdrawal",description:"Read the withdrawal request, email acknowledgement and refund status. A confirmed request is not a settled refund.",annotations:{readOnlyHint:true},inputSchema:{type:"object",required:["requestId"],properties:{requestId:{type:"string"}}}},
   {
     name: "get_checkout_country_policy",
-    description: "First checkout step. Read and show the current country restrictions to the customer before preparing a paid purchase. Signup and free use remain open. Obtain a billing or residence country declaration and retain this policy version for add_wallet_funds.",
+    description: "First checkout step. Read and show the current country restrictions to the customer before preparing a paid purchase. Signup and free use remain open. Obtain both billing country and country of residence declarations and retain this policy version for add_wallet_funds.",
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: {} },
   },
@@ -308,8 +320,8 @@ export const MCP_TOOLS: McpToolDef[] = [
       type: "object",
       required: ["amountCents", "idempotencyKey"],
       properties: {
-        country: { type: "string", description: "Customer-declared ISO 3166-1 alpha-2 billing or residence country. Never infer from IP or nationality." },
-        countryBasis: { type: "string", enum: ["billing", "residence"] },
+        billingCountry: { type: "string", description: "Customer-declared ISO 3166-1 alpha-2 billing country. Never infer it." },
+        residenceCountry: { type: "string", description: "Independently declared ISO 3166-1 alpha-2 country of residence. Never infer it." },
         countryPolicyVersion: { type: "string", description: "Original version from get_checkout_country_policy after showing its restrictions to the customer. Retain it on every retry, even after the current policy changes." },
         amountCents: { type: "integer", minimum: 1000, description: "USD cents to add; at least 1000 ($10.00)." },
         idempotencyKey: { type: "string", description: "Caller-stable key for this top-up attempt." },
@@ -597,8 +609,26 @@ export async function callTool(name: string, rawArgs: Record<string, unknown> | 
       }
       case "list_digests":
         return textResult(await client.listDigests({ limit: typeof args.limit === "number" ? args.limit : undefined }));
+      case "get_checkout_order":
+        return textResult(await client.getCheckoutOrder(arg<string>(args, "orderId")));
+      case "confirm_checkout_order": {
+        if(args.checkoutProtocol!=="stripe-terms-v1" || !/^[a-f0-9]{64}$/.test(String(args.checkoutTermsVersion)) || !["en","ro"].includes(String(args.language)) || ["requestImmediatePerformance","acknowledgeWithdrawal","immediateVersion","withdrawalVersion","acceptedTerms"].some(k=>Object.hasOwn(args,k))) return textResult({code:"checkout_protocol_required",message:"Read the current order protocol and version before continuing to Stripe."},true);
+        return textResult({url:await client.confirmCheckoutOrder(arg<string>(args,"orderId"),{language:args.language as "en"|"ro",checkoutProtocol:"stripe-terms-v1",checkoutTermsVersion:arg<string>(args,"checkoutTermsVersion"),idempotencyKey:arg<string>(args,"idempotencyKey")})});
+      }
       case "get_billing_status":
         return textResult(await client.getBillingStatus());
+      case "list_withdrawal_purchases":return textResult(await client.listWithdrawalPurchases({limit:typeof args.limit==="number"?args.limit:undefined,cursor:typeof args.cursor==="string"?args.cursor:undefined}));
+      case "identify_purchase_withdrawal": {
+        const purchaseId=arg<string>(args,"purchaseId"),email=arg<string>(args,"email"),idempotencyKey=arg<string>(args,"idempotencyKey");
+        if(!purchaseId||!email||!idempotencyKey)return textResult({code:"bad_request",message:"purchaseId, email and idempotencyKey are required"},true);
+        return textResult(await client.identifyWithdrawal(purchaseId,{email,idempotencyKey,language:arg<"en"|"ro">(args,"language")}));
+      }
+      case "confirm_purchase_withdrawal": {
+        const requestId=arg<string>(args,"requestId"),purchaseId=arg<string>(args,"purchaseId"),idempotencyKey=arg<string>(args,"idempotencyKey");
+        if(!requestId||!purchaseId||!idempotencyKey||args.confirm!==true)return textResult({code:"withdrawal_confirmation_required",message:"review the identified request and explicitly confirm it"},true);
+        return textResult(await client.confirmWithdrawal(requestId,{purchaseId,idempotencyKey,confirm:true}));
+      }
+      case "get_purchase_withdrawal":return textResult(await client.getWithdrawal(arg<string>(args,"requestId")));
       case "get_checkout_country_policy":
         return textResult(await client.getCheckoutCountryPolicy());
       case "add_wallet_funds": {
@@ -608,7 +638,7 @@ export async function callTool(name: string, rawArgs: Record<string, unknown> | 
           return textResult({ code: "bad_request", message: "amountCents must be an integer of at least 1000 ($10.00)" }, true);
         }
         if (!idempotencyKey) return textResult({ code: "bad_request", message: "idempotencyKey is required" }, true);
-        return textResult(await client.topUpWallet({ amountCents, idempotencyKey, country: arg<string>(args, "country"), countryBasis: arg<"billing" | "residence">(args, "countryBasis"), countryPolicyVersion: arg<string>(args, "countryPolicyVersion") }));
+        return textResult(await client.topUpWallet({ amountCents, idempotencyKey, billingCountry: arg<string>(args, "billingCountry"), residenceCountry: arg<string>(args, "residenceCountry"), countryPolicyVersion: arg<string>(args, "countryPolicyVersion") }));
       }
       case "create_webhook": {
         const url = arg<string>(args, "url");

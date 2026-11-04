@@ -1,4 +1,4 @@
-import { checkoutCountryCopy } from "./checkout-country-copy.js";
+import { checkoutCountryCopy, displayLanguage, displayNumber, displayUsdCents } from "./checkout-country-copy.js";
 // mailery — the mailery.co CLI. Every command maps to a
 // server-side operation over the /api/v1 surface via @hasna/mailery-sdk-internal. There
 // is NO local-server mode. Agent-first UX: non-interactive flags for
@@ -8,7 +8,8 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
 import { basename as pathBasename } from "node:path";
-import { Command } from "commander";
+import { Command, Help } from "commander";
+import { readLanguagePreference, saveLanguagePreference } from "./language-preference.js";
 import { MaileryError, type MaileryClient, type MaileryTenantDomain, type MaileryInboundUsage } from "@hasna/mailery-sdk-internal";
 import { buildClient, resolveBaseUrl, type CliDeps } from "./client.js";
 import { runMcpServer } from "./mcp.js";
@@ -57,6 +58,8 @@ export function resolveDeps(partial: Partial<CliDeps> = {}): CliDeps {
     openBrowser: partial.openBrowser ?? defaultOpenBrowser,
     interactive: partial.interactive ?? Boolean(process.stdout.isTTY),
     readStdin: partial.readStdin ?? defaultReadStdin,
+    readLanguagePreference: partial.readLanguagePreference ?? (() => readLanguagePreference(partial.env ?? process.env)),
+    saveLanguagePreference: partial.saveLanguagePreference ?? ((language) => saveLanguagePreference(partial.env ?? process.env, language)),
   };
 }
 
@@ -187,6 +190,7 @@ interface AccountExportPage {
   tenant?: Record<string, unknown> | null;
   mailboxes?: unknown[];
   messages?: { data?: unknown[]; next_cursor?: string | null; nextCursor?: string | null };
+  withdrawal_evidence?: {data?:unknown[];next_cursor?:string|null};
   [key: string]: unknown;
 }
 
@@ -226,9 +230,21 @@ async function collectAccountExport(
     if (pages >= ACCOUNT_EXPORT_MAX_PAGES) throw new Error(`account export exceeded ${ACCOUNT_EXPORT_MAX_PAGES} pages; contact support@mailery.co for an out-of-band export`);
     cursor = next;
   } while (cursor);
+  const withdrawals:unknown[]=[...(last?.withdrawal_evidence?.data??[])];
+  let withdrawalCursor=last?.withdrawal_evidence?.next_cursor;
+  const visitedWithdrawalCursors=new Set<string>();
+  while(withdrawalCursor){
+    if(visitedWithdrawalCursors.has(withdrawalCursor)||visitedWithdrawalCursors.size>=ACCOUNT_EXPORT_MAX_PAGES)throw new Error("withdrawal evidence export did not reach END");
+    visitedWithdrawalCursors.add(withdrawalCursor);
+    const page=await client.exportAccount({limit:pageSize,withdrawalCursor}) as AccountExportPage;
+    if(!page.withdrawal_evidence||!Array.isArray(page.withdrawal_evidence.data))throw new Error("withdrawal evidence export is unavailable");
+    withdrawals.push(...page.withdrawal_evidence.data);
+    withdrawalCursor=page.withdrawal_evidence.next_cursor;
+  }
   const { messages: _dropped, ...rest } = last ?? {};
   return {
     ...rest,
+    ...(last?.withdrawal_evidence?{withdrawal_evidence:{data:withdrawals,next_cursor:null}}:{}),
     export_version: typeof last?.export_version === "number" ? last.export_version : 1,
     generated_at: typeof last?.generated_at === "string" ? last.generated_at : new Date().toISOString(),
     pages,
@@ -552,6 +568,28 @@ async function readAuthPassword(opts: PasswordOptions, deps: CliDeps, json: bool
 }
 
 export function buildProgram(deps: CliDeps): Command {
+  const countryCopy = checkoutCountryCopy(deps.env);
+  const english = checkoutCountryCopy({});
+  const number = (value: number) => displayNumber(value, displayLanguage(deps.env));
+  const money = (cents: number) => displayUsdCents(cents, displayLanguage(deps.env));
+  function paidLeaf(parent: Command, name: string, description: string): Command {
+    return parent.command(name).description(description).option("--json", countryCopy.jsonOption)
+      .helpOption("-h, --help", countryCopy.helpOption)
+      .configureHelp({ formatHelp(command, helper) {
+        return new Help().formatHelp(command, helper)
+          .replace(/^Usage:/m, countryCopy.usage).replace(/\[options\]/g, countryCopy.optionsPlaceholder).replace(/^Options:/m, countryCopy.options)
+          .replace(/^Arguments:/m, countryCopy.arguments).replace(/\(default:/g, `(${countryCopy.defaultLabel}`);
+      } });
+  }
+  async function runPaid(json: boolean, action: () => Promise<void>): Promise<void> {
+    await run(deps, json, action, error => {
+      if (json) return error;
+      // Translate CLI/SDK-owned validation only. Preserve server-authored text.
+      if (error.code === "unauthorized" && !deps.env.MAILERY_SESSION_TOKEN?.trim() && error.message === english.sessionRequired) return { ...error, message: countryCopy.sessionRequired, hint: countryCopy.sessionHint };
+      if (error.code === "checkout_protocol_required" && error.message === english.protocolInputRequired) return { ...error, message: countryCopy.protocolInputRequired };
+      return error;
+    });
+  }
   const program = new Command();
   program
     .name("mailery")
@@ -559,6 +597,22 @@ export function buildProgram(deps: CliDeps): Command {
     .version(VERSION)
     .option("--json", "Emit a machine-readable JSON envelope");
   program.configureOutput({ writeOut: deps.stdout, writeErr: () => {} });
+
+  const language = paidLeaf(program, "language [language]", countryCopy.languageCommand);
+  language.action(async (selected?: string) => {
+    const json = jsonOf(language, deps);
+    await run(deps, json, async () => {
+      if (selected === undefined) {
+        const value = displayLanguage(deps.env);
+        ok(deps, json, { language: value }, `${countryCopy.languageCurrent} ${value}`);
+        return;
+      }
+      if (selected !== "en" && selected !== "ro") throw new MaileryError(json ? english.languageInvalid : countryCopy.languageInvalid, { code: "cli_usage_error" });
+      await deps.saveLanguagePreference!(selected);
+      const copy = checkoutCountryCopy({ MAILERY_LANGUAGE: selected });
+      ok(deps, json, { language: selected }, `${copy.languageSaved} ${selected}`);
+    }, error => localizePreferenceError(error, json, deps));
+  });
 
   // ── auth ──
   const signup = leaf(program, "signup", "Create an account (email + password); return a session token once; save it in env or a secret manager");
@@ -899,60 +953,58 @@ export function buildProgram(deps: CliDeps): Command {
   });
 
   // ── billing ──
-  const countryCopy = checkoutCountryCopy(deps.env);
   // Read the server's current policy before dispatch. Always emit this disclosure,
   // including JSON automation (stderr), before any payable-session POST.
-  async function paidCountryDeclaration(client: MaileryClient, opts: { country?: string; countryBasis?: string; countryPolicyVersion?: string; replayLegacy?: boolean }) {
+  async function paidCountryDeclaration(client: MaileryClient, opts: { billingCountry?: string; residenceCountry?: string; countryPolicyVersion?: string; replayLegacy?: boolean }) {
     if (opts.replayLegacy) {
-      if (opts.country !== undefined || opts.countryBasis !== undefined || opts.countryPolicyVersion !== undefined) throw new MaileryError(countryCopy.legacyConflict, { code: "cli_usage_error" });
+      if (opts.billingCountry !== undefined || opts.residenceCountry !== undefined || opts.countryPolicyVersion !== undefined) throw new MaileryError(countryCopy.legacyConflict, { code: "cli_usage_error" });
       return {};
     }
     const policy = await client.getCheckoutCountryPolicy();
     deps.stderr(`${countryCopy.restrictions} ${policy.restricted_countries.join(", ")}. ${countryCopy.review} ${client.baseUrl}${policy.disclosure_path}. ${countryCopy.free}\n`);
-    if (!opts.country) throw new MaileryError(countryCopy.required, { code: "checkout_country_required", details: policy });
-    if (opts.countryBasis !== "billing" && opts.countryBasis !== "residence") throw new MaileryError(countryCopy.basisError, { code: "cli_usage_error" });
+    if (!opts.billingCountry || !opts.residenceCountry) throw new MaileryError(countryCopy.required, { code: "checkout_country_required", details: policy });
     if (!opts.countryPolicyVersion) throw new MaileryError(countryCopy.policyRequired, { code: "checkout_country_policy_required", details: policy });
-    return { country: opts.country.trim().toUpperCase(), countryBasis: opts.countryBasis as "billing" | "residence", countryPolicyVersion: opts.countryPolicyVersion };
+    return { billingCountry: opts.billingCountry.trim().toUpperCase(), residenceCountry: opts.residenceCountry.trim().toUpperCase(), countryPolicyVersion: opts.countryPolicyVersion };
   }
-  const subscribe = leaf(program, "subscribe <plan>", "Start a subscription (plan: pro or scale): open Stripe Checkout and wait until the entitlement is active");
+  const subscribe = paidLeaf(program, "subscribe <plan>", countryCopy.subscribeCommand);
   subscribe
-    .option("--country <code>", countryCopy.countryOption)
-    .option("--country-basis <basis>", countryCopy.basisOption)
+    .option("--billing-country <code>", countryCopy.billingCountryOption)
+    .option("--residence-country <code>", countryCopy.residenceCountryOption)
     .option("--country-policy-version <version>", countryCopy.policyOption)
     .option("--replay-legacy", countryCopy.legacyOption)
-    .option("--no-wait", "Print the checkout URL and exit without polling for entitlement")
-    .option("--idempotency-key <key>", "Stable purchase key; reuse it after failure or timeout (a fresh key starts a deliberate new purchase)")
-    .option("--resume", "Only poll entitlement; do not open another Checkout session")
-    .option("--timeout <seconds>", "Max seconds to wait for entitlement", "300")
-    .option("--interval <seconds>", "Entitlement poll interval in seconds", "3");
+    .option("--no-wait", countryCopy.noWaitOption)
+    .option("--idempotency-key <key>", countryCopy.purchaseKeyOption)
+    .option("--resume", countryCopy.resumeOption)
+    .option("--timeout <seconds>", countryCopy.timeoutOption, "300")
+    .option("--interval <seconds>", countryCopy.intervalOption, "3");
   subscribe.action(async (plan: string) => {
     const json = jsonOf(subscribe, deps);
-    const opts = subscribe.opts<{ wait: boolean; timeout: string; interval: string; idempotencyKey?: string; resume?: boolean; country?: string; countryBasis?: string; countryPolicyVersion?: string; replayLegacy?: boolean }>();
-    await run(deps, json, async () => {
+    const opts = subscribe.opts<{ wait: boolean; timeout: string; interval: string; idempotencyKey?: string; resume?: boolean; billingCountry?: string; residenceCountry?: string; countryPolicyVersion?: string; replayLegacy?: boolean }>();
+    await runPaid(json, async () => {
       const client = buildClient(deps, { preferSession: true });
       if (opts.resume && (!opts.wait || opts.idempotencyKey)) {
-        throw new MaileryError("--resume only polls entitlement; use it without --no-wait or --idempotency-key", { code: "cli_usage_error" });
+        throw new MaileryError(json ? english.resumeConflict : countryCopy.resumeConflict, { code: "cli_usage_error" });
       }
       const url = opts.resume ? undefined : await client.createCheckout({ kind: "subscription", plan, idempotencyKey: opts.idempotencyKey, ...await paidCountryDeclaration(client, opts) });
       if (url && deps.interactive) deps.openBrowser?.(url);
       if (!opts.wait) {
-        ok(deps, json, { plan, checkout_url: url, waited: false }, [`Checkout URL: ${url}`, "Complete payment in the browser; run `mailery subscribe "+plan+" --resume` to poll without opening Checkout."]);
+        ok(deps, json, { plan, checkout_url: url, waited: false }, [`${countryCopy.checkoutLabel} ${url}`, countryCopy.completePayment(plan)]);
         return;
       }
-      if (!json) deps.stderr(`${url ? `Checkout URL: ${url}\n` : ""}Waiting for entitlement`);
+      if (!json) deps.stderr(`${url ? `${countryCopy.checkoutLabel} ${url}\n` : ""}${countryCopy.waiting}`);
       const timeoutMs = Math.max(1, Number(opts.timeout) || 300) * 1000;
       const intervalMs = Math.max(1, Number(opts.interval) || 3) * 1000;
       const deadline = Date.now() + timeoutMs;
       for (;;) {
         const overview = await client.getBillingStatus();
         if (isEntitled(overview)) {
-          if (!json) deps.stderr(" active\n");
-          ok(deps, json, { plan, checkout_url: url, waited: true, entitled: true, balance: overview.balance, subscriptions: overview.subscriptions }, `Entitlement active. Balance: ${overview.balance}.`);
+          if (!json) deps.stderr(`${countryCopy.active}\n`);
+          ok(deps, json, { plan, checkout_url: url, waited: true, entitled: true, balance: overview.balance, subscriptions: overview.subscriptions }, `${countryCopy.entitlementActive} ${overview.balance === undefined ? "?" : number(overview.balance)}.`);
           return;
         }
         if (Date.now() + intervalMs >= deadline) {
-          if (!json) deps.stderr(" timed out\n");
-          fail(deps, json, { code: "entitlement_timeout", message: `entitlement not active within ${Math.round(timeoutMs / 1000)}s`, hint: "Complete the Stripe Checkout in the browser, then run `mailery subscribe <plan> --resume` to resume polling without creating Checkout, or check `mailery billing status`." });
+          if (!json) deps.stderr(`${countryCopy.timedOut}\n`);
+          fail(deps, json, { code: "entitlement_timeout", message: (json ? english : countryCopy).entitlementTimeout(json ? String(Math.round(timeoutMs / 1000)) : number(Math.round(timeoutMs / 1000))), hint: (json ? english : countryCopy).entitlementHint });
           return;
         }
         if (!json) deps.stderr(".");
@@ -962,6 +1014,53 @@ export function buildProgram(deps: CliDeps): Command {
   });
 
   const billing = program.command("billing").description("Billing, prepaid wallet, and usage");
+  const purchases = paidLeaf(billing, "purchases", countryCopy.purchasesCommand);
+  purchases.option("--limit <n>", countryCopy.pageOption).option("--cursor <cursor>", countryCopy.cursorOption);
+  purchases.action(async () => {
+    const json = jsonOf(purchases, deps);
+    await runPaid(json, async () => {
+      const opts = purchases.opts<{ limit?: string; cursor?: string }>();
+      const result = await buildClient(deps).listWithdrawalPurchases({ limit: opts.limit ? Number(opts.limit) : undefined, cursor: opts.cursor });
+      ok(deps, json, result, result.data.map(p => `${p.id}: ${p.kind} · ${countryCopy.withdrawalPeriod} ${p.withdrawal_period.status}`));
+    });
+  });
+
+  const withdraw = paidLeaf(billing, "withdraw <purchase-id>", countryCopy.withdrawCommand);
+  withdraw.requiredOption("--email <email>", countryCopy.emailOption)
+    .requiredOption("--idempotency-key <key>", countryCopy.requestKeyOption)
+    .option("--language <language>", countryCopy.acknowledgementLanguageOption, "en");
+  withdraw.action(async (purchaseId: string) => {
+    const json = jsonOf(withdraw, deps);
+    await runPaid(json, async () => {
+      const opts = withdraw.opts<{ email: string; idempotencyKey: string; language: string }>();
+      if (!["en", "ro"].includes(opts.language)) throw new MaileryError(json ? english.languageInvalid : countryCopy.languageInvalid, { code: "cli_usage_error" });
+      const result = await buildClient(deps).identifyWithdrawal(purchaseId, { email: opts.email, idempotencyKey: opts.idempotencyKey, language: opts.language as "en" | "ro" });
+      ok(deps, json, result, [result.message, `${countryCopy.requestLabel} ${result.id}`, `${countryCopy.purchaseLabel} ${result.purchase_id}`, `${countryCopy.acknowledgementLabel} ${result.acknowledgement_email}`]);
+    });
+  });
+
+  const confirmWithdrawal = paidLeaf(billing, "confirm-withdrawal <request-id>", countryCopy.confirmWithdrawalCommand);
+  confirmWithdrawal.requiredOption("--purchase-id <purchase-id>", countryCopy.purchaseOption)
+    .requiredOption("--idempotency-key <key>", countryCopy.confirmKeyOption)
+    .option("--yes", countryCopy.yesOption);
+  confirmWithdrawal.action(async (requestId: string) => {
+    const json = jsonOf(confirmWithdrawal, deps);
+    await runPaid(json, async () => {
+      const opts = confirmWithdrawal.opts<{ purchaseId: string; idempotencyKey: string; yes?: boolean }>();
+      if (opts.yes !== true) throw new MaileryError(json ? english.withdrawalRequired : countryCopy.withdrawalRequired, { code: "withdrawal_confirmation_required" });
+      const result = await buildClient(deps).confirmWithdrawal(requestId, { purchaseId: opts.purchaseId, idempotencyKey: opts.idempotencyKey, confirm: true });
+      ok(deps, json, result, [result.message, `${countryCopy.acknowledgementLabel} ${result.acknowledgement_status}`, `${countryCopy.refundLabel} ${result.refund_status}`]);
+    });
+  });
+
+  const withdrawalStatus = paidLeaf(billing, "withdrawal <request-id>", countryCopy.withdrawalCommand);
+  withdrawalStatus.action(async (requestId: string) => {
+    const json = jsonOf(withdrawalStatus, deps);
+    await runPaid(json, async () => {
+      const result = await buildClient(deps).getWithdrawal(requestId);
+      ok(deps, json, result, [result.message, `${countryCopy.acknowledgementLabel} ${result.acknowledgement_status}`, `${countryCopy.refundLabel} ${result.refund_status}`]);
+    });
+  });
   const billingStatus = leaf(billing, "status", "Show credit balance, prepaid wallet, plans, subscriptions, and recent ledger");
   billingStatus.action(async () => {
     const json = jsonOf(billingStatus, deps);
@@ -977,14 +1076,36 @@ export function buildProgram(deps: CliDeps): Command {
     });
   });
 
+  const checkoutOrder = paidLeaf(billing, "order <order-id>", countryCopy.orderCommand);
+  checkoutOrder.action(async (orderId: string) => {
+    const json = jsonOf(checkoutOrder, deps);
+    await runPaid(json, async () => {
+      const data = await buildClient(deps, { preferSession: true }).getCheckoutOrder(orderId);
+      ok(deps, json, data, [JSON.stringify(data)]);
+    });
+  });
+  const checkoutConfirm = paidLeaf(billing, "confirm-order <order-id>", countryCopy.confirmCommand);
+  checkoutConfirm.requiredOption("--language <language>", countryCopy.languageOption)
+    .requiredOption("--checkout-protocol <protocol>", countryCopy.protocolOption)
+    .requiredOption("--checkout-terms-version <version>", countryCopy.termsVersionOption)
+    .requiredOption("--idempotency-key <key>", countryCopy.confirmationKeyOption);
+  checkoutConfirm.action(async (orderId: string) => {
+    const json = jsonOf(checkoutConfirm, deps), opts = checkoutConfirm.opts();
+    await runPaid(json, async () => {
+      if (opts.checkoutProtocol !== "stripe-terms-v1" || !["en", "ro"].includes(opts.language)) throw new MaileryError(json ? english.protocolRequired : countryCopy.protocolRequired, { code: "checkout_protocol_required" });
+      const url = await buildClient(deps, { preferSession: true }).confirmCheckoutOrder(orderId, { language: opts.language, checkoutProtocol: opts.checkoutProtocol, checkoutTermsVersion: opts.checkoutTermsVersion, idempotencyKey: opts.idempotencyKey });
+      ok(deps, json, { url }, [url]);
+    });
+  });
+
   // ── prepaid wallet (launch lane L07) ──
   // The wallet is the USD balance domain purchases and renewals are charged
   // against. It is reported separately from send credits on purpose: they are
   // different currencies with different economics.
-  const billingCountries = leaf(billing, "countries", countryCopy.command);
+  const billingCountries = paidLeaf(billing, "countries", countryCopy.command);
   billingCountries.action(async () => {
     const json = jsonOf(billingCountries, deps);
-    await run(deps, json, async () => { const client = buildClient(deps); const policy = await client.getCheckoutCountryPolicy(); ok(deps, json, policy, [`${countryCopy.restrictions} ${policy.restricted_countries.join(", ")}`, `${countryCopy.review} ${client.baseUrl}${policy.disclosure_path}`]); });
+    await runPaid(json, async () => { const client = buildClient(deps); const policy = await client.getCheckoutCountryPolicy(); ok(deps, json, policy, [`${countryCopy.restrictions} ${policy.restricted_countries.join(", ")}`, `${countryCopy.review} ${client.baseUrl}${policy.disclosure_path}`]); });
   });
   const billingWallet = leaf(billing, "wallet", "Show the prepaid wallet balance domain purchases and renewals are charged against");
   billingWallet.option("--limit <n>", "Wallet transactions to show (1-100, default 20)");
@@ -1001,30 +1122,30 @@ export function buildProgram(deps: CliDeps): Command {
     });
   });
 
-  const billingAddFunds = leaf(billing, "add-funds <amount>", "Wallet funding is unavailable at paid opening (wallet_funding_disabled); existing request replay is retained");
-  billingAddFunds.option("--country <code>", countryCopy.countryOption);
-  billingAddFunds.option("--country-basis <basis>", countryCopy.basisOption);
+  const billingAddFunds = paidLeaf(billing, "add-funds <amount>", countryCopy.fundingCommand);
+  billingAddFunds.option("--billing-country <code>", countryCopy.billingCountryOption);
+  billingAddFunds.option("--residence-country <code>", countryCopy.residenceCountryOption);
   billingAddFunds.option("--country-policy-version <version>", countryCopy.policyOption);
   billingAddFunds.option("--replay-legacy", countryCopy.legacyOption);
-  billingAddFunds.option("--yes", "Confirm the top-up may spend money (required; non-interactive)");
-  billingAddFunds.option("--idempotency-key <key>", "Caller-stable key so a retried top-up replays the same checkout instead of opening a second one");
+  billingAddFunds.option("--yes", countryCopy.topupYesOption);
+  billingAddFunds.option("--idempotency-key <key>", countryCopy.topupKeyOption);
   billingAddFunds.action(async (amount: string) => {
     const json = jsonOf(billingAddFunds, deps);
-    const opts = billingAddFunds.opts<{ yes?: boolean; idempotencyKey?: string; country?: string; countryBasis?: string; countryPolicyVersion?: string; replayLegacy?: boolean }>();
-    await run(deps, json, async () => {
+    const opts = billingAddFunds.opts<{ yes?: boolean; idempotencyKey?: string; billingCountry?: string; residenceCountry?: string; countryPolicyVersion?: string; replayLegacy?: boolean }>();
+    await runPaid(json, async () => {
       const amountCents = parseUsdAmountToCents(amount);
       if (amountCents === undefined) {
         fail(deps, json, {
           code: "invalid_amount",
-          message: `"${amount}" is not a dollar amount; pass e.g. 25 or 25.00`,
-          hint: "Presets: 10, 25, 50, 100.",
+          message: (json ? english : countryCopy).invalidAmount(amount),
+          hint: (json ? english : countryCopy).presets,
         });
         return;
       }
       if (amountCents < 1000) {
         fail(deps, json, {
           code: "wallet_topup_below_minimum",
-          message: "the minimum wallet top-up is $10.00",
+          message: (json ? english : countryCopy).topupMinimum,
           details: { amount_cents: amountCents, minimum_cents: 1000, presets_cents: [1000, 2500, 5000, 10000] },
         });
         return;
@@ -1035,18 +1156,18 @@ export function buildProgram(deps: CliDeps): Command {
       if (!opts.yes) {
         fail(deps, json, {
           code: "topup_confirmation_required",
-          message: `adding ${formatUsdCents(amountCents)} to the prepaid wallet requires --yes`,
+          message: (json ? english : countryCopy).topupRequired(json ? formatUsdCents(amountCents) : money(amountCents)),
           details: { amount_cents: amountCents, suggested_idempotency_key: suggestedIdempotencyKey },
-          hint: `Run \`mailery billing add-funds ${amount} --yes --idempotency-key ${suggestedIdempotencyKey}\`.`,
+          hint: (json ? english : countryCopy).topupHint(amount, suggestedIdempotencyKey),
         });
         return;
       }
       if (!opts.idempotencyKey) {
         fail(deps, json, {
           code: "idempotency_key_required",
-          message: "--idempotency-key is required for a wallet top-up",
+          message: (json ? english : countryCopy).topupKeyRequired,
           details: { amount_cents: amountCents, suggested_idempotency_key: suggestedIdempotencyKey },
-          hint: `Retry with --idempotency-key ${suggestedIdempotencyKey}; keep that exact key for every retry of this top-up.`,
+          hint: (json ? english : countryCopy).topupRetry(suggestedIdempotencyKey),
         });
         return;
       }
@@ -1054,9 +1175,9 @@ export function buildProgram(deps: CliDeps): Command {
       const result = await client.topUpWallet({ amountCents, idempotencyKey: opts.idempotencyKey, ...await paidCountryDeclaration(client, opts) });
       if (deps.interactive && result.url) deps.openBrowser?.(result.url);
       ok(deps, json, result, [
-        `Top-up of ${formatUsdCents(amountCents)} started.`,
-        `Checkout URL: ${result.url}`,
-        "Funds land in the wallet once the payment completes; check `mailery billing wallet`.",
+        countryCopy.topupStarted(money(amountCents)),
+        `${countryCopy.checkoutLabel} ${result.url}`,
+        countryCopy.topupPending,
       ]);
     });
   });
@@ -1924,16 +2045,20 @@ function exitOverrideTree(command: Command): void {
 
 export async function runCli(argv: string[] = process.argv, partial: Partial<CliDeps> = {}): Promise<void> {
   const deps = resolveDeps(partial);
-  const program = buildProgram(deps);
-  exitOverrideTree(program);
+  const json = deps.env.MAILERY_JSON === "1" || argv.includes("--json");
   try {
+    const saved = await deps.readLanguagePreference!();
+    const language = displayLanguage(deps.env, saved);
+    deps.env = { ...deps.env, MAILERY_LANGUAGE: language };
+    const program = buildProgram(deps);
+    exitOverrideTree(program);
     await program.parseAsync(argv);
   } catch (err) {
     if (isCommanderError(err)) {
       // Help and version are successful terminal states, not errors.
       if (err.code === "commander.helpDisplayed" || err.code === "commander.version" || err.code === "commander.help") return;
       const json = deps.env.MAILERY_JSON === "1" || argv.includes("--json");
-      const message = err.message || "usage error";
+      const message = json ? err.message || "usage error" : localizedUsageError(err, deps);
       if (json) printJson(deps, { ok: false, error: { code: "cli_usage_error", message } });
       else deps.stderr(`${message}\n`);
       // Usage errors get exit code 2 (distinct from runtime/API failures = 1).
@@ -1942,6 +2067,23 @@ export async function runCli(argv: string[] = process.argv, partial: Partial<Cli
     }
     // Unexpected: surface as a generic CLI error rather than crashing.
     const json = deps.env.MAILERY_JSON === "1" || argv.includes("--json");
-    fail(deps, json, toCliError(err));
+    fail(deps, json, localizePreferenceError(toCliError(err), json, deps));
   }
+}
+
+function localizePreferenceError(error: import("./output.js").CliError, json: boolean, deps: CliDeps): import("./output.js").CliError {
+  const copy = checkoutCountryCopy(json ? {} : deps.env);
+  const messages: Record<string, string> = { preferences_read: copy.preferencesRead, preferences_invalid: copy.preferencesInvalid, preferences_write: copy.preferencesWrite, preferences_path: copy.preferencesPath };
+  const message = messages[error.code];
+  return message ? { ...error, message } : error;
+}
+
+function localizedUsageError(error: Error & { code?: string }, deps: CliDeps): string {
+  if (displayLanguage(deps.env) === "en") return error.message || "usage error";
+  const copy = checkoutCountryCopy(deps.env);
+  const option = error.message.match(/'([^']+)'/)?.[1];
+  if (error.code === "commander.missingMandatoryOptionValue") return `${copy.requiredOption} ${option ?? "--help"}`;
+  if (error.code === "commander.missingArgument") return `${copy.missingArgument} ${option ?? "--help"}`;
+  if (error.code === "commander.unknownOption") return `${copy.unknownOption} ${option ?? "--help"}`;
+  return copy.invalidUsage;
 }

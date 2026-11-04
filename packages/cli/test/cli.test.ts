@@ -566,7 +566,7 @@ describe("Checkout retry and resume", () => {
     expect(h.calls.map((c) => [c.method, c.path])).toEqual([["GET", "/api/v1/billing/overview"]]);
     expect(h.calls[0]!.auth).toBe(`Bearer ${SESSION}`);
     expect(browserOpens).toBe(0);
-    expect(h.out()).toContain("Entitlement active. Balance: 1000.");
+    expect(h.out()).toContain("Entitlement active. Balance: 1,000.");
     expect(h.out()).not.toContain("Subscription active");
   });
 

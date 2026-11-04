@@ -72,6 +72,8 @@ export function makeHarness(options: { route?: RouteHandler; fetch?: FetchLike; 
     openBrowser: () => {},
     interactive: options.interactive ?? false,
     readStdin: () => Promise.resolve(options.stdin ?? ""),
+    readLanguagePreference: async () => undefined,
+    saveLanguagePreference: async () => { throw new Error("No preference writer in the test harness"); },
     // In-memory filesystem for `send --attach` / `send batch --file`: the CLI
     // is the only layer that touches disk, and tests must not.
     readFile: async (path: string) => {

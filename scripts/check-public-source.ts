@@ -40,7 +40,7 @@ function checkModule(root: string, file: string): void {
       const target = resolve(root, dirname(file), specifier.replace(/\.js$/, ".ts"));
       requireCondition(target.startsWith(packageSource + sep) && existsSync(target), `relative client import escapes source: ${file}`);
     } else {
-      requireCondition(specifier === "commander" || specifier === "@hasna/mailery-sdk-internal" || (file === "packages/cli/src/program.ts" && ["node:child_process", "node:crypto", "node:fs/promises", "node:path"].includes(specifier)), `external client import: ${file}`);
+      requireCondition(specifier === "commander" || specifier === "@hasna/mailery-sdk-internal" || (file === "packages/cli/src/program.ts" && ["node:child_process", "node:crypto", "node:fs/promises", "node:path"].includes(specifier)) || (file === "packages/cli/src/language-preference.ts" && ["node:fs/promises", "node:path", "node:crypto"].includes(specifier)), `external client import: ${file}`);
     }
   }
   function visit(node: ts.Node): void {

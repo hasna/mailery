@@ -189,11 +189,38 @@ environment variables for security.
    `mailery keys revoke --all --email you@example.com --password '…'` — even
    when no usable key or session is in the environment.
 
-The CLI does not persist config, credentials, base URLs, email context, cache,
-or mail data. It reads runtime state from environment variables only:
-`MAILERY_API_KEY`, `MAILERY_SESSION_TOKEN`, `MAILERY_BASE_URL`. Client
-construction and command startup do not inspect, create, modify, or delete
-local config files; any historical files are left untouched.
+Remote client configuration remains environment-only: `MAILERY_API_KEY`,
+`MAILERY_SESSION_TOKEN`, and `MAILERY_BASE_URL`. Credentials, base URLs, email
+context, cache, and mail data are never persisted. Client construction does
+not inspect local files. Historical config files are left untouched.
+
+## Display language
+
+The changed paid commands support English and Romanian display text. Run
+`mailery language ro` or `mailery language en` to save the display choice.
+`mailery language` shows the effective display language, and `--json` returns
+`{ "ok": true, "data": { "language": "ro" } }` for Romanian.
+
+Command startup reads only the language preference at
+`$HOME/.hasna/mailery/config/preferences.json`. `HASNA_HOME` overrides
+`$HOME/.hasna`; `HASNA_CONFIG_HOME` overrides the config root, giving
+`$HASNA_CONFIG_HOME/mailery/preferences.json`. These roots must be absolute.
+The resolver follows the Hasna app config-root convention and does not read
+credentials or legacy `MAILERY_CONFIG_DIR` files. The file contains only
+`{ "language": "en" }` or `{ "language": "ro" }`; saves use an atomic replacement,
+private file permissions and byte-for-byte readback. A malformed, unreadable,
+or unverified saved preference is an explicit error before remote dispatch.
+Missing preferences use the normal fallback without creating a file.
+
+Display precedence is `MAILERY_LANGUAGE`, then the saved choice, then the first
+nonempty `LC_ALL`, `LC_MESSAGES`, or `LANG`, then English. Unsupported languages
+fall back to English. Saving a choice does not change an environment override.
+Human numbers use the selected locale; JSON numbers and object keys remain
+neutral. The existing `--language` options still select order review or
+acknowledgement language sent to the API. They do not select or save the local
+display language. Protocol identifiers, flags, object IDs, server-authored policy
+text and status values are preserved as returned. Legacy commands outside the
+changed paid surface retain their existing copy.
 
 ## Commands
 

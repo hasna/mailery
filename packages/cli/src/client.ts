@@ -2,7 +2,8 @@ import { VERSION } from "./version.js";
 // Resolves a MaileryClient from environment variables only.
 // The CLI is cloud-only: the base URL defaults to https://mailery.co and is
 // overridable ONLY via MAILERY_BASE_URL. There is no local-server mode and no
-// persisted CLI config.
+// persisted remote-client config. A separate display-language preference never
+// supplies credentials, a base URL, email context, cache, or mail data.
 
 import { MaileryClient, type FetchLike } from "@hasna/mailery-sdk-internal";
 
@@ -29,6 +30,9 @@ export interface CliDeps {
   interactive?: boolean;
   /** Reads piped stdin to completion (used by `send` for the body). */
   readStdin?: () => Promise<string>;
+  /** Display-only storage, injectable so tests never inspect host preferences. */
+  readLanguagePreference?: () => Promise<"en" | "ro" | undefined>;
+  saveLanguagePreference?: (language: "en" | "ro") => Promise<void>;
 }
 
 export function resolveBaseUrl(env: Env): string {

@@ -32,6 +32,7 @@ import type {
   CreateApiKeyResult,
   CreateCheckoutInput,
   CheckoutConsentInput,
+  CheckoutPreparationInput,
   CheckoutOrderResult,
   CheckoutCountryPolicy,
   CreateDomainInput,
@@ -525,7 +526,7 @@ export class MaileryClient {
 
   /**
    * Prepare a Mailery order approval URL after presenting getCheckoutCountryPolicy(). Current
-   * new purchases require country, countryBasis and countryPolicyVersion.
+   * new purchases require billingCountry, residenceCountry and countryPolicyVersion.
    * Omitting all declaration fields can replay only an exact pre-country
    * purchase under its original key (including the historical no-header key).
    * An absent claim fails admission before any insert or provider call.
@@ -535,19 +536,19 @@ export class MaileryClient {
   async createCheckout(planOrInput: string | CreateCheckoutInput = "pro"): Promise<string> {
     const input: CreateCheckoutInput = typeof planOrInput === "string"
       ? { kind: "subscription", plan: planOrInput }
-      : { kind: planOrInput.kind ?? "subscription", plan: planOrInput.plan, credits: planOrInput.credits, country: planOrInput.country, countryBasis: planOrInput.countryBasis, countryPolicyVersion: planOrInput.countryPolicyVersion };
+      : { kind: planOrInput.kind ?? "subscription", plan: planOrInput.plan, credits: planOrInput.credits, billingCountry: planOrInput.billingCountry, residenceCountry: planOrInput.residenceCountry, countryPolicyVersion: planOrInput.countryPolicyVersion };
     const idempotencyKey = typeof planOrInput === "string" ? undefined : planOrInput.idempotencyKey;
-    const result = await this.request<{ url: string }>(ENDPOINTS.createCheckout, { auth: "session", body: input, idempotencyKey });
+    const result = await this.request<{ url: string }>(ENDPOINTS.createCheckout, { auth: "session", body: [input.billingCountry,input.residenceCountry,input.countryPolicyVersion].some(value=>value!==undefined) ? { ...input, checkoutProtocol: "stripe-terms-v1" } : input, idempotencyKey });
     return result.url;
   }
 
-  /** Read the exact order and separate current consent statements. */
+  /** Read the exact order and payment-page Terms intent. This is not acceptance. */
   getCheckoutOrder(orderId: string): Promise<CheckoutOrderResult> {
-    return this.request(ENDPOINTS.getCheckoutOrder, { auth: "session", params: { orderId } });
+    return this.request(ENDPOINTS.getCheckoutOrder, { auth: "session", params: { orderId }, query: {checkoutProtocol:"stripe-terms-v1"} });
   }
-  /** Confirm only after the person chose BOTH statements. Never infer from Terms or purchase. */
-  async confirmCheckoutOrder(orderId: string, input: CheckoutConsentInput): Promise<string> {
-    if (input.requestImmediatePerformance !== true || input.acknowledgeWithdrawal !== true || !input.immediateVersion || !input.withdrawalVersion || !input.idempotencyKey) throw new MaileryError("Two explicit choices, exact versions and a stable confirmation key are required", { code: "checkout_consent_required" });
+  /** Continue an exact order to Stripe. This request never accepts account Terms. */
+  async confirmCheckoutOrder(orderId: string, input: CheckoutPreparationInput | CheckoutConsentInput): Promise<string> {
+    if (!input.idempotencyKey || !("checkoutProtocol" in input ? input.checkoutProtocol === "stripe-terms-v1" && /^[a-f0-9]{64}$/.test(input.checkoutTermsVersion) : input.requestImmediatePerformance === true && input.acknowledgeWithdrawal === true && input.immediateVersion && input.withdrawalVersion)) throw new MaileryError("The current order protocol, exact version and stable confirmation key are required. Terms acceptance happens on Stripe, not through this request.", { code: "checkout_protocol_required" });
     const { idempotencyKey, ...body } = input;
     const result = await this.request<{ url: string }>(ENDPOINTS.confirmCheckoutOrder, { auth: "session", params: { orderId }, body, idempotencyKey });
     return result.url;
@@ -1051,6 +1052,7 @@ export class MaileryClient {
   adminOverview(): Promise<AdminApiResult> {
     return this.request(ENDPOINTS.adminOverview, { auth: "admin" });
   }
+
 
   /**
    * Adjust a tenant's credits. Pass `idempotencyKey` (stable across YOUR

@@ -178,9 +178,33 @@ test("both payable entries require full declaration for creation and expose exac
   const spec = await Bun.file(SPEC_URL).json();
   for (const name of ["CheckoutRequest", "WalletTopupRequest"]) {
     const schema = spec.components.schemas[name];
-    expect(schema.allOf[0].anyOf[0].required).toEqual(["country", "countryBasis", "countryPolicyVersion"]);
-    expect(schema.allOf[0].anyOf[1].not.anyOf).toEqual(["country", "countryBasis", "countryPolicyVersion"].map(field => ({ required: [field] })));
-    expect(schema.description).toContain("exact pre-country claim");
+    expect(schema.allOf[0].anyOf[0].required).toEqual(["billingCountry", "residenceCountry", "countryPolicyVersion"]);
+    expect(schema.allOf[0].anyOf[1].not.anyOf).toEqual(["billingCountry", "residenceCountry", "countryPolicyVersion", "country", "countryBasis"].map(field => ({ required: [field] })));
+    expect(schema.not.anyOf).toEqual(["country", "countryBasis"].map(field => ({ required: [field] })));
+    expect(schema.description).toContain("exact historical claim");
   }
   expect(spec.paths["/api/v1/billing/countries"].get.security).toEqual([]);
+  expect(spec.components.schemas.CheckoutCountryPolicy.required).toContain("blocked_list_version");
+  expect(spec.components.schemas.CheckoutCountryPolicy.required).toContain("blocked_list_effective_date");
+  expect(spec.components.schemas.CheckoutCountryPolicy.required).toContain("declaration_bases");
+  expect(spec.components.schemas.CheckoutCountryPolicy.properties.declaration_bases.deprecated).toBe(true);
+});
+
+
+test("current Checkout protocol is pending Stripe intent with a historical replay branch", async () => {
+  const spec = await Bun.file(SPEC_URL).json();
+  const get = spec.paths["/api/v1/billing/checkout/{orderId}"].get;
+  expect(get.parameters.find((p: any) => p.name === "checkoutProtocol").schema.const).toBe("stripe-terms-v1");
+  const order = get.responses["200"].content["application/json"].schema;
+  expect(order.required).toContain("paymentTerms");
+  expect(order.properties.paymentTerms.properties.protocol.const).toBe("stripe-terms-v1");
+  expect(order.properties.paymentTerms.description).toContain("Never proof of acceptance");
+  expect(order.properties.consent.oneOf).toContainEqual({type: "null"});
+  const confirm = spec.paths["/api/v1/billing/checkout/{orderId}/confirm"].post;
+  const [current, historical] = confirm.requestBody.content["application/json"].schema.oneOf;
+  expect(current.required).toEqual(["language", "checkoutProtocol", "checkoutTermsVersion"]);
+  expect(current.additionalProperties).toBe(false);
+  expect(current.properties.checkoutTermsVersion.pattern).toBe("^[a-f0-9]{64}$");
+  expect(historical.description).toContain("already fulfilled historical order");
+  expect(confirm.description).toContain("payment-success fulfillment transaction");
 });

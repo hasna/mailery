@@ -14,7 +14,7 @@ for (const kind of ["subscription", "wallet"] as const) {
         return { body: { url: "https://stripe.test/original" } };
       }
     } });
-    const args = [...command, "--country", "US", "--country-basis", "billing", "--country-policy-version", current, "--idempotency-key", "original-purchase-key", "--json"];
+    const args = [...command, "--billing-country", "US", "--residence-country", "US", "--country-policy-version", current, "--idempotency-key", "original-purchase-key", "--json"];
     const first = make(); await runCli(argv(...args), first.deps); expect(first.exitCode()).toBe(0);
     current = "later-policy";
     const retry = make(); await runCli(argv(...args), retry.deps); expect(retry.exitCode()).toBe(0);
@@ -24,7 +24,7 @@ for (const kind of ["subscription", "wallet"] as const) {
   });
   test(`${kind}: missing original policy refuses locally instead of substituting discovery`, async () => {
     const h = makeHarness({ env: { MAILERY_SESSION_TOKEN: "synthetic-session" }, route: call => call.path.endsWith("countries") ? { body: { version: "current-policy", restricted_countries: [], disclosure_path: "/checkout" } } : undefined });
-    await runCli(argv(...command, "--country", "US", "--country-basis", "billing", "--idempotency-key", "stable-purchase-key", "--json"), h.deps);
+    await runCli(argv(...command, "--billing-country", "US", "--residence-country", "US", "--idempotency-key", "stable-purchase-key", "--json"), h.deps);
     expect(parseJsonOut(h.out()).error?.code).toBe("checkout_country_policy_required");
     expect(h.calls.some(call => call.method === "POST")).toBe(false);
   });
@@ -36,7 +36,7 @@ for (const kind of ["subscription", "wallet"] as const) {
     expect(h.calls[0]!.headers["idempotency-key"]).toBe("original-base-key");
     expect(h.calls[0]!.body).toEqual(kind === "subscription" ? { kind: "subscription", plan: "pro" } : { amountCents: 1000 });
     const invalid = makeHarness({ env: { MAILERY_SESSION_TOKEN: "synthetic-session" } });
-    await runCli(argv(...command, "--replay-legacy", "--country", "US", "--idempotency-key", "original-base-key", "--json"), invalid.deps);
+    await runCli(argv(...command, "--replay-legacy", "--billing-country", "US", "--idempotency-key", "original-base-key", "--json"), invalid.deps);
     expect(parseJsonOut(invalid.out()).error?.code).toBe("cli_usage_error"); expect(invalid.calls).toHaveLength(0);
   });
 }

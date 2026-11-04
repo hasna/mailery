@@ -915,22 +915,21 @@ export function buildProgram(deps: CliDeps): Command {
   const countryCopy = checkoutCountryCopy(deps.env);
   // Read the server's current policy before dispatch. Always emit this disclosure,
   // including JSON automation (stderr), before any payable-session POST.
-  async function paidCountryDeclaration(client: MaileryClient, opts: { country?: string; countryBasis?: string; countryPolicyVersion?: string; replayLegacy?: boolean }) {
+  async function paidCountryDeclaration(client: MaileryClient, opts: { billingCountry?: string; residenceCountry?: string; countryPolicyVersion?: string; replayLegacy?: boolean }) {
     if (opts.replayLegacy) {
-      if (opts.country !== undefined || opts.countryBasis !== undefined || opts.countryPolicyVersion !== undefined) throw new MaileryError(countryCopy.legacyConflict, { code: "cli_usage_error" });
+      if (opts.billingCountry !== undefined || opts.residenceCountry !== undefined || opts.countryPolicyVersion !== undefined) throw new MaileryError(countryCopy.legacyConflict, { code: "cli_usage_error" });
       return {};
     }
     const policy = await client.getCheckoutCountryPolicy();
     deps.stderr(`${countryCopy.restrictions} ${policy.restricted_countries.join(", ")}. ${countryCopy.review} ${client.baseUrl}${policy.disclosure_path}. ${countryCopy.free}\n`);
-    if (!opts.country) throw new MaileryError(countryCopy.required, { code: "checkout_country_required", details: policy });
-    if (opts.countryBasis !== "billing" && opts.countryBasis !== "residence") throw new MaileryError(countryCopy.basisError, { code: "cli_usage_error" });
+    if (!opts.billingCountry || !opts.residenceCountry) throw new MaileryError(countryCopy.required, { code: "checkout_country_required", details: policy });
     if (!opts.countryPolicyVersion) throw new MaileryError(countryCopy.policyRequired, { code: "checkout_country_policy_required", details: policy });
-    return { country: opts.country.trim().toUpperCase(), countryBasis: opts.countryBasis as "billing" | "residence", countryPolicyVersion: opts.countryPolicyVersion };
+    return { billingCountry: opts.billingCountry.trim().toUpperCase(), residenceCountry: opts.residenceCountry.trim().toUpperCase(), countryPolicyVersion: opts.countryPolicyVersion };
   }
-  const subscribe = leaf(program, "subscribe <plan>", "Start a subscription (plan: pro or scale): review the Mailery order and its two separate consent choices before payment");
+  const subscribe = leaf(program, "subscribe <plan>", "Start a subscription (plan: pro or scale): review the order, then continue to Stripe");
   subscribe
-    .option("--country <code>", countryCopy.countryOption)
-    .option("--country-basis <basis>", countryCopy.basisOption)
+    .option("--billing-country <code>", countryCopy.billingCountryOption)
+    .option("--residence-country <code>", countryCopy.residenceCountryOption)
     .option("--country-policy-version <version>", countryCopy.policyOption)
     .option("--replay-legacy", countryCopy.legacyOption)
     .option("--no-wait", "Print the checkout URL and exit without polling for entitlement")
@@ -940,7 +939,7 @@ export function buildProgram(deps: CliDeps): Command {
     .option("--interval <seconds>", "Entitlement poll interval in seconds", "3");
   subscribe.action(async (plan: string) => {
     const json = jsonOf(subscribe, deps);
-    const opts = subscribe.opts<{ wait: boolean; timeout: string; interval: string; idempotencyKey?: string; resume?: boolean; country?: string; countryBasis?: string; countryPolicyVersion?: string; replayLegacy?: boolean }>();
+    const opts = subscribe.opts<{ wait: boolean; timeout: string; interval: string; idempotencyKey?: string; resume?: boolean; billingCountry?: string; residenceCountry?: string; countryPolicyVersion?: string; replayLegacy?: boolean }>();
     await run(deps, json, async () => {
       const client = buildClient(deps, { preferSession: true });
       if (opts.resume && (!opts.wait || opts.idempotencyKey)) {
@@ -1004,11 +1003,11 @@ export function buildProgram(deps: CliDeps): Command {
   const checkoutOrder = leaf(billing, "order <order-id>", countryCopy.orderCommand);
   checkoutOrder.action(async (orderId: string) => { const json = jsonOf(checkoutOrder, deps); await run(deps, json, async () => { const data = await buildClient(deps, { preferSession: true }).getCheckoutOrder(orderId); ok(deps, json, data, [JSON.stringify(data)]); }); });
   const checkoutConfirm = leaf(billing, "confirm-order <order-id>", countryCopy.confirmCommand);
-  checkoutConfirm.option("--request-start-now", countryCopy.startOption).option("--acknowledge-withdrawal", countryCopy.withdrawalOption).requiredOption("--language <language>", countryCopy.languageOption).requiredOption("--immediate-version <version>", countryCopy.immediateVersionOption).requiredOption("--withdrawal-version <version>", countryCopy.withdrawalVersionOption).requiredOption("--idempotency-key <key>", countryCopy.confirmationKeyOption);
-  checkoutConfirm.action(async (orderId: string) => { const json=jsonOf(checkoutConfirm,deps), opts=checkoutConfirm.opts(); await run(deps,json,async () => {
-    if (opts.requestStartNow !== true || opts.acknowledgeWithdrawal !== true || !["en","ro"].includes(opts.language)) throw new MaileryError(countryCopy.choicesRequired, { code: "checkout_consent_required" });
-    const url=await buildClient(deps,{preferSession:true}).confirmCheckoutOrder(orderId,{ language:opts.language, requestImmediatePerformance:true, acknowledgeWithdrawal:true, immediateVersion:opts.immediateVersion, withdrawalVersion:opts.withdrawalVersion, idempotencyKey:opts.idempotencyKey }); ok(deps,json,{url},[url]);
-  }); });
+  checkoutConfirm.requiredOption("--language <language>",countryCopy.languageOption).requiredOption("--checkout-protocol <protocol>","Exact protocol from billing order").requiredOption("--checkout-terms-version <version>","Exact payment-page Terms intent version from billing order").requiredOption("--idempotency-key <key>",countryCopy.confirmationKeyOption);
+  checkoutConfirm.action(async(orderId:string)=>{const json=jsonOf(checkoutConfirm,deps),opts=checkoutConfirm.opts();await run(deps,json,async()=>{
+    if(opts.checkoutProtocol!=="stripe-terms-v1" || !["en","ro"].includes(opts.language)) throw new MaileryError("Read the current order protocol and version before continuing to Stripe",{code:"checkout_protocol_required"});
+    const url=await buildClient(deps,{preferSession:true}).confirmCheckoutOrder(orderId,{language:opts.language,checkoutProtocol:opts.checkoutProtocol,checkoutTermsVersion:opts.checkoutTermsVersion,idempotencyKey:opts.idempotencyKey});ok(deps,json,{url},[url]);
+  });});
 
   // ── prepaid wallet (launch lane L07) ──
   // The wallet is the USD balance domain purchases and renewals are charged
@@ -1035,15 +1034,15 @@ export function buildProgram(deps: CliDeps): Command {
   });
 
   const billingAddFunds = leaf(billing, "add-funds <amount>", "Wallet funding is unavailable at paid opening (wallet_funding_disabled); existing request replay is retained");
-  billingAddFunds.option("--country <code>", countryCopy.countryOption);
-  billingAddFunds.option("--country-basis <basis>", countryCopy.basisOption);
+  billingAddFunds.option("--billing-country <code>", countryCopy.billingCountryOption);
+  billingAddFunds.option("--residence-country <code>", countryCopy.residenceCountryOption);
   billingAddFunds.option("--country-policy-version <version>", countryCopy.policyOption);
   billingAddFunds.option("--replay-legacy", countryCopy.legacyOption);
   billingAddFunds.option("--yes", "Confirm the top-up may spend money (required; non-interactive)");
   billingAddFunds.option("--idempotency-key <key>", "Caller-stable key so a retried top-up replays the same checkout instead of opening a second one");
   billingAddFunds.action(async (amount: string) => {
     const json = jsonOf(billingAddFunds, deps);
-    const opts = billingAddFunds.opts<{ yes?: boolean; idempotencyKey?: string; country?: string; countryBasis?: string; countryPolicyVersion?: string; replayLegacy?: boolean }>();
+    const opts = billingAddFunds.opts<{ yes?: boolean; idempotencyKey?: string; billingCountry?: string; residenceCountry?: string; countryPolicyVersion?: string; replayLegacy?: boolean }>();
     await run(deps, json, async () => {
       const amountCents = parseUsdAmountToCents(amount);
       if (amountCents === undefined) {

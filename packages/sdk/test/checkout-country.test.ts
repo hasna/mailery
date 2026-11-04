@@ -8,12 +8,13 @@ test("SDK exposes the public policy and forwards the exact declaration with the 
     const path = new URL(String(input)).pathname;
     const headers = new Headers(init?.headers);
     calls.push({ path, auth: headers.get("authorization"), key: headers.get("idempotency-key"), body: init?.body ? JSON.parse(String(init.body)) : undefined });
-    return Response.json(path.endsWith("countries") ? { version: "synthetic-version", restricted_countries: ["RO"] } : { url: "http://127.0.0.1:55586/synthetic-checkout" });
+    return Response.json(path.endsWith("countries") ? { version: "synthetic-version", blocked_list_version: 2, blocked_list_effective_date: "2026-10-25", restricted_countries: ["RO"], required_declarations: ["billingCountry", "residenceCountry"] } : { url: "http://127.0.0.1:55586/synthetic-checkout" });
   }});
   const policy = await client.getCheckoutCountryPolicy();
   expect(policy.restricted_countries).toEqual(["RO"]);
+  expect(policy.blocked_list_version).toBe(2);
   expect(calls[0]!.auth).toBeNull();
-  const declaration = { country: "US", countryBasis: "residence" as const, countryPolicyVersion: policy.version };
+  const declaration = { billingCountry: "US", residenceCountry: "US", countryPolicyVersion: policy.version };
   await client.createCheckout({ kind: "credit_pack", credits: 1000, idempotencyKey: "stable-country-purchase", ...declaration });
   await client.topUpWallet({ amountCents: 1000, idempotencyKey: "stable-country-wallet", ...declaration });
   for (const call of calls.slice(1)) {
@@ -36,7 +37,7 @@ test("MCP first-step policy and wallet schema expose and preserve the country de
   }});
   const first = await handleMcpMessage({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_checkout_country_policy", arguments: {} } }, client);
   expect(JSON.stringify(first)).toContain("RO");
-  const declaration = { country: "US", countryBasis: "billing", countryPolicyVersion: "policy-version" };
+  const declaration = { billingCountry: "US", residenceCountry: "US", countryPolicyVersion: "policy-version" };
   await handleMcpMessage({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "add_wallet_funds", arguments: { amountCents: 1000, idempotencyKey: "stable-mcp-wallet", ...declaration } } }, client);
   expect(calls[0]!.path).toBe("/api/v1/billing/countries");
   expect(calls[1]!.body).toMatchObject(declaration);
@@ -50,7 +51,7 @@ test("SDK and MCP preserve an explicit original policy across discovery changes 
     bodies.push(JSON.parse(String(init?.body))); return Response.json({ url: "https://stripe.test/original" });
   } });
   const policy = await client.getCheckoutCountryPolicy();
-  const declaration = { country: "US", countryBasis: "billing" as const, countryPolicyVersion: policy.version };
+  const declaration = { billingCountry: "US", residenceCountry: "US", countryPolicyVersion: policy.version };
   await client.createCheckout({ kind: "subscription", plan: "pro", idempotencyKey: "original-checkout-key", ...declaration });
   version = "later-version"; await client.getCheckoutCountryPolicy();
   await client.createCheckout({ kind: "subscription", plan: "pro", idempotencyKey: "original-checkout-key", ...declaration });

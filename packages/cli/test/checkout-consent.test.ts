@@ -1,12 +1,30 @@
 import { expect, test } from "bun:test";
-import { buildProgram } from "../src/program.js";
-async function run(choices: string[]) {
-  let exitCode=0; const calls: Array<{path:string;body:any}>=[];
-  const p=buildProgram({env:{MAILERY_BASE_URL:"http://127.0.0.1:9",MAILERY_SESSION_TOKEN:"synthetic"},stdout:()=>{},stderr:()=>{},setExitCode:code=>{exitCode=code;},fetch:async(url,init)=>{calls.push({path:new URL(String(url)).pathname,body:init?.body?JSON.parse(String(init.body)):undefined});return Response.json({url:"https://checkout.stripe.com/synthetic"});}});
-  await p.parseAsync(["node","mailery","billing","confirm-order","order-fixture","--language","en","--immediate-version","a".repeat(64),"--withdrawal-version","b".repeat(64),"--idempotency-key","fixture-key",...choices]);
-  return {exitCode,calls};
+import { runCli } from "../src/program.js";
+import { argv, makeHarness } from "./support.js";
+
+const version = "a".repeat(64);
+async function confirm(options: string[]) {
+  const h = makeHarness({ env: { MAILERY_SESSION_TOKEN: "synthetic" }, route: () => ({ body: { url: "http://127.0.0.1:9/checkout" } }) });
+  await runCli(argv("billing", "confirm-order", "order-fixture", ...options, "--json"), h.deps);
+  return h;
 }
-test("CLI requires both separate choice flags and never sends omitted consent",async()=>{
-  for(const flags of [[],["--request-start-now"],["--acknowledge-withdrawal"]]){const result=await run(flags);expect(result.exitCode).toBe(1);expect(result.calls).toHaveLength(0);}
-  const result=await run(["--request-start-now","--acknowledge-withdrawal"]);expect(result.exitCode).toBe(0);expect(result.calls).toHaveLength(1);expect(result.calls[0]!.path).toBe("/api/v1/billing/checkout/order-fixture/confirm");expect(result.calls[0]!.body).toMatchObject({requestImmediatePerformance:true,acknowledgeWithdrawal:true,language:"en"});
+const exact = ["--language", "en", "--checkout-protocol", "stripe-terms-v1", "--checkout-terms-version", version, "--idempotency-key", "fixture-key"];
+test("CLI carries exact Stripe preparation body and stable key without manufacturing acceptance", async () => {
+  const h = await confirm(exact);
+  expect(h.exitCode()).toBe(0);
+  expect(h.calls).toHaveLength(1);
+  expect(h.calls[0]!.path).toBe("/api/v1/billing/checkout/order-fixture/confirm");
+  expect(h.calls[0]!.headers["idempotency-key"]).toBe("fixture-key");
+  expect(h.calls[0]!.body).toEqual({ language: "en", checkoutProtocol: "stripe-terms-v1", checkoutTermsVersion: version });
+});
+test("CLI refuses wrong or missing protocol/version and legacy choice flags before dispatch", async () => {
+  for (const field of ["--checkout-protocol", "--checkout-terms-version", "--idempotency-key"]) {
+    const missing = exact.filter((_, i) => i !== exact.indexOf(field) && i !== exact.indexOf(field) + 1);
+    const h = await confirm(missing);
+    expect(h.exitCode()).not.toBe(0); expect(h.calls).toHaveLength(0);
+  }
+  for (const args of [exact.map(x => x === "stripe-terms-v1" ? "wrong" : x), exact.map(x => x === version ? "wrong" : x), [...exact, "--request-start-now"], [...exact, "--acknowledge-withdrawal"]]) {
+    const h = await confirm(args);
+    expect(h.exitCode()).not.toBe(0); expect(h.calls).toHaveLength(0);
+  }
 });

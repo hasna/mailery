@@ -2476,31 +2476,43 @@
             ],
             "description": "Paid identity tier to subscribe to (defaults to 'pro'). The 'free' tier has no checkout."
           },
-          "country": {
+          "billingCountry": {
             "type": "string",
             "pattern": "^[A-Za-z]{2}$",
-            "description": "Customer-declared ISO 3166-1 alpha-2 billing or residence country. Not nationality or IP."
+            "description": "Customer-declared ISO 3166-1 alpha-2 billing country. Not inferred from IP, nationality or residence."
           },
-          "countryBasis": {
+          "residenceCountry": {
             "type": "string",
-            "enum": [
-              "billing",
-              "residence"
-            ]
+            "pattern": "^[A-Za-z]{2}$",
+            "description": "Independently declared ISO 3166-1 alpha-2 country of residence. Not inferred from billing country."
           },
           "countryPolicyVersion": {
             "type": "string",
             "description": "Exact version read from GET /api/v1/billing/countries after presenting its restrictions to the customer."
           }
         },
-        "description": " New purchases require the full country declaration. Omitting all three declaration fields replays only an exact pre-country claim: checkout retains its original actor/kind/plan/credits fingerprint, and wallet retains its original amountCents fingerprint under the authenticated tenant and key. Missing claims fail country admission before insertion or provider I/O. Supplying any declaration never matches a legacy fingerprint. Retain the exact original countryPolicyVersion on retries; never substitute the current version.",
+        "description": " New purchases require the full country declaration. Omitting every current declaration field replays only an exact historical claim: checkout retains its original actor/kind/plan/credits fingerprint, and wallet retains its original amountCents fingerprint under the authenticated tenant and key. Missing claims fail country admission before insertion or provider I/O. Historical unpaid or unknown provider URLs are withheld on replay. Supplying any declaration never matches a legacy fingerprint. Retain the exact original countryPolicyVersion on retries; never substitute the current version.",
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "country"
+              ]
+            },
+            {
+              "required": [
+                "countryBasis"
+              ]
+            }
+          ]
+        },
         "allOf": [
           {
             "anyOf": [
               {
                 "required": [
-                  "country",
-                  "countryBasis",
+                  "billingCountry",
+                  "residenceCountry",
                   "countryPolicyVersion"
                 ]
               },
@@ -2509,17 +2521,27 @@
                   "anyOf": [
                     {
                       "required": [
+                        "billingCountry"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "residenceCountry"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "countryPolicyVersion"
+                      ]
+                    },
+                    {
+                      "required": [
                         "country"
                       ]
                     },
                     {
                       "required": [
                         "countryBasis"
-                      ]
-                    },
-                    {
-                      "required": [
-                        "countryPolicyVersion"
                       ]
                     }
                   ]
@@ -3296,31 +3318,43 @@
             "maximum": 100000,
             "description": "USD cents to add. Minimum 1000 ($10.00); presets are 1000, 2500, 5000, 10000. `amount_cents` is accepted as an alias."
           },
-          "country": {
+          "billingCountry": {
             "type": "string",
             "pattern": "^[A-Za-z]{2}$",
-            "description": "Customer-declared ISO 3166-1 alpha-2 billing or residence country. Not nationality or IP."
+            "description": "Customer-declared ISO 3166-1 alpha-2 billing country. Not inferred from IP, nationality or residence."
           },
-          "countryBasis": {
+          "residenceCountry": {
             "type": "string",
-            "enum": [
-              "billing",
-              "residence"
-            ]
+            "pattern": "^[A-Za-z]{2}$",
+            "description": "Independently declared ISO 3166-1 alpha-2 country of residence. Not inferred from billing country."
           },
           "countryPolicyVersion": {
             "type": "string",
             "description": "Exact version read from GET /api/v1/billing/countries after presenting its restrictions to the customer."
           }
         },
-        "description": " New purchases require the full country declaration. Omitting all three declaration fields replays only an exact pre-country claim: checkout retains its original actor/kind/plan/credits fingerprint, and wallet retains its original amountCents fingerprint under the authenticated tenant and key. Missing claims fail country admission before insertion or provider I/O. Supplying any declaration never matches a legacy fingerprint. Retain the exact original countryPolicyVersion on retries; never substitute the current version.",
+        "description": " New purchases require the full country declaration. Omitting every current declaration field replays only an exact historical claim: checkout retains its original actor/kind/plan/credits fingerprint, and wallet retains its original amountCents fingerprint under the authenticated tenant and key. Missing claims fail country admission before insertion or provider I/O. Historical unpaid or unknown provider URLs are withheld on replay. Supplying any declaration never matches a legacy fingerprint. Retain the exact original countryPolicyVersion on retries; never substitute the current version.",
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "country"
+              ]
+            },
+            {
+              "required": [
+                "countryBasis"
+              ]
+            }
+          ]
+        },
         "allOf": [
           {
             "anyOf": [
               {
                 "required": [
-                  "country",
-                  "countryBasis",
+                  "billingCountry",
+                  "residenceCountry",
                   "countryPolicyVersion"
                 ]
               },
@@ -3329,17 +3363,27 @@
                   "anyOf": [
                     {
                       "required": [
+                        "billingCountry"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "residenceCountry"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "countryPolicyVersion"
+                      ]
+                    },
+                    {
+                      "required": [
                         "country"
                       ]
                     },
                     {
                       "required": [
                         "countryBasis"
-                      ]
-                    },
-                    {
-                      "required": [
-                        "countryPolicyVersion"
                       ]
                     }
                   ]
@@ -3692,7 +3736,10 @@
         "type": "object",
         "required": [
           "version",
+          "blocked_list_version",
+          "blocked_list_effective_date",
           "restricted_countries",
+          "required_declarations",
           "declaration_bases",
           "disclosure_path",
           "pricing_path"
@@ -3701,14 +3748,34 @@
           "version": {
             "type": "string"
           },
+          "blocked_list_version": {
+            "type": "integer",
+            "description": "Version of the selected shared paid-checkout group data."
+          },
+          "blocked_list_effective_date": {
+            "type": "string",
+            "format": "date"
+          },
           "restricted_countries": {
             "type": "array",
             "items": {
               "type": "string"
             }
           },
+          "required_declarations": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "billingCountry",
+                "residenceCountry"
+              ]
+            }
+          },
           "declaration_bases": {
             "type": "array",
+            "deprecated": true,
+            "description": "Display compatibility only. New purchases require both billingCountry and residenceCountry.",
             "items": {
               "type": "string",
               "enum": [
@@ -5054,12 +5121,18 @@
           "Billing"
         ],
         "summary": "Create a Stripe checkout URL",
-        "description": "Prepare a tenant/owner-bound Mailery order approval URL. No provider payment session is created at this step. Request shape and {url} response stay compatible. The owner signs in at the URL and separately selects both unticked required performance/withdrawal statements before payment. Replayed legacy provider URLs fail closed with 428, without modifying original claims or sessions. Already issued provider URLs require a separate activation inventory and disposition. The same original purchase key permanently replays its order URL. An uncertain confirmation returns checkout_outcome_ambiguous and requires reconciliation.",
+        "description": "Prepare a tenant/owner-bound order without opening Stripe. New attempts declare checkoutProtocol=stripe-terms-v1. The field is a client capability, not consent, and existing claim fingerprints remain unchanged. Unsupported old callers fail before a new claim or payment URL. Current order review and confirmation carry the exact protocol/version. Required whole-account Terms acceptance takes place only on Stripe and applies only on payment success. No F2 questions are collected at this opening. The same original purchase key permanently replays its order URL. Historical claims and evidence remain preserved. An uncertain confirmation returns checkout_outcome_ambiguous and requires reconciliation of the same order.",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CheckoutRequest"
+                "$ref": "#/components/schemas/CheckoutRequest",
+                "properties": {
+                  "checkoutProtocol": {
+                    "const": "stripe-terms-v1",
+                    "description": "Required for a new claim. Omitted only for exact historical replay. Capability only, never acceptance."
+                  }
+                }
               }
             }
           }
@@ -5093,7 +5166,7 @@
             "description": "Checkout rate limited; retry after the Retry-After header"
           },
           "400": {
-            "description": "Invalid paid plan or Idempotency-Key; checkout_country_required, checkout_country_invalid, or checkout_country_basis_required"
+            "description": "Invalid paid plan or Idempotency-Key; checkout_country_required or checkout_country_invalid"
           },
           "503": {
             "description": "billing_not_configured: billing, or on a live-mode server the selected plan's catalogue price, is not configured. Nothing is claimed and no checkout is created."
@@ -8065,7 +8138,7 @@
           "Billing"
         ],
         "summary": "Add funds to the prepaid wallet",
-        "description": "First paid opening: new wallet funding is disabled (409 wallet_funding_disabled). Existing exact-key replay and observation-only reconciliation remain available. Opens a one-time Stripe Checkout Session that credits the wallet on `checkout.session.completed`. Owner session and a verified email are required, the same 10/hour limit as POST /api/v1/billing/checkout applies, and an Idempotency-Key header is REQUIRED so a retry replays the same session instead of opening a second payable one. Lost provider results, local persistence failures or unresolved success bookkeeping return checkout_outcome_ambiguous: keep the original key and reconcile that attempt before another purchase. An expired claim lease cannot start another session. First read GET /api/v1/billing/countries and present the list before payment. Requires country, countryBasis (billing or residence), and countryPolicyVersion. Listed countries are refused before provider I/O. The declaration is bound to the authenticated actor and purchase fingerprint and copied to Stripe metadata. Stripe billing-address editing is not locked or independently verified.  New purchases require the full country declaration. Omitting all three declaration fields replays only an exact pre-country claim: checkout retains its original actor/kind/plan/credits fingerprint, and wallet retains its original amountCents fingerprint under the authenticated tenant and key. Missing claims fail country admission before insertion or provider I/O. Supplying any declaration never matches a legacy fingerprint. Retain the exact original countryPolicyVersion on retries; never substitute the current version. Exact pre-country wallet replay projects only the historical terminal status409 request_outcome_ambiguous error to checkout_outcome_ambiguous with same-key reconciliation advice. Stored claim bytes and every unrelated terminal outcome remain unchanged.",
+        "description": "First paid opening: new wallet funding is disabled (409 wallet_funding_disabled). Existing exact-key replay and observation-only reconciliation remain available. Opens a one-time Stripe Checkout Session that credits the wallet on `checkout.session.completed`. Owner session and a verified email are required, the same 10/hour limit as POST /api/v1/billing/checkout applies, and an Idempotency-Key header is REQUIRED so a retry replays the same session instead of opening a second payable one. Lost provider results, local persistence failures or unresolved success bookkeeping return checkout_outcome_ambiguous: keep the original key and reconcile that attempt before another purchase. An expired claim lease cannot start another session. First read GET /api/v1/billing/countries and present the list before payment. Requires independently declared billingCountry, residenceCountry, and countryPolicyVersion. Either listed country is refused before provider I/O. The pair is bound to the authenticated actor and purchase fingerprint and copied to Stripe metadata. Stripe billing-address editing is not locked or independently verified.  New purchases require the full country declaration. Omitting every current declaration field replays only an exact historical claim: checkout retains its original actor/kind/plan/credits fingerprint, and wallet retains its original amountCents fingerprint under the authenticated tenant and key. Missing claims fail country admission before insertion or provider I/O. Supplying any declaration never matches a legacy fingerprint. Retain the exact original countryPolicyVersion on retries; never substitute the current version. A historical wallet claim containing only an opaque provider URL and amount has no exact claim-to-session binding: its URL is withheld with 409 checkout_outcome_ambiguous even when a separate wallet session is funded. Wallet ledger and overview reads remain available. Declared pending wallet URL replays recheck the current country policy and wallet funding gate. Exact pre-country wallet replay projects only the historical terminal status409 request_outcome_ambiguous error to checkout_outcome_ambiguous with same-key reconciliation advice. Stored claim bytes and every unrelated terminal outcome remain unchanged.",
         "parameters": [
           {
             "name": "Idempotency-Key",
@@ -8100,7 +8173,7 @@
             }
           },
           "400": {
-            "description": "Amount below the $10 minimum, above the maximum, or a missing/invalid Idempotency-Key; checkout_country_required, checkout_country_invalid, or checkout_country_basis_required"
+            "description": "Amount below the $10 minimum, above the maximum, or a missing/invalid Idempotency-Key; checkout_country_required or checkout_country_invalid"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -8467,7 +8540,7 @@
     "/api/v1/billing/checkout/{orderId}": {
       "get": {
         "operationId": "getCheckoutOrder",
-        "summary": "Read an owner-bound order and its two separate consent statements",
+        "summary": "Read an order and its pending payment-page Terms intent",
         "security": [
           {
             "bearerAuth": []
@@ -8482,6 +8555,15 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "checkoutProtocol",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "const": "stripe-terms-v1"
+            },
+            "description": "Opt into the new pending payment-page contract. Without it current orders return428; historical order shape is retained."
           }
         ],
         "responses": {
@@ -8499,7 +8581,8 @@
                     "country",
                     "termsVersion",
                     "consent",
-                    "refundPolicy"
+                    "refundPolicy",
+                    "paymentTerms"
                   ],
                   "properties": {
                     "orderId": {
@@ -8547,113 +8630,163 @@
                       "type": "string"
                     },
                     "country": {
-                      "type": "object"
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "required": [
+                            "billingCountry",
+                            "residenceCountry",
+                            "countryPolicyVersion"
+                          ],
+                          "properties": {
+                            "billingCountry": {
+                              "type": "string"
+                            },
+                            "residenceCountry": {
+                              "type": "string"
+                            },
+                            "countryPolicyVersion": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "description": "Read-only historical single-country order. Confirmation refuses a new payment for this incomplete declaration.",
+                          "required": [
+                            "country",
+                            "countryBasis",
+                            "countryPolicyVersion"
+                          ],
+                          "properties": {
+                            "country": {
+                              "type": "string"
+                            },
+                            "countryBasis": {
+                              "enum": [
+                                "billing",
+                                "residence"
+                              ]
+                            },
+                            "countryPolicyVersion": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      ]
                     },
                     "termsVersion": {
                       "type": "string"
                     },
                     "consent": {
-                      "type": "object",
-                      "properties": {
-                        "en": {
+                      "oneOf": [
+                        {
                           "type": "object",
-                          "required": [
-                            "language",
-                            "immediate",
-                            "withdrawal"
-                          ],
                           "properties": {
-                            "language": {
-                              "type": "string",
-                              "enum": [
-                                "en",
-                                "ro"
-                              ]
-                            },
-                            "immediate": {
+                            "en": {
                               "type": "object",
                               "required": [
-                                "text",
-                                "version"
+                                "language",
+                                "immediate",
+                                "withdrawal"
                               ],
                               "properties": {
-                                "text": {
-                                  "type": "string"
-                                },
-                                "version": {
+                                "language": {
                                   "type": "string",
-                                  "pattern": "^[a-f0-9]{64}$"
+                                  "enum": [
+                                    "en",
+                                    "ro"
+                                  ]
+                                },
+                                "immediate": {
+                                  "type": "object",
+                                  "required": [
+                                    "text",
+                                    "version"
+                                  ],
+                                  "properties": {
+                                    "text": {
+                                      "type": "string"
+                                    },
+                                    "version": {
+                                      "type": "string",
+                                      "pattern": "^[a-f0-9]{64}$"
+                                    }
+                                  }
+                                },
+                                "withdrawal": {
+                                  "type": "object",
+                                  "required": [
+                                    "text",
+                                    "version"
+                                  ],
+                                  "properties": {
+                                    "text": {
+                                      "type": "string"
+                                    },
+                                    "version": {
+                                      "type": "string",
+                                      "pattern": "^[a-f0-9]{64}$"
+                                    }
+                                  }
                                 }
                               }
                             },
-                            "withdrawal": {
+                            "ro": {
                               "type": "object",
                               "required": [
-                                "text",
-                                "version"
+                                "language",
+                                "immediate",
+                                "withdrawal"
                               ],
                               "properties": {
-                                "text": {
-                                  "type": "string"
-                                },
-                                "version": {
+                                "language": {
                                   "type": "string",
-                                  "pattern": "^[a-f0-9]{64}$"
+                                  "enum": [
+                                    "en",
+                                    "ro"
+                                  ]
+                                },
+                                "immediate": {
+                                  "type": "object",
+                                  "required": [
+                                    "text",
+                                    "version"
+                                  ],
+                                  "properties": {
+                                    "text": {
+                                      "type": "string"
+                                    },
+                                    "version": {
+                                      "type": "string",
+                                      "pattern": "^[a-f0-9]{64}$"
+                                    }
+                                  }
+                                },
+                                "withdrawal": {
+                                  "type": "object",
+                                  "required": [
+                                    "text",
+                                    "version"
+                                  ],
+                                  "properties": {
+                                    "text": {
+                                      "type": "string"
+                                    },
+                                    "version": {
+                                      "type": "string",
+                                      "pattern": "^[a-f0-9]{64}$"
+                                    }
+                                  }
                                 }
                               }
                             }
                           }
                         },
-                        "ro": {
-                          "type": "object",
-                          "required": [
-                            "language",
-                            "immediate",
-                            "withdrawal"
-                          ],
-                          "properties": {
-                            "language": {
-                              "type": "string",
-                              "enum": [
-                                "en",
-                                "ro"
-                              ]
-                            },
-                            "immediate": {
-                              "type": "object",
-                              "required": [
-                                "text",
-                                "version"
-                              ],
-                              "properties": {
-                                "text": {
-                                  "type": "string"
-                                },
-                                "version": {
-                                  "type": "string",
-                                  "pattern": "^[a-f0-9]{64}$"
-                                }
-                              }
-                            },
-                            "withdrawal": {
-                              "type": "object",
-                              "required": [
-                                "text",
-                                "version"
-                              ],
-                              "properties": {
-                                "text": {
-                                  "type": "string"
-                                },
-                                "version": {
-                                  "type": "string",
-                                  "pattern": "^[a-f0-9]{64}$"
-                                }
-                              }
-                            }
-                          }
+                        {
+                          "type": "null"
                         }
-                      }
+                      ]
                     },
                     "refundPolicy": {
                       "type": "object",
@@ -8669,6 +8802,59 @@
                         "text": {
                           "type": "string",
                           "description": "Exact purchase-time source Markdown for the Refund Policy, retained with the order."
+                        }
+                      }
+                    },
+                    "paymentTerms": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "description": "Pending payment-page contract. Never proof of acceptance.",
+                      "required": [
+                        "protocol",
+                        "version",
+                        "termsVersion",
+                        "termsUrl",
+                        "refundPolicyVersion",
+                        "refundPolicyUrl",
+                        "acceptanceRequired",
+                        "label",
+                        "submitText"
+                      ],
+                      "properties": {
+                        "protocol": {
+                          "const": "stripe-terms-v1"
+                        },
+                        "version": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "termsVersion": {
+                          "type": "string"
+                        },
+                        "termsUrl": {
+                          "type": "string",
+                          "format": "uri"
+                        },
+                        "refundPolicyVersion": {
+                          "type": "string"
+                        },
+                        "refundPolicyUrl": {
+                          "type": "string",
+                          "format": "uri"
+                        },
+                        "acceptanceRequired": {
+                          "type": "boolean"
+                        },
+                        "label": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "submitText": {
+                          "type": "string"
                         }
                       }
                     }
@@ -8687,14 +8873,14 @@
             "description": "No matching tenant and owner order"
           }
         },
-        "description": "Requires a bearer token for the owner user session. API keys are not accepted."
+        "description": "Requires a bearer token for the owner user session. API keys are not accepted. The paymentTerms object includes its immutable protocol/version and exact Stripe Terms wording. It is pending intent, not acceptance. consent is null for current orders. Historical orders retain their original F2 consent catalogue. Current orders require the stripe-terms-v1 query capability. Historical GET without it retains its original response."
       }
     },
     "/api/v1/billing/checkout/{orderId}/confirm": {
       "post": {
         "operationId": "confirmCheckoutOrder",
-        "summary": "Record both explicit choices before opening payment",
-        "description": "Requires a bearer token for the owner user session. API keys are not accepted. Requires this order owner, verified email, current accepted Terms and country policy, each separate explicit true choice and each exact wording version. Both immutable server-timestamped receipts commit before provider dispatch. The permanent dispatch claim is order-bound, so a new header never creates another payment. No consent is inferred from purchase, Terms or defaults. Uncertain outcomes require reconciliation of this order.",
+        "summary": "Continue an order to Stripe without recording Terms acceptance",
+        "description": "Requires a bearer token for the owner user session. API keys are not accepted. Requires verified email, the exact immutable order protocol/version, both allowed country declarations, published purchase policies and the stable order dispatch claim. Any required Terms checkbox is on Stripe, with the exact pinned A1 label. Account acceptance occurs only in the verified payment-success fulfillment transaction. Failed, abandoned, unpaid and foreign payments cannot accept Terms. Legacy F2 flags cannot open a new payment. Uncertain outcomes require reconciliation of this order.",
         "security": [
           {
             "bearerAuth": []
@@ -8726,39 +8912,72 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "required": [
-                  "language",
-                  "requestImmediatePerformance",
-                  "acknowledgeWithdrawal",
-                  "immediateVersion",
-                  "withdrawalVersion"
-                ],
-                "properties": {
-                  "language": {
-                    "type": "string",
-                    "enum": [
-                      "en",
-                      "ro"
-                    ]
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "required": [
+                      "language",
+                      "checkoutProtocol",
+                      "checkoutTermsVersion"
+                    ],
+                    "properties": {
+                      "language": {
+                        "type": "string",
+                        "enum": [
+                          "en",
+                          "ro"
+                        ]
+                      },
+                      "checkoutProtocol": {
+                        "type": "string",
+                        "enum": [
+                          "stripe-terms-v1"
+                        ]
+                      },
+                      "checkoutTermsVersion": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "additionalProperties": false
                   },
-                  "requestImmediatePerformance": {
-                    "type": "boolean",
-                    "const": true
-                  },
-                  "acknowledgeWithdrawal": {
-                    "type": "boolean",
-                    "const": true
-                  },
-                  "immediateVersion": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "withdrawalVersion": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
+                  {
+                    "type": "object",
+                    "required": [
+                      "language",
+                      "requestImmediatePerformance",
+                      "acknowledgeWithdrawal",
+                      "immediateVersion",
+                      "withdrawalVersion"
+                    ],
+                    "properties": {
+                      "language": {
+                        "type": "string",
+                        "enum": [
+                          "en",
+                          "ro"
+                        ]
+                      },
+                      "requestImmediatePerformance": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "acknowledgeWithdrawal": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "immediateVersion": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "withdrawalVersion": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "description": "Historical F2 input. Replay only for an already fulfilled historical order. Cannot create or re-open a payment."
                   }
-                }
+                ]
               }
             }
           }

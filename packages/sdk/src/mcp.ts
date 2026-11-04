@@ -66,12 +66,12 @@ const sendAttachments = {
 
 export const MCP_TOOLS: McpToolDef[] = [
   {
-    name: "get_checkout_order", description: "Read an existing Mailery order and show both exact consent statements to the person before payment.",
+    name: "get_checkout_order", description: "Read an existing Mailery order and its payment-page Terms intent. Pending intent is not account acceptance.",
     inputSchema: { type: "object", required: ["orderId"], properties: { orderId: { type: "string" } } }, annotations: { readOnlyHint: true },
   },
   {
-    name: "confirm_checkout_order", description: "Open payment only after the person separately chose both exact statements from get_checkout_order. Never infer either choice from purchase approval, Terms, or an agent prompt. Prefer giving the person the Mailery order URL to select the choices themselves.",
-    inputSchema: { type: "object", required: ["orderId", "language", "requestImmediatePerformance", "acknowledgeWithdrawal", "immediateVersion", "withdrawalVersion", "idempotencyKey"], properties: { orderId: { type: "string" }, language: { type: "string", enum: ["en", "ro"] }, requestImmediatePerformance: { type: "boolean", const: true }, acknowledgeWithdrawal: { type: "boolean", const: true }, immediateVersion: { type: "string" }, withdrawalVersion: { type: "string" }, idempotencyKey: { type: "string" } } },
+    name: "confirm_checkout_order", description: "Continue one order to Stripe with its exact protocol and version. Any required Terms acceptance takes place only on Stripe’s payment page and applies only when payment succeeds. This tool never records acceptance.",
+    inputSchema: {type:"object",required:["orderId","language","checkoutProtocol","checkoutTermsVersion","idempotencyKey"],properties:{orderId:{type:"string"},language:{type:"string",enum:["en","ro"]},checkoutProtocol:{type:"string",const:"stripe-terms-v1"},checkoutTermsVersion:{type:"string"},idempotencyKey:{type:"string"}}},
   },
   {
     name: "get_terms",
@@ -309,7 +309,7 @@ export const MCP_TOOLS: McpToolDef[] = [
   {name:"get_purchase_withdrawal",description:"Read the withdrawal request, email acknowledgement and refund status. A confirmed request is not a settled refund.",annotations:{readOnlyHint:true},inputSchema:{type:"object",required:["requestId"],properties:{requestId:{type:"string"}}}},
   {
     name: "get_checkout_country_policy",
-    description: "First checkout step. Read and show the current country restrictions to the customer before preparing a paid purchase. Signup and free use remain open. Obtain a billing or residence country declaration and retain this policy version for add_wallet_funds.",
+    description: "First checkout step. Read and show the current country restrictions to the customer before preparing a paid purchase. Signup and free use remain open. Obtain both billing country and country of residence declarations and retain this policy version for add_wallet_funds.",
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: {} },
   },
@@ -320,8 +320,8 @@ export const MCP_TOOLS: McpToolDef[] = [
       type: "object",
       required: ["amountCents", "idempotencyKey"],
       properties: {
-        country: { type: "string", description: "Customer-declared ISO 3166-1 alpha-2 billing or residence country. Never infer from IP or nationality." },
-        countryBasis: { type: "string", enum: ["billing", "residence"] },
+        billingCountry: { type: "string", description: "Customer-declared ISO 3166-1 alpha-2 billing country. Never infer it." },
+        residenceCountry: { type: "string", description: "Independently declared ISO 3166-1 alpha-2 country of residence. Never infer it." },
         countryPolicyVersion: { type: "string", description: "Original version from get_checkout_country_policy after showing its restrictions to the customer. Retain it on every retry, even after the current policy changes." },
         amountCents: { type: "integer", minimum: 1000, description: "USD cents to add; at least 1000 ($10.00)." },
         idempotencyKey: { type: "string", description: "Caller-stable key for this top-up attempt." },
@@ -612,8 +612,8 @@ export async function callTool(name: string, rawArgs: Record<string, unknown> | 
       case "get_checkout_order":
         return textResult(await client.getCheckoutOrder(arg<string>(args, "orderId")));
       case "confirm_checkout_order": {
-        if (args.requestImmediatePerformance !== true || args.acknowledgeWithdrawal !== true || !["en", "ro"].includes(String(args.language))) return textResult({ code: "checkout_consent_required", message: "Both separate explicit choices and a supported language are required." }, true);
-        return textResult({ url: await client.confirmCheckoutOrder(arg<string>(args, "orderId"), { language: args.language as "en" | "ro", requestImmediatePerformance: true, acknowledgeWithdrawal: true, immediateVersion: arg<string>(args, "immediateVersion"), withdrawalVersion: arg<string>(args, "withdrawalVersion"), idempotencyKey: arg<string>(args, "idempotencyKey") }) });
+        if(args.checkoutProtocol!=="stripe-terms-v1" || !/^[a-f0-9]{64}$/.test(String(args.checkoutTermsVersion)) || !["en","ro"].includes(String(args.language)) || ["requestImmediatePerformance","acknowledgeWithdrawal","immediateVersion","withdrawalVersion","acceptedTerms"].some(k=>Object.hasOwn(args,k))) return textResult({code:"checkout_protocol_required",message:"Read the current order protocol and version before continuing to Stripe."},true);
+        return textResult({url:await client.confirmCheckoutOrder(arg<string>(args,"orderId"),{language:args.language as "en"|"ro",checkoutProtocol:"stripe-terms-v1",checkoutTermsVersion:arg<string>(args,"checkoutTermsVersion"),idempotencyKey:arg<string>(args,"idempotencyKey")})});
       }
       case "get_billing_status":
         return textResult(await client.getBillingStatus());
@@ -638,7 +638,7 @@ export async function callTool(name: string, rawArgs: Record<string, unknown> | 
           return textResult({ code: "bad_request", message: "amountCents must be an integer of at least 1000 ($10.00)" }, true);
         }
         if (!idempotencyKey) return textResult({ code: "bad_request", message: "idempotencyKey is required" }, true);
-        return textResult(await client.topUpWallet({ amountCents, idempotencyKey, country: arg<string>(args, "country"), countryBasis: arg<"billing" | "residence">(args, "countryBasis"), countryPolicyVersion: arg<string>(args, "countryPolicyVersion") }));
+        return textResult(await client.topUpWallet({ amountCents, idempotencyKey, billingCountry: arg<string>(args, "billingCountry"), residenceCountry: arg<string>(args, "residenceCountry"), countryPolicyVersion: arg<string>(args, "countryPolicyVersion") }));
       }
       case "create_webhook": {
         const url = arg<string>(args, "url");
